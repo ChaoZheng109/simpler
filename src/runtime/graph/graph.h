@@ -22,6 +22,7 @@
 #include <stdint.h>
 #include <stdio.h>  // for fprintf, printf
 #include <string.h> // for memset
+#include <atomic>
 
 // Forward declaration
 class DeviceRunner;
@@ -126,7 +127,7 @@ typedef struct {
   int core_type;                // 0=AIC, 1=AIV
 
   // Dependency tracking (using PTO runtime terminology)
-  int fanin;                    // Number of predecessors (dependencies)
+  std::atomic<int> fanin;       // Number of predecessors (dependencies)
   int fanout[GRAPH_MAX_FANOUT]; // Successor task IDs
   int fanout_count;             // Number of successors
 

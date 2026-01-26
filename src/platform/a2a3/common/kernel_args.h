@@ -37,6 +37,8 @@ extern "C" {
  * - unused[5]: Padding for alignment with CANN runtime expectations
  * - deviceArgs: Written by host, read by AICPU (contains aicpuSoBin/aicpuSoLen)
  * - block_dim: Written by host, read by AICPU (number of blocks, each block = 1 AIC + 2 AIV)
+ * - nrAic: Written by host, read by AICPU (number of AIC cores)
+ * - scheCpuNum: Written by host, read by AICPU (number of AICPU scheduling threads)
  * - graphArgs: Written by host, read by AICPU (task graph, includes handshake buffers)
  *
  * Note: AICore kernels receive Graph* directly, not KernelArgs
@@ -48,6 +50,8 @@ struct KernelArgs {
     uint64_t *deviceArgs{nullptr};    // Device arguments (AICPU reads, contains SO info)
     uint64_t *runtime{nullptr};       // Runtime context (AICPU reads)
     uint64_t block_dim;               // Number of blocks (1 block = 1 AIC + 2 AIV)
+    uint32_t nrAic;                   // Number of AIC cores
+    uint32_t scheCpuNum;              // Number of AICPU scheduling threads
     Graph *graphArgs{nullptr};        // Task graph in device memory
 };
 

@@ -12,9 +12,20 @@
 // =============================================================================
 
 Graph::Graph() {
-    // Zero-initialize all arrays
-    memset(tasks, 0, sizeof(tasks));
-    memset(workers, 0, sizeof(workers));
+    // Initialize task array (cannot use memset with atomic members)
+    for (int i = 0; i < GRAPH_MAX_TASKS; i++) {
+        tasks[i].task_id = 0;
+        tasks[i].func_id = 0;
+        tasks[i].num_args = 0;
+        tasks[i].functionBinAddr = 0;
+        tasks[i].core_type = 0;
+        tasks[i].fanin = 0;
+        tasks[i].fanout_count = 0;
+        tasks[i].start_time = 0;
+        tasks[i].end_time = 0;
+        memset(tasks[i].args, 0, sizeof(tasks[i].args));
+        memset(tasks[i].fanout, 0, sizeof(tasks[i].fanout));
+    }
     next_task_id = 0;
     initial_ready_count = 0;
     worker_count = 0;
@@ -128,7 +139,7 @@ void Graph::print_graph() const {
     printf("  ");
     int ready_count = 0;
     for (int i = 0; i < next_task_id; i++) {
-        if (tasks[i].fanin == 0) {
+        if (tasks[i].fanin.load() == 0) {
             if (ready_count > 0) printf(", ");
             printf("%d", i);
             ready_count++;
@@ -146,7 +157,7 @@ void Graph::print_graph() const {
         const Task* t = &tasks[i];
 
         printf("  Task %d: func_id=%d, fanin=%d, fanout=%d, args=%d [",
-               i, t->func_id, t->fanin, t->fanout_count, t->num_args);
+               i, t->func_id, t->fanin.load(), t->fanout_count, t->num_args);
 
         // Print fanout list
         for (int j = 0; j < t->fanout_count; j++) {

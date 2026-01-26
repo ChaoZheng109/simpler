@@ -77,7 +77,7 @@ class RuntimeLibraryLoader:
                                                c_char_p]
         self.lib.DeviceRunner_Init.restype = c_int
 
-        self.lib.DeviceRunner_Run.argtypes = [c_void_p, c_int, c_int]
+        self.lib.DeviceRunner_Run.argtypes = [c_void_p, c_int, c_int, c_int, c_int]
         self.lib.DeviceRunner_Run.restype = c_int
 
         self.lib.DeviceRunner_PrintHandshakeResults.argtypes = [c_void_p]
@@ -294,7 +294,7 @@ def load_runtime(lib_path: Union[str, Path, bytes]) -> tuple:
         DeviceRunner, Graph = load_runtime(host_binary)
 
         runner = DeviceRunner()
-        runner.init(device_id=0, aicpu_binary=aicpu_bytes, aicore_binary=aicore_bytes, pto_isa_root="/path/to/pto-isa")
+        runner.init(device_id=0, aicpu_thread_num=1, blockdim_per_thread=1, aicpu_binary=aicpu_bytes, aicore_binary=aicore_bytes, pto_isa_root="/path/to/pto-isa")
 
         graph = Graph()
         graph.initialize()
