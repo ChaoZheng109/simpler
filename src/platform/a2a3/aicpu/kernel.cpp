@@ -1,11 +1,11 @@
 #include <cstdint>
 #include <cstdio>
 #include "device_log.h"
-#include "graph.h"
+#include "runtime.h"
 #include "kernel_args.h"
 
-// Forward declaration of AicpuExecute (implemented in graphexecutor.cpp)
-extern "C" int AicpuExecute(void* arg);
+// Forward declaration of AicpuExecute (implemented in runtimeexecutor.cpp)
+extern "C" int AicpuExecute(void* arg);  // arg is Runtime*
 
 extern "C" __attribute__((visibility("default"))) int StaticTileFwkBackendKernelServer(void *arg) {
     if (arg == nullptr) {
@@ -34,22 +34,19 @@ extern "C" __attribute__((visibility("default"))) int DynTileFwkBackendKernelSer
         return -1;
     }
 
-    DEV_INFO("%s", "Graph Executor Init: Initializing AICPU kernel");
+    DEV_INFO("%s", "Runtime Executor Init: Initializing AICPU kernel");
     return 0;
 }
 
 /**
  * AICPU kernel main execution entry point
  *
- * This is the main entry point for the AICPU graph executor kernel.
- * It delegates to AicpuExecute which is implemented in graphexecutor.cpp.
+ * This is the main entry point for the AICPU runtime executor kernel.
+ * It extracts the Runtime from KernelArgs and delegates to AicpuExecute.
  *
  * Note: Function name is hardcoded in libaicpu_extend_kernels.so
  *
- * @param arg Pointer to KernelArgs structure containing:
- *            - deviceArgs: device-specific arguments
- *            - block_dim: number of blocks (1 block = 1 AIC + 2 AIV)
- *            - graphArgs: task graph to execute (includes handshake buffers in workers[])
+ * @param arg Pointer to KernelArgs structure containing runtimeArgs
  * @return 0 on success, non-zero on error
  */
 extern "C" __attribute__((visibility("default"))) int DynTileFwkBackendKernelServer(void *arg) {
@@ -58,13 +55,22 @@ extern "C" __attribute__((visibility("default"))) int DynTileFwkBackendKernelSer
         return -1;
     }
 
-    DEV_INFO("%s", "DynTileFwkBackendKernelServer: Calling AicpuExecute");
-    int rc = AicpuExecute(arg);
+    // Extract Runtime from KernelArgs
+    auto kargs = (KernelArgs *)arg;
+    Runtime* runtime = kargs->runtimeArgs;
+
+    if (runtime == nullptr) {
+        DEV_ERROR("%s", "Invalid runtimeArgs: null pointer");
+        return -1;
+    }
+
+    DEV_INFO("%s", "DynTileFwkBackendKernelServer: Calling AicpuExecute with Runtime");
+    int rc = AicpuExecute(runtime);  // Pass Runtime* instead of KernelArgs*
     if (rc != 0) {
         DEV_ERROR("DynTileFwkBackendKernelServer: AicpuExecute failed with rc=%d", rc);
         return rc;
     }
     DEV_INFO("%s", "DynTileFwkBackendKernelServer: AicpuExecute completed successfully");
-    
+
     return rc;
 }

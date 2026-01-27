@@ -23,8 +23,9 @@
 #include "memoryallocator.h"
 #include "function_cache.h"
 
-// Forward declarations
-class Graph;
+// Forward declaration for method parameters
+// Full definition included in devicerunner.cpp
+class Runtime;
 
 /**
  * DeviceArgs structure for AICPU device arguments
@@ -71,16 +72,16 @@ struct KernelArgsHelper {
     int FinalizeDeviceArgs();
 
     /**
-     * Initialize graph arguments by allocating device memory and copying data
+     * Initialize runtime arguments by allocating device memory and copying data
      *
-     * @param hostGraph  Host-side graph to copy to device
-     * @param allocator  Memory allocator to use
+     * @param hostRuntime  Host-side runtime to copy to device
+     * @param allocator    Memory allocator to use
      * @return 0 on success, error code on failure
      */
-    int InitGraphArgs(const Graph& hostGraph, MemoryAllocator& allocator);
+    int InitGraphArgs(const Runtime& hostRuntime, MemoryAllocator& allocator);
 
     /**
-     * Free device memory allocated for graph arguments
+     * Free device memory allocated for runtime arguments
      *
      * @return 0 on success, error code on failure
      */
@@ -198,33 +199,33 @@ public:
     int CopyFromDevice(void* hostPtr, const void* devPtr, size_t bytes);
 
     /**
-     * Execute a graph
+     * Execute a runtime
      *
      * This method:
-     * 1. Initializes worker handshake buffers in the graph based on blockDim
-     * 2. Transfers graph to device memory
+     * 1. Initializes worker handshake buffers in the runtime based on blockDim
+     * 2. Transfers runtime to device memory
      * 3. Launches AICPU init kernel
      * 4. Launches AICPU main kernel
      * 5. Launches AICore kernel
      * 6. Synchronizes streams
-     * 7. Cleans up graph memory
+     * 7. Cleans up runtime memory
      *
-     * @param graph          Graph to execute (will be modified to initialize workers)
+     * @param runtime         Runtime to execute (will be modified to initialize workers)
      * @param blockDim        Number of blocks (1 block = 1 AIC + 2 AIV)
      * @param launchAicpuNum Number of AICPU instances (default: 1)
      * @return 0 on success, error code on failure
      */
-    int Run(Graph& graph, int blockDim, int launchAicpuNum = 1);
+    int Run(Runtime& runtime, int blockDim, int launchAicpuNum = 1);
 
     /**
      * Print handshake results from device
      *
      * Copies handshake buffers from device and prints their status.
-     * Must be called after Run() with the same graph.
+     * Must be called after Run() with the same runtime.
      *
-     * @param graph  The graph whose handshake results should be printed
+     * @param runtime  The runtime whose handshake results should be printed
      */
-    void PrintHandshakeResults(Graph& graph);
+    void PrintHandshakeResults(Runtime& runtime);
 
     /**
      * Cleanup all resources
@@ -254,11 +255,11 @@ public:
      *
      * Internal method used by Run(). Can be called directly for custom workflows.
      *
-     * @param stream  AICore stream
-     * @param graph   Pointer to device graph
+     * @param stream   AICore stream
+     * @param runtime  Pointer to device runtime
      * @return 0 on success, error code on failure
      */
-    int LaunchAicoreKernel(rtStream_t stream, Graph *graph);
+    int LaunchAicoreKernel(rtStream_t stream, Runtime *runtime);
 
     /**
      * Register a kernel binary path for a func_id

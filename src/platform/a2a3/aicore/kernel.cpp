@@ -3,7 +3,7 @@
 */
 
 #include <cstdint>
-#include "graph.h"
+#include "runtime.h"
 
 #ifndef __gm__
 #define __gm__
@@ -93,9 +93,9 @@ __aicore__ __attribute__((always_inline)) static void execute_task(__gm__ Task* 
 *
 * Each core (AIC or AIV) gets its own handshake buffer indexed by blockIdx.
 *
-* @param graph Address of Graph structure in device memory
+* @param runtime Address of Runtime structure in device memory
 */
-extern "C" __global__ __aicore__ void KERNEL_ENTRY(aicore_kernel)(__gm__ Graph* graph) {
+extern "C" __global__ __aicore__ void KERNEL_ENTRY(aicore_kernel)(__gm__ Runtime* runtime) {
     // Calculate blockIdx for this core
 #ifdef __AIV__
     blockIdx = get_block_idx() * get_subblockdim() + get_subblockid() + get_block_num();
@@ -103,7 +103,7 @@ extern "C" __global__ __aicore__ void KERNEL_ENTRY(aicore_kernel)(__gm__ Graph* 
     blockIdx = get_block_idx();
 #endif
 
-    __gm__ Handshake* my_hank = (__gm__ Handshake *)(&graph->workers[blockIdx]);
+    __gm__ Handshake* my_hank = (__gm__ Handshake *)(&runtime->workers[blockIdx]);
 
     // Phase 1: Wait for AICPU initialization signal
     while (my_hank->aicpu_ready == 0) {
