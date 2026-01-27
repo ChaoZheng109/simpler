@@ -23,7 +23,8 @@
 #include "memoryallocator.h"
 #include "function_cache.h"
 
-// Forward declarations
+// Forward declaration for method parameters
+// Full definition included in devicerunner.cpp
 class Graph;
 
 /**

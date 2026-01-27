@@ -156,6 +156,10 @@ public:
   Handshake workers[GRAPH_MAX_WORKER];  // Worker (AICore) handshake buffers
   int worker_count;                      // Number of active workers
 
+  // Execution parameters (previously in KernelArgs)
+  int block_dim{1};                      // Number of blocks (1 block = 1 AIC + 2 AIV)
+  int scheCpuNum{1};                     // Number of AICPU scheduling threads
+
 private:
   // Task storage
   Task tasks[GRAPH_MAX_TASKS]; // Fixed-size task array

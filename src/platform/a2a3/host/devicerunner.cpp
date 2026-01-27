@@ -246,12 +246,12 @@ int DeviceRunner::Run(Graph& graph, int blockDim, int launchAicpuNum) {
         return -1;
     }
 
+    // Set execution parameters on graph
+    graph.block_dim = blockDim;
+    graph.scheCpuNum = launchAicpuNum;
+
     // Calculate execution parameters
     blockDim_ = blockDim;
-
-    // Set kernel args
-    kernelArgs_.args.nrAic = blockDim;
-    kernelArgs_.args.scheCpuNum = launchAicpuNum;
 
     int numAiCore = blockDim * coresPerBlockdim_;
     // Initialize handshake buffers in graph
@@ -274,8 +274,6 @@ int DeviceRunner::Run(Graph& graph, int blockDim, int launchAicpuNum) {
         // Set core type: first 1/3 are AIC (0), remaining 2/3 are AIV (1)
         graph.workers[i].core_type = (i < numAic) ? 0 : 1;
     }
-
-    kernelArgs_.args.block_dim = blockDim;
 
     // Set functionBinAddr for all tasks (NEW - Runtime function pointer dispatch)
     std::cout << "\n=== Setting functionBinAddr for Tasks ===" << '\n';

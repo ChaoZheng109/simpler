@@ -60,10 +60,19 @@ int GraphExecutor::Init(KernelArgs* kargs) {
 
     DEV_INFO("GraphExecutor: Initializing");
 
-    thread_num_ = kargs->scheCpuNum;
+    // Get graph reference (contains execution parameters)
+    Graph* g = kargs->graphArgs;
+    if (g == nullptr) {
+        DEV_ERROR("graphArgs is nullptr");
+        init_failed_.store(true, std::memory_order_release);
+        return -1;
+    }
+
+    // Read execution parameters from graph instead of kargs
+    thread_num_ = g->scheCpuNum;
     if (thread_num_ == 0) thread_num_ = 1;
 
-    total_cores_ = kargs->block_dim * coresPerBlockdim_;
+    total_cores_ = g->block_dim * coresPerBlockdim_;
     cores_per_thread_ = total_cores_ / thread_num_;
 
     DEV_INFO("Config: threads=%d, cores=%d, cores_per_thread=%d",
@@ -84,19 +93,19 @@ int GraphExecutor::Init(KernelArgs* kargs) {
     // Pre-compute core assignments for each thread
     // Each thread manages blocks_per_thread blocks
     // For each block b: AIC is core b, AIVs are cores (nrAic + b*2) and (nrAic + b*2 + 1)
-    int num_aic = kargs->nrAic;  // Total AIC cores (= block_dim)
-    int blocks_per_thread = kargs->block_dim / thread_num_;
+    int num_aic = g->block_dim;  // Total AIC cores (= block_dim)
+    int blocks_per_thread = g->block_dim / thread_num_;
 
     // Validate block distribution
-    if (kargs->block_dim % thread_num_ != 0) {
+    if (g->block_dim % thread_num_ != 0) {
         DEV_ERROR("block_dim (%d) must be divisible by thread_num (%d)",
-                  kargs->block_dim, thread_num_);
+                  g->block_dim, thread_num_);
         init_failed_.store(true, std::memory_order_release);
         return -1;
     }
 
     DEV_INFO("Block assignment: %d blocks, %d threads, %d blocks per thread",
-             kargs->block_dim, thread_num_, blocks_per_thread);
+             g->block_dim, thread_num_, blocks_per_thread);
 
     for (int t = 0; t < thread_num_; t++) {
         int start_block = t * blocks_per_thread;
@@ -122,34 +131,30 @@ int GraphExecutor::Init(KernelArgs* kargs) {
     }
 
     // Initialize graph execution state
-    if (kargs->graphArgs != nullptr) {
-        Graph* g = kargs->graphArgs;
+    total_tasks_.store(g->get_task_count(), std::memory_order_release);
+    completed_tasks_.store(0, std::memory_order_release);
 
-        total_tasks_.store(g->get_task_count(), std::memory_order_release);
-        completed_tasks_.store(0, std::memory_order_release);
+    int initial_ready[GRAPH_MAX_TASKS];
+    int initial_count = g->get_initial_ready_tasks(initial_ready);
 
-        int initial_ready[GRAPH_MAX_TASKS];
-        int initial_count = g->get_initial_ready_tasks(initial_ready);
+    DEV_INFO("Init: Found %d initially ready tasks", initial_count);
 
-        DEV_INFO("Init: Found %d initially ready tasks", initial_count);
-
-        int aic_count = 0;
-        int aiv_count = 0;
-        for (int i = 0; i < initial_count; i++) {
-            Task* task = g->get_task(initial_ready[i]);
-            if (task->core_type == 0) {  // AIC
-                ready_queue_aic_[aic_count++] = initial_ready[i];
-            } else {  // AIV
-                ready_queue_aiv_[aiv_count++] = initial_ready[i];
-            }
+    int aic_count = 0;
+    int aiv_count = 0;
+    for (int i = 0; i < initial_count; i++) {
+        Task* task = g->get_task(initial_ready[i]);
+        if (task->core_type == 0) {  // AIC
+            ready_queue_aic_[aic_count++] = initial_ready[i];
+        } else {  // AIV
+            ready_queue_aiv_[aiv_count++] = initial_ready[i];
         }
-        ready_count_aic_.store(aic_count, std::memory_order_release);
-        ready_count_aiv_.store(aiv_count, std::memory_order_release);
-
-        DEV_INFO("Init: Initial ready tasks: AIC=%d, AIV=%d", aic_count, aiv_count);
-
-        finished_count_.store(0, std::memory_order_release);
     }
+    ready_count_aic_.store(aic_count, std::memory_order_release);
+    ready_count_aiv_.store(aiv_count, std::memory_order_release);
+
+    DEV_INFO("Init: Initial ready tasks: AIC=%d, AIV=%d", aic_count, aiv_count);
+
+    finished_count_.store(0, std::memory_order_release);
 
     init_done_.store(true, std::memory_order_release);
     DEV_INFO("GraphExecutor: Init complete");
