@@ -75,26 +75,50 @@ int GraphExecutor::Init(KernelArgs* kargs) {
         return -1;
     }
 
-    if (cores_per_thread_ > MAX_CORES_PER_THREAD) {
-        DEV_ERROR("Cores per thread %d exceeds maximum %d", cores_per_thread_, MAX_CORES_PER_THREAD);
+    if (total_cores_ > MAX_CORES_PER_THREAD) {
+        DEV_ERROR("Total cores %d exceeds maximum %d", total_cores_, MAX_CORES_PER_THREAD);
         init_failed_.store(true, std::memory_order_release);
         return -1;
     }
 
     // Pre-compute core assignments for each thread
-    int num_aic = kargs->nrAic;
+    // Each thread manages blocks_per_thread blocks
+    // For each block b: AIC is core b, AIVs are cores (nrAic + b*2) and (nrAic + b*2 + 1)
+    int num_aic = kargs->nrAic;  // Total AIC cores (= block_dim)
+    int blocks_per_thread = kargs->block_dim / thread_num_;
+
+    // Validate block distribution
+    if (kargs->block_dim % thread_num_ != 0) {
+        DEV_ERROR("block_dim (%d) must be divisible by thread_num (%d)",
+                  kargs->block_dim, thread_num_);
+        init_failed_.store(true, std::memory_order_release);
+        return -1;
+    }
+
+    DEV_INFO("Block assignment: %d blocks, %d threads, %d blocks per thread",
+             kargs->block_dim, thread_num_, blocks_per_thread);
+
     for (int t = 0; t < thread_num_; t++) {
-        // Each thread manages: 1 AIC + 2 AIV
-        int aic_idx = t;
-        int aiv_base = num_aic;
-        int aiv_idx0 = aiv_base + t * 2;
-        int aiv_idx1 = aiv_idx0 + 1;
+        int start_block = t * blocks_per_thread;
+        int end_block = (t + 1) * blocks_per_thread;
+        int core_idx = 0;
 
-        core_assignments_[t][0] = aic_idx;
-        core_assignments_[t][1] = aiv_idx0;
-        core_assignments_[t][2] = aiv_idx1;
+        // Assign AIC cores for all blocks managed by this thread
+        for (int b = start_block; b < end_block; b++) {
+            core_assignments_[t][core_idx++] = b;  // AIC core ID = block ID
+        }
 
-        DEV_INFO("Thread %d: AIC[%d] AIV[%d,%d]", t, aic_idx, aiv_idx0, aiv_idx1);
+        // Assign AIV cores for all blocks managed by this thread
+        for (int b = start_block; b < end_block; b++) {
+            int aiv_base = num_aic;  // AIV cores start after all AIC cores
+            core_assignments_[t][core_idx++] = aiv_base + b * 2;      // First AIV of block b
+            core_assignments_[t][core_idx++] = aiv_base + b * 2 + 1;  // Second AIV of block b
+        }
+
+        DEV_INFO("Thread %d: manages blockDims [%d-%d], cores: AIC[%d-%d] AIV[%d-%d]",
+                 t, start_block, end_block - 1,
+                 start_block, end_block - 1,
+                 num_aic + start_block * 2, num_aic + (end_block - 1) * 2 + 1);
     }
 
     // Initialize graph execution state

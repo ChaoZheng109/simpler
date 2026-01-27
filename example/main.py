@@ -137,7 +137,7 @@ def main():
     # Execute graph on device
     # Python now controls when the graph is executed
     print("\n=== Executing Graph on Device ===")
-    runner.run(graph, block_dim=1, launch_aicpu_num=1)
+    runner.run(graph, block_dim=6, launch_aicpu_num=3)
 
     # Validate results and cleanup
     # C++ handles: copy results from device, validate, free tensors, delete graph
