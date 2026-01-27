@@ -1,19 +1,19 @@
 /**
- * Graph Class - Implementation
+ * Runtime Class - Implementation
  *
  * Task dependency graph management with circular ready queue.
  * Follows patterns from pto_runtime.c for consistency.
  */
 
-#include "graph.h"
+#include "runtime.h"
 
 // =============================================================================
 // Constructor
 // =============================================================================
 
-Graph::Graph() {
+Runtime::Runtime() {
     // Initialize task array (cannot use memset with atomic members)
-    for (int i = 0; i < GRAPH_MAX_TASKS; i++) {
+    for (int i = 0; i < RUNTIME_MAX_TASKS; i++) {
         tasks[i].task_id = 0;
         tasks[i].func_id = 0;
         tasks[i].num_args = 0;
@@ -35,16 +35,16 @@ Graph::Graph() {
 // Task Management
 // =============================================================================
 
-int Graph::add_task(uint64_t* args, int num_args, int func_id, int core_type) {
+int Runtime::add_task(uint64_t* args, int num_args, int func_id, int core_type) {
     // Check bounds
-    if (next_task_id >= GRAPH_MAX_TASKS) {
-        fprintf(stderr, "[Graph] ERROR: Task table full (max=%d)\n", GRAPH_MAX_TASKS);
+    if (next_task_id >= RUNTIME_MAX_TASKS) {
+        fprintf(stderr, "[Runtime] ERROR: Task table full (max=%d)\n", RUNTIME_MAX_TASKS);
         return -1;
     }
 
-    if (num_args > GRAPH_MAX_ARGS) {
-        fprintf(stderr, "[Graph] ERROR: Too many args (%d > %d)\n",
-                num_args, GRAPH_MAX_ARGS);
+    if (num_args > RUNTIME_MAX_ARGS) {
+        fprintf(stderr, "[Runtime] ERROR: Too many args (%d > %d)\n",
+                num_args, RUNTIME_MAX_ARGS);
         return -1;
     }
 
@@ -68,15 +68,15 @@ int Graph::add_task(uint64_t* args, int num_args, int func_id, int core_type) {
     return task_id;
 }
 
-void Graph::add_successor(int from_task, int to_task) {
+void Runtime::add_successor(int from_task, int to_task) {
     // Validate task IDs
     if (from_task < 0 || from_task >= next_task_id) {
-        fprintf(stderr, "[Graph] ERROR: Invalid from_task ID %d\n", from_task);
+        fprintf(stderr, "[Runtime] ERROR: Invalid from_task ID %d\n", from_task);
         return;
     }
 
     if (to_task < 0 || to_task >= next_task_id) {
-        fprintf(stderr, "[Graph] ERROR: Invalid to_task ID %d\n", to_task);
+        fprintf(stderr, "[Runtime] ERROR: Invalid to_task ID %d\n", to_task);
         return;
     }
 
@@ -84,9 +84,9 @@ void Graph::add_successor(int from_task, int to_task) {
     Task* to = &tasks[to_task];
 
     // Add to_task to from_task's fanout
-    if (from->fanout_count >= GRAPH_MAX_FANOUT) {
-        fprintf(stderr, "[Graph] ERROR: Fanout overflow for task %d (max=%d)\n",
-                from_task, GRAPH_MAX_FANOUT);
+    if (from->fanout_count >= RUNTIME_MAX_FANOUT) {
+        fprintf(stderr, "[Runtime] ERROR: Fanout overflow for task %d (max=%d)\n",
+                from_task, RUNTIME_MAX_FANOUT);
         return;
     }
 
@@ -98,18 +98,18 @@ void Graph::add_successor(int from_task, int to_task) {
 // Query Methods
 // =============================================================================
 
-Task* Graph::get_task(int task_id) {
+Task* Runtime::get_task(int task_id) {
     if (task_id < 0 || task_id >= next_task_id) {
         return nullptr;
     }
     return &tasks[task_id];
 }
 
-int Graph::get_task_count() const {
+int Runtime::get_task_count() const {
     return next_task_id;
 }
 
-int Graph::get_initial_ready_tasks(int* ready_tasks) {
+int Runtime::get_initial_ready_tasks(int* ready_tasks) {
     initial_ready_count = 0;
     for (int i = 0; i < next_task_id; i++) {
         if (tasks[i].fanin == 0) {
@@ -127,9 +127,9 @@ int Graph::get_initial_ready_tasks(int* ready_tasks) {
 // Utility Methods
 // =============================================================================
 
-void Graph::print_graph() const {
+void Runtime::print_runtime() const {
     printf("\n================================================================================\n");
-    printf("[Graph] Task Graph Status\n");
+    printf("[Runtime] Task Runtime Status\n");
     printf("================================================================================\n");
     printf("  Total tasks: %d\n", next_task_id);
 

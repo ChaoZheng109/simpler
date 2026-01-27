@@ -1,11 +1,11 @@
 #include <cstdint>
 #include <cstdio>
 #include "device_log.h"
-#include "graph.h"
+#include "runtime.h"
 #include "kernel_args.h"
 
-// Forward declaration of AicpuExecute (implemented in graphexecutor.cpp)
-extern "C" int AicpuExecute(void* arg);  // arg is Graph*
+// Forward declaration of AicpuExecute (implemented in runtimeexecutor.cpp)
+extern "C" int AicpuExecute(void* arg);  // arg is Runtime*
 
 extern "C" __attribute__((visibility("default"))) int StaticTileFwkBackendKernelServer(void *arg) {
     if (arg == nullptr) {
@@ -34,19 +34,19 @@ extern "C" __attribute__((visibility("default"))) int DynTileFwkBackendKernelSer
         return -1;
     }
 
-    DEV_INFO("%s", "Graph Executor Init: Initializing AICPU kernel");
+    DEV_INFO("%s", "Runtime Executor Init: Initializing AICPU kernel");
     return 0;
 }
 
 /**
  * AICPU kernel main execution entry point
  *
- * This is the main entry point for the AICPU graph executor kernel.
- * It extracts the Graph from KernelArgs and delegates to AicpuExecute.
+ * This is the main entry point for the AICPU runtime executor kernel.
+ * It extracts the Runtime from KernelArgs and delegates to AicpuExecute.
  *
  * Note: Function name is hardcoded in libaicpu_extend_kernels.so
  *
- * @param arg Pointer to KernelArgs structure containing graphArgs
+ * @param arg Pointer to KernelArgs structure containing runtimeArgs
  * @return 0 on success, non-zero on error
  */
 extern "C" __attribute__((visibility("default"))) int DynTileFwkBackendKernelServer(void *arg) {
@@ -55,17 +55,17 @@ extern "C" __attribute__((visibility("default"))) int DynTileFwkBackendKernelSer
         return -1;
     }
 
-    // Extract Graph from KernelArgs
+    // Extract Runtime from KernelArgs
     auto kargs = (KernelArgs *)arg;
-    Graph* graph = kargs->graphArgs;
+    Runtime* runtime = kargs->runtimeArgs;
 
-    if (graph == nullptr) {
-        DEV_ERROR("%s", "Invalid graphArgs: null pointer");
+    if (runtime == nullptr) {
+        DEV_ERROR("%s", "Invalid runtimeArgs: null pointer");
         return -1;
     }
 
-    DEV_INFO("%s", "DynTileFwkBackendKernelServer: Calling AicpuExecute with Graph");
-    int rc = AicpuExecute(graph);  // Pass Graph* instead of KernelArgs*
+    DEV_INFO("%s", "DynTileFwkBackendKernelServer: Calling AicpuExecute with Runtime");
+    int rc = AicpuExecute(runtime);  // Pass Runtime* instead of KernelArgs*
     if (rc != 0) {
         DEV_ERROR("DynTileFwkBackendKernelServer: AicpuExecute failed with rc=%d", rc);
         return rc;

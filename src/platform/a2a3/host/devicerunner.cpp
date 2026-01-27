@@ -8,7 +8,7 @@
 #include "devicerunner.h"
 #include "binary_loader.h"
 #include "kernel_compiler.h"
-#include "graph.h"
+#include "runtime.h"
 #include <cstring>
 #include <fstream>
 #include <iostream>
@@ -52,32 +52,32 @@ int KernelArgsHelper::FinalizeDeviceArgs() {
     return 0;
 }
 
-int KernelArgsHelper::InitGraphArgs(const Graph& hostGraph, MemoryAllocator& allocator) {
+int KernelArgsHelper::InitGraphArgs(const Runtime& hostRuntime, MemoryAllocator& allocator) {
     allocator_ = &allocator;
 
-    if (args.graphArgs == nullptr) {
-        uint64_t graphSize = sizeof(Graph);
-        void* graphDev = allocator_->Alloc(graphSize);
-        if (graphDev == nullptr) {
-            std::cerr << "Error: Alloc for graphArgs failed\n";
+    if (args.runtimeArgs == nullptr) {
+        uint64_t runtimeSize = sizeof(Runtime);
+        void* runtimeDev = allocator_->Alloc(runtimeSize);
+        if (runtimeDev == nullptr) {
+            std::cerr << "Error: Alloc for runtimeArgs failed\n";
             return -1;
         }
-        args.graphArgs = reinterpret_cast<Graph*>(graphDev);
+        args.runtimeArgs = reinterpret_cast<Runtime*>(runtimeDev);
     }
-    int rc = rtMemcpy(args.graphArgs, sizeof(Graph), &hostGraph, sizeof(Graph), RT_MEMCPY_HOST_TO_DEVICE);
+    int rc = rtMemcpy(args.runtimeArgs, sizeof(Runtime), &hostRuntime, sizeof(Runtime), RT_MEMCPY_HOST_TO_DEVICE);
     if (rc != 0) {
-        std::cerr << "Error: rtMemcpy for graph failed: " << rc << '\n';
-        allocator_->Free(args.graphArgs);
-        args.graphArgs = nullptr;
+        std::cerr << "Error: rtMemcpy for runtime failed: " << rc << '\n';
+        allocator_->Free(args.runtimeArgs);
+        args.runtimeArgs = nullptr;
         return rc;
     }
     return 0;
 }
 
 int KernelArgsHelper::FinalizeGraphArgs() {
-    if (args.graphArgs != nullptr && allocator_ != nullptr) {
-        int rc = allocator_->Free(args.graphArgs);
-        args.graphArgs = nullptr;
+    if (args.runtimeArgs != nullptr && allocator_ != nullptr) {
+        int rc = allocator_->Free(args.runtimeArgs);
+        args.runtimeArgs = nullptr;
         return rc;
     }
     return 0;
@@ -240,45 +240,45 @@ int DeviceRunner::CopyFromDevice(void* hostPtr, const void* devPtr, size_t bytes
     return rtMemcpy(hostPtr, bytes, devPtr, bytes, RT_MEMCPY_DEVICE_TO_HOST);
 }
 
-int DeviceRunner::Run(Graph& graph, int blockDim, int launchAicpuNum) {
+int DeviceRunner::Run(Runtime& runtime, int blockDim, int launchAicpuNum) {
     if (!initialized_) {
         std::cerr << "Error: DeviceRunner not initialized\n";
         return -1;
     }
 
-    // Set execution parameters on graph
-    graph.block_dim = blockDim;
-    graph.scheCpuNum = launchAicpuNum;
+    // Set execution parameters on runtime
+    runtime.block_dim = blockDim;
+    runtime.scheCpuNum = launchAicpuNum;
 
     // Calculate execution parameters
     blockDim_ = blockDim;
 
     int numAiCore = blockDim * coresPerBlockdim_;
-    // Initialize handshake buffers in graph
-    if (numAiCore > GRAPH_MAX_WORKER) {
-        std::cerr << "Error: blockDim (" << blockDim << ") exceeds GRAPH_MAX_WORKER (" << GRAPH_MAX_WORKER << ")\n";
+    // Initialize handshake buffers in runtime
+    if (numAiCore > RUNTIME_MAX_WORKER) {
+        std::cerr << "Error: blockDim (" << blockDim << ") exceeds RUNTIME_MAX_WORKER (" << RUNTIME_MAX_WORKER << ")\n";
         return -1;
     }
 
-    graph.worker_count = numAiCore;
+    runtime.worker_count = numAiCore;
 
     // Calculate number of AIC cores (1/3 of total)
     int numAic = blockDim;  // Round up for 1/3
 
     for (int i = 0; i < numAiCore; i++) {
-        graph.workers[i].aicpu_ready = 0;
-        graph.workers[i].aicore_done = 0;
-        graph.workers[i].control = 0;
-        graph.workers[i].task = 0;
-        graph.workers[i].task_status = 0;
+        runtime.workers[i].aicpu_ready = 0;
+        runtime.workers[i].aicore_done = 0;
+        runtime.workers[i].control = 0;
+        runtime.workers[i].task = 0;
+        runtime.workers[i].task_status = 0;
         // Set core type: first 1/3 are AIC (0), remaining 2/3 are AIV (1)
-        graph.workers[i].core_type = (i < numAic) ? 0 : 1;
+        runtime.workers[i].core_type = (i < numAic) ? 0 : 1;
     }
 
     // Set functionBinAddr for all tasks (NEW - Runtime function pointer dispatch)
     std::cout << "\n=== Setting functionBinAddr for Tasks ===" << '\n';
-    for (int i = 0; i < graph.get_task_count(); i++) {
-        Task* task = graph.get_task(i);
+    for (int i = 0; i < runtime.get_task_count(); i++) {
+        Task* task = runtime.get_task(i);
         if (task != nullptr) {
             uint64_t addr = GetFunctionBinAddr(task->func_id);
             task->functionBinAddr = addr;
@@ -288,8 +288,8 @@ int DeviceRunner::Run(Graph& graph, int blockDim, int launchAicpuNum) {
     }
     std::cout << '\n';
 
-    // Initialize graph args
-    int rc = kernelArgs_.InitGraphArgs(graph, memAlloc_);
+    // Initialize runtime args
+    int rc = kernelArgs_.InitGraphArgs(runtime, memAlloc_);
     if (rc != 0) {
         std::cerr << "Error: InitGraphArgs failed: " << rc << '\n';
         return rc;
@@ -312,7 +312,7 @@ int DeviceRunner::Run(Graph& graph, int blockDim, int launchAicpuNum) {
     }
 
     // Launch AICore kernel
-    rc = LaunchAicoreKernel(streamAicore_, kernelArgs_.args.graphArgs);
+    rc = LaunchAicoreKernel(streamAicore_, kernelArgs_.args.runtimeArgs);
     if (rc != 0) {
         std::cerr << "Error: LaunchAicoreKernel failed: " << rc << '\n';
         kernelArgs_.FinalizeGraphArgs();
@@ -334,26 +334,26 @@ int DeviceRunner::Run(Graph& graph, int blockDim, int launchAicpuNum) {
         return rc;
     }
 
-    // Cleanup graph args
+    // Cleanup runtime args
     kernelArgs_.FinalizeGraphArgs();
 
     return 0;
 }
 
-void DeviceRunner::PrintHandshakeResults(Graph& graph) {
-    if (!initialized_ || graph.worker_count == 0) {
+void DeviceRunner::PrintHandshakeResults(Runtime& runtime) {
+    if (!initialized_ || runtime.worker_count == 0) {
         return;
     }
 
-    size_t total_size = sizeof(Handshake) * graph.worker_count;
-    rtMemcpy(graph.workers, total_size, kernelArgs_.args.graphArgs->workers, total_size, RT_MEMCPY_DEVICE_TO_HOST);
+    size_t total_size = sizeof(Handshake) * runtime.worker_count;
+    rtMemcpy(runtime.workers, total_size, kernelArgs_.args.runtimeArgs->workers, total_size, RT_MEMCPY_DEVICE_TO_HOST);
 
-    std::cout << "Handshake results for " << graph.worker_count << " cores:" << std::endl;
-    for (int i = 0; i < graph.worker_count; i++) {
-        std::cout << "  Core " << i << ": aicore_done=" << graph.workers[i].aicore_done
-                  << " aicpu_ready=" << graph.workers[i].aicpu_ready
-                  << " control=" << graph.workers[i].control
-                  << " task=" << graph.workers[i].task << std::endl;
+    std::cout << "Handshake results for " << runtime.worker_count << " cores:" << std::endl;
+    for (int i = 0; i < runtime.worker_count; i++) {
+        std::cout << "  Core " << i << ": aicore_done=" << runtime.workers[i].aicore_done
+                  << " aicpu_ready=" << runtime.workers[i].aicpu_ready
+                  << " control=" << runtime.workers[i].control
+                  << " task=" << runtime.workers[i].task << std::endl;
     }
 }
 
@@ -421,7 +421,7 @@ int DeviceRunner::LaunchAiCpuKernel(rtStream_t stream, KernelArgs *kArgs, const 
                                          nullptr, stream, 0);
 }
 
-int DeviceRunner::LaunchAicoreKernel(rtStream_t stream, Graph *graph) {
+int DeviceRunner::LaunchAicoreKernel(rtStream_t stream, Runtime *runtime) {
     if (aicoreKernelBinary_.empty()) {
         std::cerr << "Error: AICore kernel binary is empty\n";
         return -1;
@@ -444,10 +444,10 @@ int DeviceRunner::LaunchAicoreKernel(rtStream_t stream, Graph *graph) {
     }
 
     struct Args {
-        Graph* graph;
+        Runtime* runtime;
     };
-    // Pass device address of Graph to AICore
-    Args args = {graph};
+    // Pass device address of Runtime to AICore
+    Args args = {runtime};
     rtArgsEx_t rtArgs;
     std::memset(&rtArgs, 0, sizeof(rtArgs));
     rtArgs.args = &args;

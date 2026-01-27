@@ -1,7 +1,7 @@
 /**
- * Graph Class - Task Dependency Graph Management
+ * Runtime Class - Task Dependency Graph Management
  *
- * This is a simplified, standalone graph class for managing task dependencies.
+ * This is a simplified, standalone runtime class for managing task dependencies.
  * Tasks are stored in a fixed-size array with compile-time configurable bounds.
  * Each task has:
  * - Unique ID (array index)
@@ -9,14 +9,14 @@
  * - Fanin (predecessor count)
  * - Fanout (array of successor task IDs)
  *
- * The graph maintains a ready queue for tasks with fanin == 0.
+ * The runtime maintains a ready queue for tasks with fanin == 0.
  *
  * Based on patterns from pto_runtime.h/c but simplified for educational
  * and lightweight scheduling use cases.
  */
 
-#ifndef GRAPH_H
-#define GRAPH_H
+#ifndef RUNTIME_H
+#define RUNTIME_H
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -31,20 +31,20 @@ class DeviceRunner;
 // Configuration Macros
 // =============================================================================
 
-#ifndef GRAPH_MAX_TASKS
-#define GRAPH_MAX_TASKS 1024
+#ifndef RUNTIME_MAX_TASKS
+#define RUNTIME_MAX_TASKS 1024
 #endif
 
-#ifndef GRAPH_MAX_ARGS
-#define GRAPH_MAX_ARGS 16
+#ifndef RUNTIME_MAX_ARGS
+#define RUNTIME_MAX_ARGS 16
 #endif
 
-#ifndef GRAPH_MAX_FANOUT
-#define GRAPH_MAX_FANOUT 512
+#ifndef RUNTIME_MAX_FANOUT
+#define RUNTIME_MAX_FANOUT 512
 #endif
 
-#ifndef GRAPH_MAX_WORKER
-#define GRAPH_MAX_WORKER 72  // 24 AIC + 48 AIV cores
+#ifndef RUNTIME_MAX_WORKER
+#define RUNTIME_MAX_WORKER 72  // 24 AIC + 48 AIV cores
 #endif
 
 // =============================================================================
@@ -114,7 +114,7 @@ enum class CoreType : int {
 typedef struct {
   int task_id;                   // Unique task identifier
   int func_id;                   // Function identifier
-  uint64_t args[GRAPH_MAX_ARGS]; // Task arguments
+  uint64_t args[RUNTIME_MAX_ARGS]; // Task arguments
   int num_args;                  // Number of valid arguments
 
   // Runtime function pointer address (NEW)
@@ -128,7 +128,7 @@ typedef struct {
 
   // Dependency tracking (using PTO runtime terminology)
   std::atomic<int> fanin;       // Number of predecessors (dependencies)
-  int fanout[GRAPH_MAX_FANOUT]; // Successor task IDs
+  int fanout[RUNTIME_MAX_FANOUT]; // Successor task IDs
   int fanout_count;             // Number of successors
 
   // DFX-specific fields
@@ -137,23 +137,23 @@ typedef struct {
 } Task;
 
 // =============================================================================
-// Graph Class
+// Runtime Class
 // =============================================================================
 
 /**
- * Graph class for task dependency management
+ * Runtime class for task dependency management
  *
  * Maintains a fixed-size array of tasks and uses a Queue for ready tasks.
  * Tasks are allocated monotonically and never reused within the same
- * graph instance.
+ * runtime instance.
  *
  * Dependencies are managed manually via add_successor().
  */
-class Graph {
+class Runtime {
 public:
   // Handshake buffers for AICPU-AICore communication
   // Public to allow DeviceRunner to initialize and access them
-  Handshake workers[GRAPH_MAX_WORKER];  // Worker (AICore) handshake buffers
+  Handshake workers[RUNTIME_MAX_WORKER];  // Worker (AICore) handshake buffers
   int worker_count;                      // Number of active workers
 
   // Execution parameters (previously in KernelArgs)
@@ -162,18 +162,18 @@ public:
 
 private:
   // Task storage
-  Task tasks[GRAPH_MAX_TASKS]; // Fixed-size task array
+  Task tasks[RUNTIME_MAX_TASKS]; // Fixed-size task array
   int next_task_id;            // Next available task ID
 
   // Initial ready tasks (computed once, read-only after)
-  int initial_ready_tasks[GRAPH_MAX_TASKS];
+  int initial_ready_tasks[RUNTIME_MAX_TASKS];
   int initial_ready_count;
 
 public:
   /**
    * Constructor - zero-initialize all arrays
    */
-  Graph();
+  Runtime();
 
   // =========================================================================
   // Task Management
@@ -183,7 +183,7 @@ public:
    * Allocate a new task with the given arguments
    *
    * @param args      Array of uint64_t arguments
-   * @param num_args  Number of arguments (must be <= GRAPH_MAX_ARGS)
+   * @param num_args  Number of arguments (must be <= RUNTIME_MAX_ARGS)
    * @param func_id   Function identifier
    * @param core_type Core type for this task (0=AIC, 1=AIV)
    * @return Task ID (>= 0) on success, -1 on failure
@@ -214,7 +214,7 @@ public:
   Task *get_task(int task_id);
 
   /**
-   * Get the total number of tasks in the graph
+   * Get the total number of tasks in the runtime
    *
    * @return Total task count
    */
@@ -237,11 +237,11 @@ public:
   // =========================================================================
 
   /**
-   * Print the graph structure to stdout
+   * Print the runtime structure to stdout
    *
    * Shows task table with fanin/fanout information.
    */
-  void print_graph() const;
+  void print_runtime() const;
 };
 
-#endif // GRAPH_H
+#endif // RUNTIME_H

@@ -50,10 +50,10 @@ def check_and_build_runtime():
     print("\n[1/3] Compiling AICore kernel...")
     try:
         aicore_include_dirs = [
-            str(runtime_root / "src" / "runtime" / "graph"),
+            str(runtime_root / "src" / "runtime" / "runtime"),
         ]
         aicore_source_dirs = [
-            str(runtime_root / "src" / "runtime" / "graph"),
+            str(runtime_root / "src" / "runtime" / "runtime"),
         ]
         aicore_binary = compiler.compile("aicore", aicore_include_dirs, aicore_source_dirs)
     except Exception as e:
@@ -64,11 +64,11 @@ def check_and_build_runtime():
     print("\n[2/3] Compiling AICPU kernel...")
     try:
         aicpu_include_dirs = [
-            str(runtime_root / "src" / "runtime" / "graph"),
+            str(runtime_root / "src" / "runtime" / "runtime"),
         ]
         aicpu_source_dirs = [
             str(runtime_root / "src" / "runtime" / "aicpu"),
-            str(runtime_root / "src" / "runtime" / "graph"),
+            str(runtime_root / "src" / "runtime" / "runtime"),
         ]
         aicpu_binary = compiler.compile("aicpu", aicpu_include_dirs, aicpu_source_dirs)
     except Exception as e:
@@ -79,11 +79,11 @@ def check_and_build_runtime():
     print("\n[3/3] Compiling Host runtime...")
     try:
         host_include_dirs = [
-            str(runtime_root / "src" / "runtime" / "graph"),
+            str(runtime_root / "src" / "runtime" / "runtime"),
         ]
         host_source_dirs = [
             str(runtime_root / "src" / "runtime" / "host"),
-            str(runtime_root / "src" / "runtime" / "graph"),
+            str(runtime_root / "src" / "runtime" / "runtime"),
         ]
         host_binary = compiler.compile("host", host_include_dirs, host_source_dirs)
     except Exception as e:
@@ -120,7 +120,7 @@ def main():
 
     # Load runtime library and get bindings
     print("\n=== Loading Runtime Library ===")
-    DeviceRunner, Graph = load_runtime(host_binary)
+    DeviceRunner, Runtime = load_runtime(host_binary)
     print(f"Loaded runtime ({len(host_binary)} bytes)")
 
     # Initialize DeviceRunner
@@ -128,21 +128,21 @@ def main():
     runner = DeviceRunner()
     runner.init(device_id, aicpu_binary, aicore_binary, pto_isa_root)
 
-    # Create and initialize graph
-    # C++ handles: allocate Graph, allocate tensors, build tasks, initialize data
-    print("\n=== Creating and Initializing Graph ===")
-    graph = Graph()
-    graph.initialize()
+    # Create and initialize runtime
+    # C++ handles: allocate Runtime, allocate tensors, build tasks, initialize data
+    print("\n=== Creating and Initializing Runtime ===")
+    runtime = Runtime()
+    runtime.initialize()
 
-    # Execute graph on device
-    # Python now controls when the graph is executed
-    print("\n=== Executing Graph on Device ===")
-    runner.run(graph, block_dim=6, launch_aicpu_num=3)
+    # Execute runtime on device
+    # Python now controls when the runtime is executed
+    print("\n=== Executing Runtime on Device ===")
+    runner.run(runtime, block_dim=6, launch_aicpu_num=3)
 
     # Validate results and cleanup
-    # C++ handles: copy results from device, validate, free tensors, delete graph
+    # C++ handles: copy results from device, validate, free tensors, delete runtime
     print("\n=== Validating Results and Cleaning Up ===")
-    graph.validate_and_cleanup()
+    runtime.validate_and_cleanup()
 
     # Finalize runner
     print("\n=== Finalizing DeviceRunner ===")

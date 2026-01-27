@@ -91,63 +91,63 @@ class RuntimeLibraryLoader:
 # Python Wrapper Classes
 # ============================================================================
 
-class Graph:
+class Runtime:
     """
-    Task dependency graph.
+    Task dependency runtime.
 
-    Python wrapper around the C Graph API.
-    Graphs are allocated and managed by C++. Python just holds handles.
+    Python wrapper around the C Runtime API.
+    Runtimes are allocated and managed by C++. Python just holds handles.
     """
 
     def __init__(self, lib: CDLL):
         """
-        Create a new graph handle.
+        Create a new runtime handle.
 
         Args:
             lib: Loaded ctypes library (RuntimeLibraryLoader.lib)
         """
         self.lib = lib
-        # Allocate buffer to hold a Graph pointer (8 bytes on 64-bit)
+        # Allocate buffer to hold a Runtime pointer (8 bytes on 64-bit)
         # This buffer will be filled by C++ during InitGraph()
         self._buffer = ctypes.create_string_buffer(ctypes.sizeof(c_void_p))
         # Get the address of this buffer to pass to C++
-        # C++ will dereference this as Graph** and fill in the Graph*
+        # C++ will dereference this as Runtime** and fill in the Runtime*
         self._handle = ctypes.addressof(self._buffer)
 
     def initialize(self) -> None:
         """
-        Initialize the graph structure.
+        Initialize the runtime structure.
 
-        Calls InitGraph() in C++ which allocates the Graph, builds tasks,
-        allocates device tensors, initializes data, and runs the graph.
+        Calls InitGraph() in C++ which allocates the Runtime, builds tasks,
+        allocates device tensors, initializes data, and runs the runtime.
 
         Raises:
             RuntimeError: If initialization fails
         """
         rc = self.lib.InitGraph(self._handle)
         if rc != 0:
-            raise RuntimeError(f"Failed to initialize Graph: {rc}")
+            raise RuntimeError(f"Failed to initialize Runtime: {rc}")
 
     def validate_and_cleanup(self) -> None:
         """
         Validate results and cleanup all resources.
 
         Calls ValidateGraph() in C++ which validates computation results,
-        frees device tensors, and deletes the graph.
+        frees device tensors, and deletes the runtime.
 
         Raises:
             RuntimeError: If validation fails
         """
-        # Get the Graph* pointer that was stored in the buffer by InitGraph
-        # _buffer contains [Graph*], so cast it to pointer to void* and dereference
-        graph_ptr = ctypes.cast(self._buffer, ctypes.POINTER(c_void_p)).contents
-        rc = self.lib.ValidateGraph(graph_ptr)
+        # Get the Runtime* pointer that was stored in the buffer by InitGraph
+        # _buffer contains [Runtime*], so cast it to pointer to void* and dereference
+        runtime_ptr = ctypes.cast(self._buffer, ctypes.POINTER(c_void_p)).contents
+        rc = self.lib.ValidateGraph(runtime_ptr)
         if rc != 0:
             raise RuntimeError(f"ValidateGraph failed: {rc}")
 
     def __del__(self):
-        """Clean up graph resources."""
-        # Graph is managed by C++ (deleted in ValidateGraph), no explicit cleanup needed
+        """Clean up runtime resources."""
+        # Runtime is managed by C++ (deleted in ValidateGraph), no explicit cleanup needed
         pass
 
 
@@ -204,12 +204,12 @@ class DeviceRunner:
             raise RuntimeError(f"DeviceRunner_Init failed: {rc}")
         self._initialized = True
 
-    def run(self, graph: "Graph", block_dim: int, launch_aicpu_num: int = 1) -> None:
+    def run(self, runtime: "Runtime", block_dim: int, launch_aicpu_num: int = 1) -> None:
         """
-        Execute a graph on the device.
+        Execute a runtime on the device.
 
         Args:
-            graph: Graph to execute (must have been initialized via graph.initialize())
+            runtime: Runtime to execute (must have been initialized via runtime.initialize())
             block_dim: Number of blocks (1 block = 1 AIC + 2 AIV)
             launch_aicpu_num: Number of AICPU instances
 
@@ -219,18 +219,18 @@ class DeviceRunner:
         if not self._initialized:
             raise RuntimeError("DeviceRunner not initialized")
 
-        # Get the actual Graph* pointer from the buffer
-        graph_ptr = ctypes.cast(graph._buffer, ctypes.POINTER(c_void_p)).contents
-        rc = self.lib.DeviceRunner_Run(graph_ptr, block_dim, launch_aicpu_num)
+        # Get the actual Runtime* pointer from the buffer
+        runtime_ptr = ctypes.cast(runtime._buffer, ctypes.POINTER(c_void_p)).contents
+        rc = self.lib.DeviceRunner_Run(runtime_ptr, block_dim, launch_aicpu_num)
         if rc != 0:
             raise RuntimeError(f"DeviceRunner_Run failed: {rc}")
 
-    def print_handshake_results(self, graph: "Graph") -> None:
+    def print_handshake_results(self, runtime: "Runtime") -> None:
         """
         Print handshake results from device.
 
         Args:
-            graph: Graph whose handshake results should be printed
+            runtime: Runtime whose handshake results should be printed
 
         Raises:
             RuntimeError: If not initialized
@@ -238,9 +238,9 @@ class DeviceRunner:
         if not self._initialized:
             raise RuntimeError("DeviceRunner not initialized")
 
-        # Get the actual Graph* pointer from the buffer
-        graph_ptr = ctypes.cast(graph._buffer, ctypes.POINTER(c_void_p)).contents
-        self.lib.DeviceRunner_PrintHandshakeResults(graph_ptr)
+        # Get the actual Runtime* pointer from the buffer
+        runtime_ptr = ctypes.cast(runtime._buffer, ctypes.POINTER(c_void_p)).contents
+        self.lib.DeviceRunner_PrintHandshakeResults(runtime_ptr)
 
     def finalize(self) -> None:
         """Cleanup all resources."""
@@ -283,25 +283,25 @@ def load_runtime(lib_path: Union[str, Path, bytes]) -> tuple:
         lib_path: Path to libpto_runtime.so (str/Path), or compiled binary data (bytes)
 
     Returns:
-        Tuple of (DeviceRunnerClass, GraphClass) initialized with the library
+        Tuple of (DeviceRunnerClass, RuntimeClass) initialized with the library
 
     Example:
         # From file path
-        DeviceRunner, Graph = load_runtime("/path/to/libpto_runtime.so")
+        DeviceRunner, Runtime = load_runtime("/path/to/libpto_runtime.so")
 
         # From compiled binary bytes
         host_binary = compiler.compile("host", include_dirs, source_dirs)
-        DeviceRunner, Graph = load_runtime(host_binary)
+        DeviceRunner, Runtime = load_runtime(host_binary)
 
         runner = DeviceRunner()
         runner.init(device_id=0, aicpu_binary=aicpu_bytes, aicore_binary=aicore_bytes, pto_isa_root="/path/to/pto-isa")
 
-        graph = Graph()
-        graph.initialize()
+        runtime = Runtime()
+        runtime.initialize()
 
-        runner.run(graph, block_dim=3, launch_aicpu_num=1)
-        runner.print_handshake_results(graph)
-        graph.validate_and_cleanup()
+        runner.run(runtime, block_dim=3, launch_aicpu_num=1)
+        runner.print_handshake_results(runtime)
+        runtime.validate_and_cleanup()
         runner.finalize()
     """
     # If bytes are provided, write to temporary file
@@ -318,8 +318,8 @@ def load_runtime(lib_path: Union[str, Path, bytes]) -> tuple:
         def __init__(self):
             super().__init__(lib)
 
-    class _Graph(Graph):
+    class _Runtime(Runtime):
         def __init__(self):
             super().__init__(lib)
 
-    return _DeviceRunner, _Graph
+    return _DeviceRunner, _Runtime

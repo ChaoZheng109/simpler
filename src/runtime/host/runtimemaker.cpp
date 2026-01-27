@@ -1,7 +1,7 @@
 /**
- * Graph Builder - Basic Example
+ * Runtime Builder - Basic Example
  *
- * Initializes a pre-allocated graph with the following task structure:
+ * Initializes a pre-allocated runtime with the following task structure:
  * Formula: (a + b + 1)(a + b + 2)
  *
  * Tasks:
@@ -17,7 +17,6 @@
  *   task2 -> task3
  */
 
-#include "graph/graph.h"
 #include <stdint.h>
 #include <stddef.h>
 #include <new>
@@ -27,7 +26,7 @@
 #include <iostream>
 #include <string>
 #include <vector>
-#include "graph.h"
+#include "runtime.h"
 #include "devicerunner.h"
 
 #ifdef __cplusplus
@@ -44,15 +43,15 @@ static void* g_dev_f = nullptr;
 static size_t g_tensor_bytes = 0;
 
 /**
- * Initialize a pre-allocated graph for the basic example.
+ * Initialize a pre-allocated runtime for the basic example.
  *
- * This function takes a pre-allocated Graph pointer and builds the complete
- * example graph inside it. All graph building logic is handled in C++.
+ * This function takes a pre-allocated Runtime pointer and builds the complete
+ * example runtime inside it. All runtime building logic is handled in C++.
  *
- * @param graph      Pointer to pointer to Graph (will allocate and fill)
+ * @param runtime      Pointer to pointer to Runtime (will allocate and fill)
  * @return 0 on success, -1 on failure
  */
-int InitGraphImpl(Graph **graph) {
+int InitGraphImpl(Runtime **runtime) {
     int rc = 0;
 
     // Initialize DeviceRunner
@@ -131,9 +130,9 @@ int InitGraphImpl(Graph **graph) {
     std::cout << "Initialized input tensors: a=2.0, b=3.0 (all elements)\n";
     std::cout << "Expected result: f = (2+3+1)*(2+3+2) = 6*7 = 42.0\n";
 
-    // Allocate Graph on heap
-    *graph = new Graph();
-    Graph* g = *graph;
+    // Allocate Runtime on heap
+    *runtime = new Runtime();
+    Runtime* g = *runtime;
 
     // Store tensor pointers for later use by ValidateGraphImpl
     g_dev_a = dev_a;
@@ -145,9 +144,9 @@ int InitGraphImpl(Graph **graph) {
     g_tensor_bytes = BYTES;
 
     // =========================================================================
-    // BUILD GRAPH - This is the core graph building logic
+    // BUILD RUNTIME - This is the core runtime building logic
     // =========================================================================
-    std::cout << "\n=== Creating Task Graph for Formula ===" << '\n';
+    std::cout << "\n=== Creating Task Runtime for Formula ===" << '\n';
     std::cout << "Formula: (a + b + 1)(a + b + 2)\n";
     std::cout << "Tasks:\n";
     std::cout << "  task0: c = a + b\n";
@@ -201,17 +200,17 @@ int InitGraphImpl(Graph **graph) {
     g->add_successor(t1, t3);  // t1 → t3
     g->add_successor(t2, t3);  // t2 → t3
 
-    std::cout << "Created graph with " << g->get_task_count() << " tasks\n";
-    g->print_graph();
+    std::cout << "Created runtime with " << g->get_task_count() << " tasks\n";
+    g->print_runtime();
 
-    std::cout << "\nGraph initialized. Ready for execution from Python.\n";
+    std::cout << "\nRuntime initialized. Ready for execution from Python.\n";
 
     return 0;
 }
 
-int ValidateGraphImpl(Graph *graph) {
-    if (graph == nullptr) {
-        std::cerr << "Error: Graph pointer is null\n";
+int ValidateGraphImpl(Runtime *runtime) {
+    if (runtime == nullptr) {
+        std::cerr << "Error: Runtime pointer is null\n";
         return -1;
     }
 
@@ -273,7 +272,7 @@ int ValidateGraphImpl(Graph *graph) {
     }
 
     // Print handshake results
-    runner.PrintHandshakeResults(*graph);
+    runner.PrintHandshakeResults(*runtime);
 
     // Cleanup
     std::cout << "\n=== Cleaning Up ===" << '\n';
@@ -285,8 +284,8 @@ int ValidateGraphImpl(Graph *graph) {
     runner.FreeTensor(dev_f);
     std::cout << "Freed all device tensors\n";
 
-    // Delete the graph
-    delete graph;
+    // Delete the runtime
+    delete runtime;
 
     // Clear global tensor pointers
     g_dev_a = g_dev_b = g_dev_c = g_dev_d = g_dev_e = g_dev_f = nullptr;

@@ -7,36 +7,36 @@
 
 #include "pto_runtime_c_api.h"
 #include "devicerunner.h"
-#include "graph.h"  // Included from tests/example_graph_impl via CMake include paths
+#include "runtime.h"  // Included from tests/example_graph_impl via CMake include paths
 
 extern "C" {
 
 /* =========================================================================== */
-/* Graph API Implementation */
+/* Runtime API Implementation */
 /* =========================================================================== */
-int InitGraphImpl(Graph **graph);
-int ValidateGraphImpl(Graph *graph);
+int InitGraphImpl(Runtime **runtime);
+int ValidateGraphImpl(Runtime *runtime);
 
-int InitGraph(GraphHandle graph) {
-    if (graph == NULL) {
+int InitGraph(GraphHandle runtime) {
+    if (runtime == NULL) {
         return -1;
     }
     try {
-        // graph is a void*, we need to pass its address as Graph**
-        Graph** g_ptr = reinterpret_cast<Graph**>(graph);
-        return InitGraphImpl(g_ptr);
+        // runtime is a void*, we need to pass its address as Runtime**
+        Runtime** r_ptr = reinterpret_cast<Runtime**>(runtime);
+        return InitGraphImpl(r_ptr);
     } catch (...) {
         return -1;
     }
 }
 
-int ValidateGraph(GraphHandle graph) {
-    if (graph == NULL) {
+int ValidateGraph(GraphHandle runtime) {
+    if (runtime == NULL) {
         return -1;
     }
     try {
-        Graph* g = static_cast<Graph*>(graph);
-        return ValidateGraphImpl(g);
+        Runtime* r = static_cast<Runtime*>(runtime);
+        return ValidateGraphImpl(r);
     } catch (...) {
         return -1;
     }
@@ -64,27 +64,27 @@ int DeviceRunner_Init(int device_id,
     }
 }
 
-int DeviceRunner_Run(GraphHandle graph, int block_dim, int launch_aicpu_num) {
-    if (graph == NULL) {
+int DeviceRunner_Run(GraphHandle runtime, int block_dim, int launch_aicpu_num) {
+    if (runtime == NULL) {
         return -1;
     }
     try {
         DeviceRunner& runner = DeviceRunner::Get();
-        Graph* g = static_cast<Graph*>(graph);
-        return runner.Run(*g, block_dim, launch_aicpu_num);
+        Runtime* r = static_cast<Runtime*>(runtime);
+        return runner.Run(*r, block_dim, launch_aicpu_num);
     } catch (...) {
         return -1;
     }
 }
 
-void DeviceRunner_PrintHandshakeResults(GraphHandle graph) {
-    if (graph == NULL) {
+void DeviceRunner_PrintHandshakeResults(GraphHandle runtime) {
+    if (runtime == NULL) {
         return;
     }
     try {
         DeviceRunner& runner = DeviceRunner::Get();
-        Graph* g = static_cast<Graph*>(graph);
-        runner.PrintHandshakeResults(*g);
+        Runtime* r = static_cast<Runtime*>(runtime);
+        runner.PrintHandshakeResults(*r);
     } catch (...) {
         // Silently ignore errors on print
     }
