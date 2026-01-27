@@ -39,20 +39,20 @@ struct GraphExecutor {
     std::atomic<int> finished_count_{0};
 
     // ===== Methods =====
-    int Init(KernelArgs* kargs);
-    int HankAiCore(void* arg, int thread_idx, const int* cur_thread_cores);
+    int Init(Graph* graph);
+    int HankAiCore(Graph* graph, int thread_idx, const int* cur_thread_cores);
     int Execute(Graph& g, Handshake* hank, int thread_idx,
                 const int* cur_thread_cores, int core_num);
-    int ShutdownAiCore(void* arg, int thread_idx, const int* cur_thread_cores);
-    int Run(void* arg);
-    void DeInit(KernelArgs* kargs);
+    int ShutdownAiCore(Graph* graph, int thread_idx, const int* cur_thread_cores);
+    int Run(Graph* graph);
+    void DeInit();
 };
 
 static GraphExecutor g_executor;
 
 // ===== GraphExecutor Method Implementations =====
 
-int GraphExecutor::Init(KernelArgs* kargs) {
+int GraphExecutor::Init(Graph* graph) {
     bool expected = false;
     if (!initialized_.compare_exchange_strong(expected, true, std::memory_order_acq_rel, std::memory_order_acquire)) {
         return 0;
@@ -60,19 +60,17 @@ int GraphExecutor::Init(KernelArgs* kargs) {
 
     DEV_INFO("GraphExecutor: Initializing");
 
-    // Get graph reference (contains execution parameters)
-    Graph* g = kargs->graphArgs;
-    if (g == nullptr) {
-        DEV_ERROR("graphArgs is nullptr");
+    if (graph == nullptr) {
+        DEV_ERROR("graph is nullptr");
         init_failed_.store(true, std::memory_order_release);
         return -1;
     }
 
-    // Read execution parameters from graph instead of kargs
-    thread_num_ = g->scheCpuNum;
+    // Read execution parameters from graph
+    thread_num_ = graph->scheCpuNum;
     if (thread_num_ == 0) thread_num_ = 1;
 
-    total_cores_ = g->block_dim * coresPerBlockdim_;
+    total_cores_ = graph->block_dim * coresPerBlockdim_;
     cores_per_thread_ = total_cores_ / thread_num_;
 
     DEV_INFO("Config: threads=%d, cores=%d, cores_per_thread=%d",
@@ -93,19 +91,19 @@ int GraphExecutor::Init(KernelArgs* kargs) {
     // Pre-compute core assignments for each thread
     // Each thread manages blocks_per_thread blocks
     // For each block b: AIC is core b, AIVs are cores (nrAic + b*2) and (nrAic + b*2 + 1)
-    int num_aic = g->block_dim;  // Total AIC cores (= block_dim)
-    int blocks_per_thread = g->block_dim / thread_num_;
+    int num_aic = graph->block_dim;  // Total AIC cores (= block_dim)
+    int blocks_per_thread = graph->block_dim / thread_num_;
 
     // Validate block distribution
-    if (g->block_dim % thread_num_ != 0) {
+    if (graph->block_dim % thread_num_ != 0) {
         DEV_ERROR("block_dim (%d) must be divisible by thread_num (%d)",
-                  g->block_dim, thread_num_);
+                  graph->block_dim, thread_num_);
         init_failed_.store(true, std::memory_order_release);
         return -1;
     }
 
     DEV_INFO("Block assignment: %d blocks, %d threads, %d blocks per thread",
-             g->block_dim, thread_num_, blocks_per_thread);
+             graph->block_dim, thread_num_, blocks_per_thread);
 
     for (int t = 0; t < thread_num_; t++) {
         int start_block = t * blocks_per_thread;
@@ -131,18 +129,18 @@ int GraphExecutor::Init(KernelArgs* kargs) {
     }
 
     // Initialize graph execution state
-    total_tasks_.store(g->get_task_count(), std::memory_order_release);
+    total_tasks_.store(graph->get_task_count(), std::memory_order_release);
     completed_tasks_.store(0, std::memory_order_release);
 
     int initial_ready[GRAPH_MAX_TASKS];
-    int initial_count = g->get_initial_ready_tasks(initial_ready);
+    int initial_count = graph->get_initial_ready_tasks(initial_ready);
 
     DEV_INFO("Init: Found %d initially ready tasks", initial_count);
 
     int aic_count = 0;
     int aiv_count = 0;
     for (int i = 0; i < initial_count; i++) {
-        Task* task = g->get_task(initial_ready[i]);
+        Task* task = graph->get_task(initial_ready[i]);
         if (task->core_type == 0) {  // AIC
             ready_queue_aic_[aic_count++] = initial_ready[i];
         } else {  // AIV
@@ -164,9 +162,8 @@ int GraphExecutor::Init(KernelArgs* kargs) {
 /**
  * Handshake AICore - Initialize and synchronize with AICore kernels
  */
-int GraphExecutor::HankAiCore(void *arg, int thread_idx, const int* cur_thread_cores) {
-    auto kargs = (KernelArgs *)arg;
-    Handshake* all_hanks = (Handshake*)kargs->graphArgs->workers;
+int GraphExecutor::HankAiCore(Graph* graph, int thread_idx, const int* cur_thread_cores) {
+    Handshake* all_hanks = (Handshake*)graph->workers;
 
     DEV_INFO("Thread %d: Handshaking with %d cores", thread_idx, cores_per_thread_);
 
@@ -189,9 +186,8 @@ int GraphExecutor::HankAiCore(void *arg, int thread_idx, const int* cur_thread_c
 /**
  * Shutdown AICore - Send quit signal to all AICore kernels
  */
-int GraphExecutor::ShutdownAiCore(void *arg, int thread_idx, const int* cur_thread_cores) {
-    auto kargs = (KernelArgs *)arg;
-    Handshake* all_hanks = (Handshake*)kargs->graphArgs->workers;
+int GraphExecutor::ShutdownAiCore(Graph* graph, int thread_idx, const int* cur_thread_cores) {
+    Handshake* all_hanks = (Handshake*)graph->workers;
 
     DEV_INFO("Thread %d: Shutting down %d cores", thread_idx, cores_per_thread_);
 
@@ -323,29 +319,24 @@ int GraphExecutor::Execute(Graph& g, Handshake* hank, int thread_idx,
     return cur_thread_completed;
 }
 
-int GraphExecutor::Run(void *arg) {
+int GraphExecutor::Run(Graph* graph) {
     int thread_idx = thread_idx_++;
-
-    auto kargs = (KernelArgs *)arg;
 
     DEV_INFO("Thread %d: Start", thread_idx);
 
     const int* cur_thread_cores = core_assignments_[thread_idx];
 
-    auto rc = HankAiCore(arg, thread_idx, cur_thread_cores);
+    auto rc = HankAiCore(graph, thread_idx, cur_thread_cores);
     if (rc != 0) {
         return rc;
     }
 
-    if (kargs->graphArgs != nullptr) {
-        Graph* g = kargs->graphArgs;
-        Handshake* hank = (Handshake*)kargs->graphArgs->workers;
-        DEV_INFO("Thread %d: Graph has %d tasks", thread_idx, g->get_task_count());
-        int completed = Execute(*g, hank, thread_idx, cur_thread_cores, cores_per_thread_);
-        DEV_INFO("Thread %d: Executed %d tasks from graph", thread_idx, completed);
-    }
+    Handshake* hank = (Handshake*)graph->workers;
+    DEV_INFO("Thread %d: Graph has %d tasks", thread_idx, graph->get_task_count());
+    int completed = Execute(*graph, hank, thread_idx, cur_thread_cores, cores_per_thread_);
+    DEV_INFO("Thread %d: Executed %d tasks from graph", thread_idx, completed);
 
-    rc = ShutdownAiCore(arg, thread_idx, cur_thread_cores);
+    rc = ShutdownAiCore(graph, thread_idx, cur_thread_cores);
     if (rc != 0) {
         return rc;
     }
@@ -362,17 +353,15 @@ int GraphExecutor::Run(void *arg) {
     return 0;
 }
 
-void GraphExecutor::DeInit(KernelArgs* kargs) {
+void GraphExecutor::DeInit() {
     // Cleanup graph execution state
-    if (kargs->graphArgs != nullptr) {
-        ready_count_aic_.store(0, std::memory_order_release);
-        ready_count_aiv_.store(0, std::memory_order_release);
-        completed_tasks_.store(0, std::memory_order_release);
-        total_tasks_.store(0, std::memory_order_release);
-        finished_count_.store(0, std::memory_order_release);
+    ready_count_aic_.store(0, std::memory_order_release);
+    ready_count_aiv_.store(0, std::memory_order_release);
+    completed_tasks_.store(0, std::memory_order_release);
+    total_tasks_.store(0, std::memory_order_release);
+    finished_count_.store(0, std::memory_order_release);
 
-        DEV_INFO("DeInit: Graph execution state reset");
-    }
+    DEV_INFO("DeInit: Graph execution state reset");
 
     initialized_.store(false, std::memory_order_release);
     init_done_.store(false, std::memory_order_release);
@@ -395,24 +384,23 @@ void GraphExecutor::DeInit(KernelArgs* kargs) {
  * 3. Execute tasks on managed cores
  * 4. Cleanup when last thread finishes
  *
- * @param arg Pointer to KernelArgs structure containing:
- *            - deviceArgs: device-specific arguments
- *            - hankArgs: handshake buffer array
- *            - core_num: number of cores
- *            - graphArgs: task graph to execute
+ * @param arg Pointer to Graph structure containing:
+ *            - workers[]: handshake buffers for AICPU-AICore communication
+ *            - block_dim, scheCpuNum: execution parameters
+ *            - tasks[]: task graph to execute
  * @return 0 on success, non-zero on error
  */
 extern "C" int AicpuExecute(void *arg) {
     if (arg == nullptr) {
-        DEV_ERROR("%s", "Invalid kernel arguments: null pointer");
+        DEV_ERROR("%s", "Invalid graph argument: null pointer");
         return -1;
     }
 
-    auto kargs = (KernelArgs *)arg;
+    auto graph = (Graph *)arg;
 
     DEV_INFO("%s", "AicpuExecute: Starting AICPU kernel execution");
 
-    g_executor.Init(kargs);
+    g_executor.Init(graph);
 
     while (!g_executor.init_done_.load(std::memory_order_acquire)) {
         if (g_executor.init_failed_.load(std::memory_order_acquire)) {
@@ -421,7 +409,7 @@ extern "C" int AicpuExecute(void *arg) {
         }
     }
 
-    int rc = g_executor.Run(arg);
+    int rc = g_executor.Run(graph);
     if (rc != 0) {
         DEV_ERROR("AicpuExecute: Thread execution failed with rc=%d", rc);
         return rc;
@@ -430,7 +418,7 @@ extern "C" int AicpuExecute(void *arg) {
     // Last thread cleans up
     if (g_executor.finished_.load(std::memory_order_acquire)) {
         DEV_INFO("AicpuExecute: Last thread finished, cleaning up");
-        g_executor.DeInit(kargs);
+        g_executor.DeInit();
     }
 
     DEV_INFO("%s", "AicpuExecute: Kernel execution completed successfully");
