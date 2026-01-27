@@ -199,7 +199,7 @@ int DeviceRunner::Init(int deviceId,
     // NOTE: Kernel registration and loading moved to runtime compilation
     // Users should call Init() with ptoIsaRoot, then compile kernels:
     // Example:
-    //   runner.Init(0, aicpuThreadNum, blockdimPerThread, aicpuBinary, aicoreBinary, "/path/to/pto-isa");
+    //   runner.Init(0, aicpuBinary, aicoreBinary, "/path/to/pto-isa");
     //   runner.CompileAndLoadKernel(0, "./aicore/kernels/kernel_add.cpp", 1);
     //   runner.CompileAndLoadKernel(1, "./aicore/kernels/kernel_add_scalar.cpp", 1);
     //   runner.CompileAndLoadKernel(2, "./aicore/kernels/kernel_mul.cpp", 1);

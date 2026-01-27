@@ -318,7 +318,7 @@ public:
      * @return 0 on success, -1 on error
      *
      * Example:
-     *   runner.Init(0, 3, "./aicpu/lib.so", "./aicore/kernel.o", "/path/to/pto-isa");
+     *   runner.Init(0, aicpuBinary, aicoreBinary, "/path/to/pto-isa");
      *   runner.CompileAndLoadKernel(0, "./aicore/kernels/aiv/kernel_add.cpp", 1);
      */
     int CompileAndLoadKernel(int funcId,
