@@ -20,6 +20,7 @@ struct GraphExecutor {
 
     int thread_num_{0};
     int total_cores_{0};
+    int coresPerBlockdim_{3};
     int cores_per_thread_{0};
     int core_assignments_[MAX_AICPU_THREADS][MAX_CORES_PER_THREAD];
 
@@ -62,7 +63,7 @@ int GraphExecutor::Init(KernelArgs* kargs) {
     thread_num_ = kargs->scheCpuNum;
     if (thread_num_ == 0) thread_num_ = 1;
 
-    total_cores_ = kargs->core_num;
+    total_cores_ = kargs->block_dim * coresPerBlockdim_;
     cores_per_thread_ = total_cores_ / thread_num_;
 
     DEV_INFO("Config: threads=%d, cores=%d, cores_per_thread=%d",
@@ -136,7 +137,7 @@ int GraphExecutor::Init(KernelArgs* kargs) {
  */
 int GraphExecutor::HankAiCore(void *arg, int thread_idx, const int* cur_thread_cores) {
     auto kargs = (KernelArgs *)arg;
-    Handshake* all_hanks = (Handshake*)kargs->hankArgs;
+    Handshake* all_hanks = (Handshake*)kargs->graphArgs->workers;
 
     DEV_INFO("Thread %d: Handshaking with %d cores", thread_idx, cores_per_thread_);
 
@@ -161,7 +162,7 @@ int GraphExecutor::HankAiCore(void *arg, int thread_idx, const int* cur_thread_c
  */
 int GraphExecutor::ShutdownAiCore(void *arg, int thread_idx, const int* cur_thread_cores) {
     auto kargs = (KernelArgs *)arg;
-    Handshake* all_hanks = (Handshake*)kargs->hankArgs;
+    Handshake* all_hanks = (Handshake*)kargs->graphArgs->workers;
 
     DEV_INFO("Thread %d: Shutting down %d cores", thread_idx, cores_per_thread_);
 
@@ -309,7 +310,7 @@ int GraphExecutor::Run(void *arg) {
 
     if (kargs->graphArgs != nullptr) {
         Graph* g = kargs->graphArgs;
-        Handshake* hank = (Handshake*)kargs->hankArgs;
+        Handshake* hank = (Handshake*)kargs->graphArgs->workers;
         DEV_INFO("Thread %d: Graph has %d tasks", thread_idx, g->get_task_count());
         int completed = Execute(*g, hank, thread_idx, cur_thread_cores, cores_per_thread_);
         DEV_INFO("Thread %d: Executed %d tasks from graph", thread_idx, completed);

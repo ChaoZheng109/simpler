@@ -77,7 +77,7 @@ class RuntimeLibraryLoader:
                                                c_char_p]
         self.lib.DeviceRunner_Init.restype = c_int
 
-        self.lib.DeviceRunner_Run.argtypes = [c_void_p, c_int, c_int, c_int, c_int]
+        self.lib.DeviceRunner_Run.argtypes = [c_void_p, c_int, c_int]
         self.lib.DeviceRunner_Run.restype = c_int
 
         self.lib.DeviceRunner_PrintHandshakeResults.argtypes = [c_void_p]
