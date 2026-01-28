@@ -262,10 +262,6 @@ int DeviceRunner::Run(Runtime& runtime, int blockDim,
     // Calculate execution parameters
     blockDim_ = blockDim;
 
-    // Set kernel args
-    kernelArgs_.args.nrAic = blockDim;
-    kernelArgs_.args.scheCpuNum = launchAicpuNum;
-
     int numAiCore = blockDim * coresPerBlockdim_;
     // Initialize handshake buffers in runtime
     if (numAiCore > RUNTIME_MAX_WORKER) {
@@ -289,8 +285,6 @@ int DeviceRunner::Run(Runtime& runtime, int blockDim,
         // Set core type: first 1/3 are AIC (0), remaining 2/3 are AIV (1)
         runtime.workers[i].core_type = (i < numAic) ? 0 : 1;
     }
-
-    kernelArgs_.args.block_dim = blockDim;
 
     // Set functionBinAddr for all tasks (NEW - Runtime function pointer dispatch)
     std::cout << "\n=== Setting functionBinAddr for Tasks ===" << '\n';

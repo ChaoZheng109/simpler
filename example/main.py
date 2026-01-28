@@ -177,8 +177,8 @@ def main():
     # Device init happens inside launch_runtime if not already done
     print("\n=== Executing Runtime on Device ===")
     launch_runtime(runtime,
-                 aicpu_thread_num=1,
-                 block_dim=1,
+                 aicpu_thread_num=3,
+                 block_dim=3,
                  device_id=device_id,
                  aicpu_binary=aicpu_binary,
                  aicore_binary=aicore_binary)

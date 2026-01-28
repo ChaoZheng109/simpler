@@ -9,7 +9,7 @@ constexpr int MAX_AIC_PER_THREAD = 24;
 constexpr int MAX_AIV_PER_THREAD = 48;
 constexpr int MAX_CORES_PER_THREAD = MAX_AIC_PER_THREAD + MAX_AIV_PER_THREAD;
 
-struct RuntimeExecutor {
+struct AicpuExecutor {
     // ===== Thread management state =====
     std::atomic<int> thread_idx_{0};
     std::atomic<bool> initialized_{false};
@@ -18,9 +18,9 @@ struct RuntimeExecutor {
     std::atomic<bool> finished_{false};
 
     int thread_num_{0};
-    int total_cores_{0};
-    int coresPerBlockdim_{3};
-    int cores_per_thread_{0};
+    int cores_total_num_{0};
+    int blockdim_cores_num_{3};
+    int thread_cores_num_{0};
     int core_assignments_[MAX_AICPU_THREADS][MAX_CORES_PER_THREAD];
 
     // ===== Task queue state =====
@@ -40,24 +40,24 @@ struct RuntimeExecutor {
     // ===== Methods =====
     int Init(Runtime* runtime);
     int HankAiCore(Runtime* runtime, int thread_idx, const int* cur_thread_cores);
-    int Execute(Runtime& r, Handshake* hank, int thread_idx,
-                const int* cur_thread_cores, int core_num);
+    int resolve_and_dispatch(Runtime& runtime, int thread_idx,
+                             const int* cur_thread_cores, int core_num);
     int ShutdownAiCore(Runtime* runtime, int thread_idx, const int* cur_thread_cores);
     int Run(Runtime* runtime);
     void DeInit();
 };
 
-static RuntimeExecutor g_executor;
+static AicpuExecutor g_aicpu_executor;
 
-// ===== RuntimeExecutor Method Implementations =====
+// ===== AicpuExecutor Method Implementations =====
 
-int RuntimeExecutor::Init(Runtime* runtime) {
+int AicpuExecutor::Init(Runtime* runtime) {
     bool expected = false;
     if (!initialized_.compare_exchange_strong(expected, true, std::memory_order_acq_rel, std::memory_order_acquire)) {
         return 0;
     }
 
-    DEV_INFO("RuntimeExecutor: Initializing");
+    DEV_INFO("AicpuExecutor: Initializing");
 
     if (runtime == nullptr) {
         DEV_ERROR("runtime is nullptr");
@@ -69,11 +69,7 @@ int RuntimeExecutor::Init(Runtime* runtime) {
     thread_num_ = runtime->scheCpuNum;
     if (thread_num_ == 0) thread_num_ = 1;
 
-    total_cores_ = runtime->block_dim * coresPerBlockdim_;
-    cores_per_thread_ = total_cores_ / thread_num_;
 
-    DEV_INFO("Config: threads=%d, cores=%d, cores_per_thread=%d",
-             thread_num_, total_cores_, cores_per_thread_);
 
     if (thread_num_ < 1 || thread_num_ > MAX_AICPU_THREADS) {
         DEV_ERROR("Invalid thread_num: %d", thread_num_);
@@ -81,11 +77,17 @@ int RuntimeExecutor::Init(Runtime* runtime) {
         return -1;
     }
 
-    if (total_cores_ > MAX_CORES_PER_THREAD) {
-        DEV_ERROR("Total cores %d exceeds maximum %d", total_cores_, MAX_CORES_PER_THREAD);
+    if (cores_total_num_ > MAX_CORES_PER_THREAD) {
+        DEV_ERROR("Total cores %d exceeds maximum %d", cores_total_num_, MAX_CORES_PER_THREAD);
         init_failed_.store(true, std::memory_order_release);
         return -1;
     }
+
+    cores_total_num_ = runtime->block_dim * blockdim_cores_num_;
+    thread_cores_num_ = cores_total_num_ / thread_num_;
+
+    DEV_INFO("Config: threads=%d, cores=%d, cores_per_thread=%d",
+        thread_num_, cores_total_num_, thread_cores_num_);
 
     // Pre-compute core assignments for each thread
     // Each thread manages blocks_per_thread blocks
@@ -154,26 +156,26 @@ int RuntimeExecutor::Init(Runtime* runtime) {
     finished_count_.store(0, std::memory_order_release);
 
     init_done_.store(true, std::memory_order_release);
-    DEV_INFO("RuntimeExecutor: Init complete");
+    DEV_INFO("AicpuExecutor: Init complete");
     return 0;
 }
 
 /**
  * Handshake AICore - Initialize and synchronize with AICore kernels
  */
-int RuntimeExecutor::HankAiCore(Runtime* runtime, int thread_idx, const int* cur_thread_cores) {
+int AicpuExecutor::HankAiCore(Runtime* runtime, int thread_idx, const int* cur_thread_cores) {
     Handshake* all_hanks = (Handshake*)runtime->workers;
 
-    DEV_INFO("Thread %d: Handshaking with %d cores", thread_idx, cores_per_thread_);
+    DEV_INFO("Thread %d: Handshaking with %d cores", thread_idx, thread_cores_num_);
 
-    for (int i = 0; i < cores_per_thread_; i++) {
+    for (int i = 0; i < thread_cores_num_; i++) {
         int core_id = cur_thread_cores[i];
         Handshake* hank = &all_hanks[core_id];
         DEV_INFO("Thread %d: AICPU hank addr = 0x%lx", thread_idx, (uint64_t)hank);
         hank->aicpu_ready = 1;
     }
 
-    for (int i = 0; i < cores_per_thread_; i++) {
+    for (int i = 0; i < thread_cores_num_; i++) {
         int core_id = cur_thread_cores[i];
         Handshake* hank = &all_hanks[core_id];
         while (hank->aicore_done == 0) { }
@@ -185,12 +187,12 @@ int RuntimeExecutor::HankAiCore(Runtime* runtime, int thread_idx, const int* cur
 /**
  * Shutdown AICore - Send quit signal to all AICore kernels
  */
-int RuntimeExecutor::ShutdownAiCore(Runtime* runtime, int thread_idx, const int* cur_thread_cores) {
+int AicpuExecutor::ShutdownAiCore(Runtime* runtime, int thread_idx, const int* cur_thread_cores) {
     Handshake* all_hanks = (Handshake*)runtime->workers;
 
-    DEV_INFO("Thread %d: Shutting down %d cores", thread_idx, cores_per_thread_);
+    DEV_INFO("Thread %d: Shutting down %d cores", thread_idx, thread_cores_num_);
 
-    for (int i = 0; i < cores_per_thread_; i++) {
+    for (int i = 0; i < thread_cores_num_; i++) {
         int core_id = cur_thread_cores[i];
         Handshake* hank = &all_hanks[core_id];
         DEV_INFO("Thread %d: AICPU hank addr = 0x%lx", thread_idx, (uint64_t)hank);
@@ -201,10 +203,11 @@ int RuntimeExecutor::ShutdownAiCore(Runtime* runtime, int thread_idx, const int*
 }
 
 /**
- * Execute task runtime using polling-based dispatch to AICore
+ * Resolve dependencies and dispatch tasks using polling-based dispatch to AICore
  */
-int RuntimeExecutor::Execute(Runtime& r, Handshake* hank, int thread_idx,
-                           const int* cur_thread_cores, int core_num) {
+int AicpuExecutor::resolve_and_dispatch(Runtime& runtime, int thread_idx,
+                                         const int* cur_thread_cores, int core_num) {
+    Handshake* hank = (Handshake*)runtime.workers;
 
     DEV_INFO("Thread %d: Starting execution with %d cores", thread_idx, core_num);
 
@@ -231,7 +234,7 @@ int RuntimeExecutor::Execute(Runtime& r, Handshake* hank, int thread_idx,
                 // Update fanin of successors atomically and add to appropriate shared ready queue
                 for (int j = 0; j < task->fanout_count; j++) {
                     int dep_id = task->fanout[j];
-                    Task* dep = r.get_task(dep_id);
+                    Task* dep = runtime.get_task(dep_id);
 
                     // Atomic decrement fanin
                     int prev_fanin = dep->fanin.fetch_sub(1, std::memory_order_acq_rel);
@@ -282,7 +285,7 @@ int RuntimeExecutor::Execute(Runtime& r, Handshake* hank, int thread_idx,
                         if (count > 0) {
                             ready_count_aic_.fetch_sub(1, std::memory_order_release);
                             int task_id = ready_queue_aic_[count - 1];
-                            Task* task = r.get_task(task_id);
+                            Task* task = runtime.get_task(task_id);
 
                             DEV_INFO("Thread %d: Dispatching AIC task %d to core %d",
                                     thread_idx, task_id, core_id);
@@ -299,7 +302,7 @@ int RuntimeExecutor::Execute(Runtime& r, Handshake* hank, int thread_idx,
                         if (count > 0) {
                             ready_count_aiv_.fetch_sub(1, std::memory_order_release);
                             int task_id = ready_queue_aiv_[count - 1];
-                            Task* task = r.get_task(task_id);
+                            Task* task = runtime.get_task(task_id);
 
                             DEV_INFO("Thread %d: Dispatching AIV task %d to core %d",
                                     thread_idx, task_id, core_id);
@@ -318,7 +321,7 @@ int RuntimeExecutor::Execute(Runtime& r, Handshake* hank, int thread_idx,
     return cur_thread_completed;
 }
 
-int RuntimeExecutor::Run(Runtime* runtime) {
+int AicpuExecutor::Run(Runtime* runtime) {
     int thread_idx = thread_idx_++;
 
     DEV_INFO("Thread %d: Start", thread_idx);
@@ -330,9 +333,8 @@ int RuntimeExecutor::Run(Runtime* runtime) {
         return rc;
     }
 
-    Handshake* hank = (Handshake*)runtime->workers;
     DEV_INFO("Thread %d: Runtime has %d tasks", thread_idx, runtime->get_task_count());
-    int completed = Execute(*runtime, hank, thread_idx, cur_thread_cores, cores_per_thread_);
+    int completed = resolve_and_dispatch(*runtime, thread_idx, cur_thread_cores, thread_cores_num_);
     DEV_INFO("Thread %d: Executed %d tasks from runtime", thread_idx, completed);
 
     rc = ShutdownAiCore(runtime, thread_idx, cur_thread_cores);
@@ -352,7 +354,7 @@ int RuntimeExecutor::Run(Runtime* runtime) {
     return 0;
 }
 
-void RuntimeExecutor::DeInit() {
+void AicpuExecutor::DeInit() {
     // Cleanup runtime execution state
     ready_count_aic_.store(0, std::memory_order_release);
     ready_count_aiv_.store(0, std::memory_order_release);
@@ -368,7 +370,7 @@ void RuntimeExecutor::DeInit() {
     thread_idx_.store(0, std::memory_order_release);
     finished_.store(false, std::memory_order_release);
 
-    DEV_INFO("DeInit: RuntimeExecutor reset complete");
+    DEV_INFO("DeInit: AicpuExecutor reset complete");
 }
 
 // ===== Public Entry Point =====
@@ -397,25 +399,25 @@ extern "C" int AicpuExecute(Runtime* runtime) {
 
     DEV_INFO("%s", "AicpuExecute: Starting AICPU kernel execution");
 
-    g_executor.Init(runtime);
+    g_aicpu_executor.Init(runtime);
 
-    while (!g_executor.init_done_.load(std::memory_order_acquire)) {
-        if (g_executor.init_failed_.load(std::memory_order_acquire)) {
+    while (!g_aicpu_executor.init_done_.load(std::memory_order_acquire)) {
+        if (g_aicpu_executor.init_failed_.load(std::memory_order_acquire)) {
             DEV_ERROR("%s", "AicpuExecute: Initialization failed, aborting execution");
             return -1;
         }
     }
 
-    int rc = g_executor.Run(runtime);
+    int rc = g_aicpu_executor.Run(runtime);
     if (rc != 0) {
         DEV_ERROR("AicpuExecute: Thread execution failed with rc=%d", rc);
         return rc;
     }
 
     // Last thread cleans up
-    if (g_executor.finished_.load(std::memory_order_acquire)) {
+    if (g_aicpu_executor.finished_.load(std::memory_order_acquire)) {
         DEV_INFO("AicpuExecute: Last thread finished, cleaning up");
-        g_executor.DeInit();
+        g_aicpu_executor.DeInit();
     }
 
     DEV_INFO("%s", "AicpuExecute: Kernel execution completed successfully");

@@ -49,10 +49,7 @@ extern "C" {
 struct KernelArgs {
     uint64_t unused[5] = {0};        // Alignment padding (required by CANN runtime offset)
     DeviceArgs *deviceArgs{nullptr};    // Device arguments (AICPU reads, contains SO info)
-    uint64_t block_dim;               // Number of blocks (1 block = 1 AIC + 2 AIV)
-    uint32_t nrAic;                   // Number of AIC cores
-    uint32_t scheCpuNum;              // Number of AICPU scheduling threads
-    Runtime *runtimeArgs{nullptr};        // Task runtime in device memory
+    Runtime *runtimeArgs{nullptr};    // Task runtime in device memory
 };
 
 #ifdef __cplusplus
