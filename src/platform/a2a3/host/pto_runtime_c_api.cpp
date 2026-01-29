@@ -11,7 +11,7 @@
 #include <new>  // for placement new
 #include <vector>
 
-#include "devicerunner.h"
+#include "device_runner.h"
 #include "runtime.h"
 
 extern "C" {
@@ -21,19 +21,19 @@ extern "C" {
 /* Runtime Implementation Functions (defined in runtimemaker.cpp) */
 /* ===========================================================================
  */
-int InitRuntimeImpl(Runtime* runtime,
+int init_runtime_impl(Runtime* runtime,
                     const uint8_t* orch_so_binary,
                     size_t orch_so_size,
                     const char* orch_func_name,
                     uint64_t* func_args,
                     int func_args_count);
-int ValidateRuntimeImpl(Runtime* runtime);
+int validate_runtime_impl(Runtime* runtime);
 
-/* Forward declarations for device memory functions used in InitRuntime */
-void* DeviceMalloc(size_t size);
-void DeviceFree(void* devPtr);
-int CopyToDevice(void* devPtr, const void* hostPtr, size_t size);
-int CopyFromDevice(void* hostPtr, const void* devPtr, size_t size);
+/* Forward declarations for device memory functions used in init_runtime */
+void* device_malloc(size_t size);
+void device_free(void* dev_ptr);
+int copy_to_device(void* dev_ptr, const void* host_ptr, size_t size);
+int copy_from_device(void* host_ptr, const void* dev_ptr, size_t size);
 
 /* ===========================================================================
  */
@@ -41,9 +41,9 @@ int CopyFromDevice(void* hostPtr, const void* devPtr, size_t size);
 /* ===========================================================================
  */
 
-size_t GetRuntimeSize(void) { return sizeof(Runtime); }
+size_t get_runtime_size(void) { return sizeof(Runtime); }
 
-int InitRuntime(RuntimeHandle runtime,
+int init_runtime(RuntimeHandle runtime,
                 const uint8_t* orch_so_binary,
                 size_t orch_so_size,
                 const char* orch_func_name,
@@ -62,63 +62,65 @@ int InitRuntime(RuntimeHandle runtime,
         Runtime* r = new (runtime) Runtime();
 
         // Initialize host API function pointers (host-only, not available on device)
-        r->host_api.DeviceMalloc = DeviceMalloc;
-        r->host_api.DeviceFree = DeviceFree;
-        r->host_api.CopyToDevice = CopyToDevice;
-        r->host_api.CopyFromDevice = CopyFromDevice;
+        r->host_api.device_malloc = device_malloc;
+        r->host_api.device_free = device_free;
+        r->host_api.copy_to_device = copy_to_device;
+        r->host_api.copy_from_device = copy_from_device;
 
-        // Delegate SO loading and orchestration to InitRuntimeImpl
-        return InitRuntimeImpl(r, orch_so_binary, orch_so_size,
+        // Delegate SO loading and orchestration to init_runtime_impl
+        return init_runtime_impl(r, orch_so_binary, orch_so_size,
                                orch_func_name, func_args, func_args_count);
     } catch (...) {
         return -1;
     }
 }
 
-/* =========================================================================== */
+/* ===========================================================================
+ */
 /* Device Memory API Implementation */
-/* =========================================================================== */
+/* ===========================================================================
+ */
 
-void* DeviceMalloc(size_t size) {
+void* device_malloc(size_t size) {
     try {
-        DeviceRunner& runner = DeviceRunner::Get();
-        return runner.AllocateTensor(size);
+        DeviceRunner& runner = DeviceRunner::get();
+        return runner.allocate_tensor(size);
     } catch (...) {
         return NULL;
     }
 }
 
-void DeviceFree(void* devPtr) {
-    if (devPtr == NULL) {
+void device_free(void* dev_ptr) {
+    if (dev_ptr == NULL) {
         return;
     }
     try {
-        DeviceRunner& runner = DeviceRunner::Get();
-        runner.FreeTensor(devPtr);
+        DeviceRunner& runner = DeviceRunner::get();
+        runner.free_tensor(dev_ptr);
     } catch (...) {
         // Ignore errors during free
     }
 }
 
-int CopyToDevice(void* devPtr, const void* hostPtr, size_t size) {
-    if (devPtr == NULL || hostPtr == NULL) {
+int copy_to_device(void* dev_ptr, const void* host_ptr, size_t size) {
+    if (dev_ptr == NULL || host_ptr == NULL) {
         return -1;
     }
     try {
-        DeviceRunner& runner = DeviceRunner::Get();
-        return runner.CopyToDevice(devPtr, hostPtr, size);
+        DeviceRunner& runner = DeviceRunner::get();
+        return runner.copy_to_device(dev_ptr, host_ptr, size);
     } catch (...) {
         return -1;
     }
 }
 
-int CopyFromDevice(void* hostPtr, const void* devPtr, size_t size) {
-    if (hostPtr == NULL || devPtr == NULL) {
+int copy_from_device(void* host_ptr, const void* dev_ptr, size_t size) {
+    if (host_ptr == NULL || dev_ptr == NULL) {
         return -1;
     }
     try {
-        DeviceRunner& runner = DeviceRunner::Get();
-        return runner.CopyFromDevice(hostPtr, devPtr, size);
+        DeviceRunner& runner = DeviceRunner::get();
+        return runner.copy_from_device(host_ptr, dev_ptr, size);
     } catch (...) {
         return -1;
     }
@@ -139,27 +141,27 @@ int launch_runtime(RuntimeHandle runtime,
         return -1;
     }
     try {
-        DeviceRunner& runner = DeviceRunner::Get();
+        DeviceRunner& runner = DeviceRunner::get();
 
-        // Convert to vectors for Run()
-        std::vector<uint8_t> aicpuVec(aicpu_binary, aicpu_binary + aicpu_size);
-        std::vector<uint8_t> aicoreVec(aicore_binary, aicore_binary + aicore_size);
+        // Convert to vectors for run()
+        std::vector<uint8_t> aicpu_vec(aicpu_binary, aicpu_binary + aicpu_size);
+        std::vector<uint8_t> aicore_vec(aicore_binary, aicore_binary + aicore_size);
 
         // Run the runtime (device initialization is handled internally)
         Runtime* r = static_cast<Runtime*>(runtime);
-        return runner.Run(*r, block_dim, device_id, aicpuVec, aicoreVec, aicpu_thread_num);
+        return runner.run(*r, block_dim, device_id, aicpu_vec, aicore_vec, aicpu_thread_num);
     } catch (...) {
         return -1;
     }
 }
 
-int FinalizeRuntime(RuntimeHandle runtime) {
+int finalize_runtime(RuntimeHandle runtime) {
     if (runtime == NULL) {
         return -1;
     }
     try {
         Runtime* r = static_cast<Runtime*>(runtime);
-        int rc = ValidateRuntimeImpl(r);
+        int rc = validate_runtime_impl(r);
         // Call destructor (user will call free())
         r->~Runtime();
         return rc;
@@ -170,20 +172,20 @@ int FinalizeRuntime(RuntimeHandle runtime) {
 
 int set_device(int device_id) {
     try {
-        DeviceRunner& runner = DeviceRunner::Get();
-        return runner.EnsureDeviceSet(device_id);
+        DeviceRunner& runner = DeviceRunner::get();
+        return runner.ensure_device_set(device_id);
     } catch (...) {
         return -1;
     }
 }
 
-int RegisterKernel(int func_id, const uint8_t* bin_data, size_t bin_size) {
+int register_kernel(int func_id, const uint8_t* bin_data, size_t bin_size) {
     if (bin_data == NULL || bin_size == 0) {
         return -1;
     }
     try {
-        DeviceRunner& runner = DeviceRunner::Get();
-        return runner.RegisterKernel(func_id, bin_data, bin_size);
+        DeviceRunner& runner = DeviceRunner::get();
+        return runner.register_kernel(func_id, bin_data, bin_size);
     } catch (...) {
         return -1;
     }

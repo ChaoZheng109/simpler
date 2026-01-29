@@ -11,7 +11,7 @@ Usage:
     Runtime = load_runtime("/path/to/libpto_runtime.so")
 
     runtime = Runtime()
-    runtime.initialize(orch_so_binary, "BuildExampleGraph", func_args)
+    runtime.initialize(orch_so_binary, "build_example_graph", func_args)
 
     register_kernel(0, kernel_add)
     register_kernel(1, kernel_add_scalar)
@@ -77,12 +77,12 @@ class RuntimeLibraryLoader:
     def _setup_functions(self):
         """Set up ctypes function signatures."""
 
-        # GetRuntimeSize - returns sizeof(Runtime) for user allocation
-        self.lib.GetRuntimeSize.argtypes = []
-        self.lib.GetRuntimeSize.restype = c_size_t
+        # get_runtime_size - returns sizeof(Runtime) for user allocation
+        self.lib.get_runtime_size.argtypes = []
+        self.lib.get_runtime_size.restype = c_size_t
 
-        # InitRuntime - placement new + load SO + build runtime with orchestration
-        self.lib.InitRuntime.argtypes = [
+        # init_runtime - placement new + load SO + build runtime with orchestration
+        self.lib.init_runtime.argtypes = [
             c_void_p,               # runtime
             POINTER(c_uint8),       # orch_so_binary
             c_size_t,               # orch_so_size
@@ -90,7 +90,7 @@ class RuntimeLibraryLoader:
             POINTER(c_uint64),      # func_args
             c_int,                  # func_args_count
         ]
-        self.lib.InitRuntime.restype = c_int
+        self.lib.init_runtime.restype = c_int
 
         # launch_runtime - device init + execute runtime
         self.lib.launch_runtime.argtypes = [
@@ -105,13 +105,13 @@ class RuntimeLibraryLoader:
         ]
         self.lib.launch_runtime.restype = c_int
 
-        # FinalizeRuntime - validate + cleanup
-        self.lib.FinalizeRuntime.argtypes = [c_void_p]
-        self.lib.FinalizeRuntime.restype = c_int
+        # finalize_runtime - validate + cleanup
+        self.lib.finalize_runtime.argtypes = [c_void_p]
+        self.lib.finalize_runtime.restype = c_int
 
-        # RegisterKernel - register kernel binary for func_id
-        self.lib.RegisterKernel.argtypes = [c_int, POINTER(c_uint8), c_size_t]
-        self.lib.RegisterKernel.restype = c_int
+        # register_kernel - register kernel binary for func_id
+        self.lib.register_kernel.argtypes = [c_int, POINTER(c_uint8), c_size_t]
+        self.lib.register_kernel.restype = c_int
 
         # set_device - set device and create streams
         self.lib.set_device.argtypes = [c_int]
@@ -142,8 +142,8 @@ class Runtime:
         """
 
         self.lib = lib
-        # Allocate buffer of size GetRuntimeSize() for placement new
-        size = lib.GetRuntimeSize()
+        # Allocate buffer of size get_runtime_size() for placement new
+        size = lib.get_runtime_size()
         self._buffer = ctypes.create_string_buffer(size)
         self._handle = ctypes.cast(self._buffer, c_void_p)
 
@@ -157,7 +157,7 @@ class Runtime:
 
         Initialize the runtime structure with dynamic orchestration.
 
-        Calls InitRuntime() in C++ which loads the orchestration SO,
+        Calls init_runtime() in C++ which loads the orchestration SO,
         resolves the function, and calls it to build the task graph.
         The orchestration function is responsible for:
         1. Allocating device memory
@@ -186,7 +186,7 @@ class Runtime:
         # Convert orch_so_binary to ctypes array
         orch_so_array = (c_uint8 * len(orch_so_binary)).from_buffer_copy(orch_so_binary)
 
-        rc = self.lib.InitRuntime(
+        rc = self.lib.init_runtime(
             self._handle,
             orch_so_array,
             len(orch_so_binary),
@@ -195,23 +195,23 @@ class Runtime:
             func_args_count
         )
         if rc != 0:
-            raise RuntimeError(f"InitRuntime failed: {rc}")
+            raise RuntimeError(f"init_runtime failed: {rc}")
 
     def finalize(self) -> None:
         """
 
         Finalize and cleanup the runtime.
 
-        Calls FinalizeRuntime() in C++ which validates computation results,
+        Calls finalize_runtime() in C++ which validates computation results,
         frees device tensors, and calls the Runtime destructor.
 
         Raises:
             RuntimeError: If finalization fails
         """
 
-        rc = self.lib.FinalizeRuntime(self._handle)
+        rc = self.lib.finalize_runtime(self._handle)
         if rc != 0:
-            raise RuntimeError(f"FinalizeRuntime failed: {rc}")
+            raise RuntimeError(f"finalize_runtime failed: {rc}")
 
     def __del__(self):
         """Clean up runtime resources."""
@@ -251,9 +251,9 @@ def register_kernel(func_id: int, binary_data: bytes) -> None:
 
     # Convert bytes to ctypes array
     bin_array = (c_uint8 * len(binary_data)).from_buffer_copy(binary_data)
-    rc = _lib.RegisterKernel(func_id, bin_array, len(binary_data))
+    rc = _lib.register_kernel(func_id, bin_array, len(binary_data))
     if rc != 0:
-        raise RuntimeError(f"RegisterKernel failed: {rc}")
+        raise RuntimeError(f"register_kernel failed: {rc}")
 
 
 def set_device(device_id: int) -> None:
@@ -354,7 +354,7 @@ def load_runtime(lib_path: Union[str, Path, bytes]) -> type:
         Runtime = load_runtime("/path/to/libpto_runtime.so")
 
         runtime = Runtime()
-        runtime.initialize(orch_so_binary, "BuildExampleGraph", func_args)
+        runtime.initialize(orch_so_binary, "build_example_graph", func_args)
 
         register_kernel(0, kernel_add)
         register_kernel(1, kernel_add_scalar)

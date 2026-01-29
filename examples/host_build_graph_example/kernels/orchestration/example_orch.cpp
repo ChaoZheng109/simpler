@@ -17,11 +17,11 @@
 
 extern "C" {
 
-int BuildExampleGraph(Runtime* runtime, uint64_t* args, int arg_count) {
+int build_example_graph(Runtime* runtime, uint64_t* args, int arg_count) {
     // Validate argument count
     // Expected args: [host_a, host_b, host_f, size_a, size_b, size_f, SIZE]
     if (arg_count < 7) {
-        std::cerr << "BuildExampleGraph: Expected at least 7 args, got " << arg_count << '\n';
+        std::cerr << "build_example_graph: Expected at least 7 args, got " << arg_count << '\n';
         return -1;
     }
 
@@ -34,55 +34,55 @@ int BuildExampleGraph(Runtime* runtime, uint64_t* args, int arg_count) {
     size_t size_f = static_cast<size_t>(args[5]);
     int SIZE = static_cast<int>(args[6]);
 
-    std::cout << "\n=== BuildExampleGraph: Creating Task Runtime ===" << '\n';
+    std::cout << "\n=== build_example_graph: Creating Task Runtime ===" << '\n';
     std::cout << "Formula: (a + b + 1)(a + b + 2)\n";
     std::cout << "SIZE: " << SIZE << " elements\n";
 
     // Allocate device memory and copy inputs
     std::cout << "\n=== Allocating Device Memory ===" << '\n';
 
-    void* dev_a = runtime->host_api.DeviceMalloc(size_a);
+    void* dev_a = runtime->host_api.device_malloc(size_a);
     if (!dev_a) {
         std::cerr << "Error: Failed to allocate device memory for a\n";
         return -1;
     }
-    runtime->host_api.CopyToDevice(dev_a, host_a, size_a);
+    runtime->host_api.copy_to_device(dev_a, host_a, size_a);
     std::cout << "Tensor a: " << size_a << " bytes copied to device\n";
 
-    void* dev_b = runtime->host_api.DeviceMalloc(size_b);
+    void* dev_b = runtime->host_api.device_malloc(size_b);
     if (!dev_b) {
         std::cerr << "Error: Failed to allocate device memory for b\n";
-        runtime->host_api.DeviceFree(dev_a);
+        runtime->host_api.device_free(dev_a);
         return -1;
     }
-    runtime->host_api.CopyToDevice(dev_b, host_b, size_b);
+    runtime->host_api.copy_to_device(dev_b, host_b, size_b);
     std::cout << "Tensor b: " << size_b << " bytes copied to device\n";
 
-    void* dev_f = runtime->host_api.DeviceMalloc(size_f);
+    void* dev_f = runtime->host_api.device_malloc(size_f);
     if (!dev_f) {
         std::cerr << "Error: Failed to allocate device memory for f\n";
-        runtime->host_api.DeviceFree(dev_a);
-        runtime->host_api.DeviceFree(dev_b);
+        runtime->host_api.device_free(dev_a);
+        runtime->host_api.device_free(dev_b);
         return -1;
     }
     // Record output tensor for copy-back during finalize
-    runtime->RecordTensorPair(host_f, dev_f, size_f);
+    runtime->record_tensor_pair(host_f, dev_f, size_f);
     std::cout << "Tensor f (output): " << size_f << " bytes allocated\n";
 
     // Allocate intermediate tensors (c, d, e)
     size_t BYTES = SIZE * sizeof(float);
-    void* dev_c = runtime->host_api.DeviceMalloc(BYTES);
-    void* dev_d = runtime->host_api.DeviceMalloc(BYTES);
-    void* dev_e = runtime->host_api.DeviceMalloc(BYTES);
+    void* dev_c = runtime->host_api.device_malloc(BYTES);
+    void* dev_d = runtime->host_api.device_malloc(BYTES);
+    void* dev_e = runtime->host_api.device_malloc(BYTES);
 
     if (!dev_c || !dev_d || !dev_e) {
         std::cerr << "Error: Failed to allocate intermediate tensors\n";
-        runtime->host_api.DeviceFree(dev_a);
-        runtime->host_api.DeviceFree(dev_b);
-        runtime->host_api.DeviceFree(dev_f);
-        if (dev_c) runtime->host_api.DeviceFree(dev_c);
-        if (dev_d) runtime->host_api.DeviceFree(dev_d);
-        if (dev_e) runtime->host_api.DeviceFree(dev_e);
+        runtime->host_api.device_free(dev_a);
+        runtime->host_api.device_free(dev_b);
+        runtime->host_api.device_free(dev_f);
+        if (dev_c) runtime->host_api.device_free(dev_c);
+        if (dev_d) runtime->host_api.device_free(dev_d);
+        if (dev_e) runtime->host_api.device_free(dev_e);
         return -1;
     }
 

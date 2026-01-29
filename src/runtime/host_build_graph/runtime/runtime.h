@@ -112,8 +112,8 @@ enum class CoreType : int {
  * Used for copy-back during finalize.
  */
 struct TensorPair {
-    void* hostPtr;
-    void* devPtr;
+    void* host_ptr;
+    void* dev_ptr;
     size_t size;
 };
 
@@ -122,10 +122,10 @@ struct TensorPair {
  * Allows runtime to use pluggable device memory backends.
  */
 struct HostApi {
-    void* (*DeviceMalloc)(size_t size);
-    void (*DeviceFree)(void* devPtr);
-    int (*CopyToDevice)(void* devPtr, const void* hostPtr, size_t size);
-    int (*CopyFromDevice)(void* hostPtr, const void* devPtr, size_t size);
+    void* (*device_malloc)(size_t size);
+    void (*device_free)(void* dev_ptr);
+    int (*copy_to_device)(void* dev_ptr, const void* host_ptr, size_t size);
+    int (*copy_from_device)(void* host_ptr, const void* dev_ptr, size_t size);
 };
 
 /**
@@ -142,8 +142,8 @@ typedef struct {
 
     // Runtime function pointer address (NEW)
     // This is the GM address where the kernel binary resides
-    // It's cast to a function pointer at runtime: (KernelFunc)functionBinAddr
-    uint64_t functionBinAddr;  // Address of kernel in device GM memory
+    // It's cast to a function pointer at runtime: (KernelFunc)function_bin_addr
+    uint64_t function_bin_addr;  // Address of kernel in device GM memory
 
     // Core type specification (NEW)
     // Specifies which core type this task should run on: 0=AIC, 1=AIV
@@ -179,8 +179,8 @@ public:
     int worker_count;                       // Number of active workers
 
     // Execution parameters for AICPU scheduling
-    int block_dim;   // Number of AIC blocks (block dimension)
-    int scheCpuNum;  // Number of AICPU threads for scheduling
+    int block_dim;     // Number of AIC blocks (block dimension)
+    int sche_cpu_num;  // Number of AICPU threads for scheduling
 
 private:
     // Task storage
@@ -277,30 +277,30 @@ public:
     /**
      * Record a host-device tensor pair for copy-back during finalize.
      *
-     * @param hostPtr  Host memory pointer (destination for copy-back)
-     * @param devPtr   Device memory pointer (source for copy-back)
+     * @param host_ptr  Host memory pointer (destination for copy-back)
+     * @param dev_ptr   Device memory pointer (source for copy-back)
      * @param size     Size of tensor in bytes
      */
-    void RecordTensorPair(void* hostPtr, void* devPtr, size_t size);
+    void record_tensor_pair(void* host_ptr, void* dev_ptr, size_t size);
 
     /**
      * Get pointer to tensor pairs array.
      *
      * @return Pointer to tensor pairs array
      */
-    TensorPair* GetTensorPairs();
+    TensorPair* get_tensor_pairs();
 
     /**
      * Get number of recorded tensor pairs.
      *
      * @return Number of tensor pairs
      */
-    int GetTensorPairCount() const;
+    int get_tensor_pair_count() const;
 
     /**
      * Clear all recorded tensor pairs.
      */
-    void ClearTensorPairs();
+    void clear_tensor_pairs();
 
     // =========================================================================
     // Host API (host-only, not copied to device)

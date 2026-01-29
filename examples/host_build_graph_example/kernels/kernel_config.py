@@ -11,7 +11,7 @@ _KERNELS_ROOT = Path(__file__).parent
 # Orchestration config
 ORCHESTRATION = {
     "source": str(_KERNELS_ROOT / "orchestration" / "example_orch.cpp"),
-    "function_name": "BuildExampleGraph",
+    "function_name": "build_example_graph",
 }
 
 # Kernel configs

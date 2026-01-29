@@ -20,7 +20,7 @@ Runtime::Runtime() {
         tasks[i].task_id = 0;
         tasks[i].func_id = 0;
         tasks[i].num_args = 0;
-        tasks[i].functionBinAddr = 0;
+        tasks[i].function_bin_addr = 0;
         tasks[i].core_type = 0;
         tasks[i].fanin = 0;
         tasks[i].fanout_count = 0;
@@ -33,7 +33,7 @@ Runtime::Runtime() {
     initial_ready_count = 0;
     worker_count = 0;
     block_dim = 0;
-    scheCpuNum = 1;
+    sche_cpu_num = 1;
     tensor_pair_count = 0;
 }
 
@@ -64,8 +64,8 @@ int Runtime::add_task(uint64_t* args, int num_args, int func_id, int core_type) 
     if (args && num_args > 0) {
         memcpy(task->args, args, num_args * sizeof(uint64_t));
     }
-    task->functionBinAddr = 0;    // Will be set by host before copying to device
-    task->core_type = core_type;  // Set core type (0=AIC, 1=AIV)
+    task->function_bin_addr = 0;    // Will be set by host before copying to device
+    task->core_type = core_type;    // Set core type (0=AIC, 1=AIV)
     task->fanin = 0;
     task->fanout_count = 0;
     memset(task->fanout, 0, sizeof(task->fanout));
@@ -189,26 +189,26 @@ void Runtime::print_runtime() const {
 // Tensor Pair Management
 // =============================================================================
 
-void Runtime::RecordTensorPair(void* hostPtr, void* devPtr, size_t size) {
+void Runtime::record_tensor_pair(void* host_ptr, void* dev_ptr, size_t size) {
     if (tensor_pair_count >= RUNTIME_MAX_TENSOR_PAIRS) {
         fprintf(stderr, "[Runtime] ERROR: Tensor pairs full (max=%d)\n", RUNTIME_MAX_TENSOR_PAIRS);
         return;
     }
-    tensor_pairs[tensor_pair_count].hostPtr = hostPtr;
-    tensor_pairs[tensor_pair_count].devPtr = devPtr;
+    tensor_pairs[tensor_pair_count].host_ptr = host_ptr;
+    tensor_pairs[tensor_pair_count].dev_ptr = dev_ptr;
     tensor_pairs[tensor_pair_count].size = size;
     tensor_pair_count++;
-    printf("Recorded tensor pair: host=%p dev=%p size=%zu\n", hostPtr, devPtr, size);
+    printf("Recorded tensor pair: host=%p dev=%p size=%zu\n", host_ptr, dev_ptr, size);
 }
 
-TensorPair* Runtime::GetTensorPairs() {
+TensorPair* Runtime::get_tensor_pairs() {
     return tensor_pairs;
 }
 
-int Runtime::GetTensorPairCount() const {
+int Runtime::get_tensor_pair_count() const {
     return tensor_pair_count;
 }
 
-void Runtime::ClearTensorPairs() {
+void Runtime::clear_tensor_pairs() {
     tensor_pair_count = 0;
 }

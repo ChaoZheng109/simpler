@@ -20,8 +20,8 @@ endif()
 # Build complete source list: core host sources + sources from CUSTOM_SOURCE_DIRS
 set(HOST_RUNTIME_SOURCES "")
 list(APPEND HOST_RUNTIME_SOURCES
-    "${CMAKE_CURRENT_SOURCE_DIR}/devicerunner.cpp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/memoryallocator.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/device_runner.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/memory_allocator.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/pto_runtime_c_api.cpp"
 )
 if(DEFINED CUSTOM_SOURCE_DIRS)

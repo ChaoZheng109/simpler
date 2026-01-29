@@ -8,7 +8,7 @@
  * - All functions use C linkage (extern "C")
  * - Opaque pointers hide C++ implementation details
  * - Error codes: 0 = success, negative = error
- * - Memory management: User allocates Runtime with malloc(GetRuntimeSize())
+ * - Memory management: User allocates Runtime with malloc(get_runtime_size())
  */
 
 #ifndef PTO_RUNTIME_C_API_H
@@ -36,11 +36,11 @@ typedef void* RuntimeHandle;
 /**
  * Get the size of Runtime structure for memory allocation.
  *
- * User should allocate: Runtime* r = (Runtime*)malloc(GetRuntimeSize());
+ * User should allocate: Runtime* r = (Runtime*)malloc(get_runtime_size());
  *
  * @return Size of Runtime structure in bytes
  */
-size_t GetRuntimeSize(void);
+size_t get_runtime_size(void);
 
 /**
  * Initialize a runtime with dynamic orchestration.
@@ -50,7 +50,7 @@ size_t GetRuntimeSize(void);
  * specified function, and calls it to build the task graph.
  * The orchestration function is responsible for device memory management.
  *
- * @param runtime           User-allocated memory of size GetRuntimeSize()
+ * @param runtime           User-allocated memory of size get_runtime_size()
  * @param orch_so_binary    Orchestration shared library binary data
  * @param orch_so_size      Size of orchestration SO binary in bytes
  * @param orch_func_name    Name of the orchestration function to call
@@ -58,16 +58,18 @@ size_t GetRuntimeSize(void);
  * @param func_args_count   Number of arguments
  * @return 0 on success, -1 on failure
  */
-int InitRuntime(RuntimeHandle runtime,
+int init_runtime(RuntimeHandle runtime,
                 const uint8_t* orch_so_binary,
                 size_t orch_so_size,
                 const char* orch_func_name,
                 uint64_t* func_args,
                 int func_args_count);
 
-/* =========================================================================== */
+/* ===========================================================================
+ */
 /* Device Memory API (for use by orchestration functions) */
-/* =========================================================================== */
+/* ===========================================================================
+ */
 
 /**
  * Allocate device memory.
@@ -75,34 +77,34 @@ int InitRuntime(RuntimeHandle runtime,
  * @param size  Size in bytes to allocate
  * @return Device pointer on success, NULL on failure
  */
-void* DeviceMalloc(size_t size);
+void* device_malloc(size_t size);
 
 /**
  * Free device memory.
  *
- * @param devPtr  Device pointer to free
+ * @param dev_ptr  Device pointer to free
  */
-void DeviceFree(void* devPtr);
+void device_free(void* dev_ptr);
 
 /**
  * Copy data from host to device.
  *
- * @param devPtr   Device destination pointer
- * @param hostPtr  Host source pointer
+ * @param dev_ptr   Device destination pointer
+ * @param host_ptr  Host source pointer
  * @param size     Size in bytes to copy
  * @return 0 on success, error code on failure
  */
-int CopyToDevice(void* devPtr, const void* hostPtr, size_t size);
+int copy_to_device(void* dev_ptr, const void* host_ptr, size_t size);
 
 /**
  * Copy data from device to host.
  *
- * @param hostPtr  Host destination pointer
- * @param devPtr   Device source pointer
+ * @param host_ptr  Host destination pointer
+ * @param dev_ptr   Device source pointer
  * @param size     Size in bytes to copy
  * @return 0 on success, error code on failure
  */
-int CopyFromDevice(void* hostPtr, const void* devPtr, size_t size);
+int copy_from_device(void* host_ptr, const void* dev_ptr, size_t size);
 
 /**
  * Execute a runtime on the device.
@@ -139,12 +141,12 @@ int launch_runtime(RuntimeHandle runtime,
  * @param runtime  Runtime handle to finalize
  * @return 0 on success, -1 on failure
  */
-int FinalizeRuntime(RuntimeHandle runtime);
+int finalize_runtime(RuntimeHandle runtime);
 
 /**
  * Set device and create streams for memory operations.
  *
- * Must be called before InitRuntime() to enable device tensor allocation.
+ * Must be called before init_runtime() to enable device tensor allocation.
  * Only performs minimal initialization:
  * - rtSetDevice(device_id)
  * - Create AICPU and AICore streams
@@ -171,7 +173,7 @@ int set_device(int device_id);
  * @param bin_size  Size of binary data in bytes
  * @return 0 on success, error code on failure
  */
-int RegisterKernel(int func_id, const uint8_t* bin_data, size_t bin_size);
+int register_kernel(int func_id, const uint8_t* bin_data, size_t bin_size);
 
 #ifdef __cplusplus
 } /* extern "C" */
