@@ -329,50 +329,48 @@ int AicpuExecutor::resolve_and_dispatch(Runtime& runtime, int thread_idx, const 
         }
 
         // Load balancing: Skip dispatch if all my cores are busy
-        if (cur_thread_tasks_in_flight >= core_num) {
-            continue;
-        }
+        if (cur_thread_tasks_in_flight < core_num) {
+            // Phase 2: Dispatch new tasks from matching ready queue to idle cores
+            for (int i = 0; i < core_num; i++) {
+                int core_id = cur_thread_cores[i];
+                Handshake* h = &hank[core_id];
 
-        // Phase 2: Dispatch new tasks from matching ready queue to idle cores
-        for (int i = 0; i < core_num; i++) {
-            int core_id = cur_thread_cores[i];
-            Handshake* h = &hank[core_id];
+                // Core is idle and available (idle + task is null)
+                if (h->task_status == 0 && h->task == 0) {
+                    // Dispatch from matching queue based on core type
+                    if (h->core_type == 0) {  // AIC core
+                        if (ready_count_aic_.load(std::memory_order_acquire) > 0) {
+                            std::lock_guard<std::mutex> lock(ready_queue_aic_mutex_);
+                            int count = ready_count_aic_.load(std::memory_order_relaxed);
+                            if (count > 0) {
+                                ready_count_aic_.fetch_sub(1, std::memory_order_release);
+                                int task_id = ready_queue_aic_[count - 1];
+                                Task* task = runtime.get_task(task_id);
 
-            // Core is idle and available (idle + task is null)
-            if (h->task_status == 0 && h->task == 0) {
-                // Dispatch from matching queue based on core type
-                if (h->core_type == 0) {  // AIC core
-                    if (ready_count_aic_.load(std::memory_order_acquire) > 0) {
-                        std::lock_guard<std::mutex> lock(ready_queue_aic_mutex_);
-                        int count = ready_count_aic_.load(std::memory_order_relaxed);
-                        if (count > 0) {
-                            ready_count_aic_.fetch_sub(1, std::memory_order_release);
-                            int task_id = ready_queue_aic_[count - 1];
-                            Task* task = runtime.get_task(task_id);
+                                DEV_INFO("Thread %d: Dispatching AIC task %d to core %d", thread_idx, task_id, core_id);
 
-                            DEV_INFO("Thread %d: Dispatching AIC task %d to core %d", thread_idx, task_id, core_id);
-
-                            h->task = reinterpret_cast<uint64_t>(task);
-                            h->task_status = 1;  // Mark as busy
-                            cur_thread_tasks_in_flight++;
-                            made_progress = true;
+                                h->task = reinterpret_cast<uint64_t>(task);
+                                h->task_status = 1;  // Mark as busy
+                                cur_thread_tasks_in_flight++;
+                                made_progress = true;
+                            }
                         }
-                    }
-                } else if (h->core_type == 1) {  // AIV core
-                    if (ready_count_aiv_.load(std::memory_order_acquire) > 0) {
-                        std::lock_guard<std::mutex> lock(ready_queue_aiv_mutex_);
-                        int count = ready_count_aiv_.load(std::memory_order_relaxed);
-                        if (count > 0) {
-                            ready_count_aiv_.fetch_sub(1, std::memory_order_release);
-                            int task_id = ready_queue_aiv_[count - 1];
-                            Task* task = runtime.get_task(task_id);
+                    } else if (h->core_type == 1) {  // AIV core
+                        if (ready_count_aiv_.load(std::memory_order_acquire) > 0) {
+                            std::lock_guard<std::mutex> lock(ready_queue_aiv_mutex_);
+                            int count = ready_count_aiv_.load(std::memory_order_relaxed);
+                            if (count > 0) {
+                                ready_count_aiv_.fetch_sub(1, std::memory_order_release);
+                                int task_id = ready_queue_aiv_[count - 1];
+                                Task* task = runtime.get_task(task_id);
 
-                            DEV_INFO("Thread %d: Dispatching AIV task %d to core %d", thread_idx, task_id, core_id);
+                                DEV_INFO("Thread %d: Dispatching AIV task %d to core %d", thread_idx, task_id, core_id);
 
-                            h->task = reinterpret_cast<uint64_t>(task);
-                            h->task_status = 1;  // Mark as busy
-                            cur_thread_tasks_in_flight++;
-                            made_progress = true;
+                                h->task = reinterpret_cast<uint64_t>(task);
+                                h->task_status = 1;  // Mark as busy
+                                cur_thread_tasks_in_flight++;
+                                made_progress = true;
+                            }
                         }
                     }
                 }
