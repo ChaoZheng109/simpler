@@ -5,7 +5,7 @@
  * bindings. Simplified single-concept model: Runtime only.
  */
 
-#include "pto_runtime_c_api.h"
+#include "host/pto_runtime_c_api.h"
 
 #include <iostream>
 #include <new>  // for placement new

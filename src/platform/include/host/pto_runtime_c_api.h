@@ -4,6 +4,9 @@
  * Pure C interface for Python ctypes bindings. Wraps C++ classes (Runtime,
  * DeviceRunner) as opaque pointers and provides C functions to manipulate them.
  *
+ * This interface is shared across all platforms (a2a3, a2a3sim, etc.) to ensure
+ * compatibility and consistent behavior.
+ *
  * Key design:
  * - All functions use C linkage (extern "C")
  * - Opaque pointers hide C++ implementation details
@@ -28,9 +31,8 @@ extern "C" {
 typedef void* RuntimeHandle;
 
 /* ===========================================================================
- */
-/* Runtime API */
-/* ===========================================================================
+ * Runtime API
+ * ===========================================================================
  */
 
 /**
@@ -66,9 +68,8 @@ int init_runtime(RuntimeHandle runtime,
                 int func_args_count);
 
 /* ===========================================================================
- */
-/* Device Memory API (for use by orchestration functions) */
-/* ===========================================================================
+ * Device Memory API (for use by orchestration functions)
+ * ===========================================================================
  */
 
 /**

@@ -6,7 +6,7 @@
  * execution.
  */
 
-#include "pto_runtime_c_api.h"
+#include "host/pto_runtime_c_api.h"
 
 #include <iostream>
 #include <new>
