@@ -274,8 +274,8 @@ int DeviceRunner::run(Runtime& runtime,
         runtime.workers[i].control = 0;
         runtime.workers[i].task = 0;
         runtime.workers[i].task_status = 0;
-        // Set core type: first 1/3 are AIC (0), remaining 2/3 are AIV (1)
-        runtime.workers[i].core_type = (i < num_aic) ? 0 : 1;
+        // Set core type: first 1/3 are AIC, remaining 2/3 are AIV
+        runtime.workers[i].core_type = (i < num_aic) ? CoreType::AIC : CoreType::AIV;
     }
 
     // Set function_bin_addr for all tasks (NEW - Runtime function pointer

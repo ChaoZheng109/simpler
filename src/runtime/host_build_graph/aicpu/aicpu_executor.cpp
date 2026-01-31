@@ -2,7 +2,7 @@
 #include <cstdint>
 #include <mutex>
 
-#include "device_log.h"
+#include "aicpu/device_log.h"
 #include "runtime.h"
 
 constexpr int MAX_AICPU_THREADS = 4;
@@ -149,7 +149,7 @@ int AicpuExecutor::init(Runtime* runtime) {
     int aiv_count = 0;
     for (int i = 0; i < initial_count; i++) {
         Task* task = runtime->get_task(initial_ready[i]);
-        if (task->core_type == 0) {  // AIC
+        if (task->core_type == CoreType::AIC) {  // AIC
             ready_queue_aic_[aic_count++] = initial_ready[i];
         } else {  // AIV
             ready_queue_aiv_[aiv_count++] = initial_ready[i];
@@ -304,7 +304,7 @@ int AicpuExecutor::resolve_and_dispatch(Runtime& runtime, int thread_idx, const 
                     // Dependency resolved, add to appropriate shared ready
                     // queue
                     if (prev_fanin == 1) {
-                        if (dep->core_type == 0) {  // AIC task
+                        if (dep->core_type == CoreType::AIC) {  // AIC task
                             std::lock_guard<std::mutex> lock(ready_queue_aic_mutex_);
                             int idx = ready_count_aic_.load(std::memory_order_relaxed);
                             ready_queue_aic_[idx] = dep_id;
@@ -338,7 +338,7 @@ int AicpuExecutor::resolve_and_dispatch(Runtime& runtime, int thread_idx, const 
                 // Core is idle and available (idle + task is null)
                 if (h->task_status == 0 && h->task == 0) {
                     // Dispatch from matching queue based on core type
-                    if (h->core_type == 0) {  // AIC core
+                    if (h->core_type == CoreType::AIC) {  // AIC core
                         if (ready_count_aic_.load(std::memory_order_acquire) > 0) {
                             std::lock_guard<std::mutex> lock(ready_queue_aic_mutex_);
                             int count = ready_count_aic_.load(std::memory_order_relaxed);
@@ -355,7 +355,7 @@ int AicpuExecutor::resolve_and_dispatch(Runtime& runtime, int thread_idx, const 
                                 made_progress = true;
                             }
                         }
-                    } else if (h->core_type == 1) {  // AIV core
+                    } else if (h->core_type == CoreType::AIV) {  // AIV core
                         if (ready_count_aiv_.load(std::memory_order_acquire) > 0) {
                             std::lock_guard<std::mutex> lock(ready_queue_aiv_mutex_);
                             int count = ready_count_aiv_.load(std::memory_order_relaxed);
@@ -474,7 +474,7 @@ void AicpuExecutor::diagnose_stuck_state(Runtime& runtime, int thread_idx,
         int core_id = cur_thread_cores[i];
         Handshake* h = &hank[core_id];
 
-        const char* core_type_str = (h->core_type == 0) ? "AIC" : "AIV";
+        const char* core_type_str = core_type_to_string(h->core_type);
 
         if (h->task != 0) {
             Task* task = reinterpret_cast<Task*>(h->task);

@@ -2,7 +2,7 @@
  * Device logging implementation for AICPU kernel
  */
 
-#include "device_log.h"
+#include "aicpu/device_log.h"
 
 bool g_is_log_enable_debug = false;
 bool g_is_log_enable_info = false;

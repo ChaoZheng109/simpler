@@ -8,7 +8,7 @@ project(host_runtime LANGUAGES C CXX)
 
 # Build complete include list
 set(CMAKE_CUSTOM_INCLUDE_DIRS "")
-list(APPEND CMAKE_CUSTOM_INCLUDE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/../common")
+list(APPEND CMAKE_CUSTOM_INCLUDE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/../../include")
 if(DEFINED CUSTOM_INCLUDE_DIRS)
     foreach(INC_DIR ${CUSTOM_INCLUDE_DIRS})
         list(APPEND CMAKE_CUSTOM_INCLUDE_DIRS "${INC_DIR}")
@@ -45,6 +45,12 @@ target_compile_options(host_runtime
         -fPIC
         -O3
         -g
+)
+
+# Platform definition
+target_compile_definitions(host_runtime
+    PRIVATE
+        __PLATFORM_A2A3__
 )
 
 # Include directories - always include local headers

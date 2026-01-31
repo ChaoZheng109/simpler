@@ -63,9 +63,12 @@ class PTOCompiler:
         Get platform-specific include directories for orchestration compilation.
 
         Returns:
-            List of include directory paths (e.g., for device_runner.h)
+            List of include directory paths (e.g., for device_runner.h, core_type.h)
         """
-        return [str(self.platform_dir / "host")]
+        return [
+            str(self.platform_dir / "host"),
+            str(self.platform_dir.parent / "include"),  # For common headers like core_type.h
+        ]
 
     def compile_incore(
         self,

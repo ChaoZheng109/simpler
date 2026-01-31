@@ -21,7 +21,7 @@ Runtime::Runtime() {
         tasks[i].func_id = 0;
         tasks[i].num_args = 0;
         tasks[i].function_bin_addr = 0;
-        tasks[i].core_type = 0;
+        tasks[i].core_type = CoreType::AIV;  // Default to AIV
         tasks[i].fanin = 0;
         tasks[i].fanout_count = 0;
         tasks[i].start_time = 0;
@@ -41,7 +41,7 @@ Runtime::Runtime() {
 // Task Management
 // =============================================================================
 
-int Runtime::add_task(uint64_t* args, int num_args, int func_id, int core_type) {
+int Runtime::add_task(uint64_t* args, int num_args, int func_id, CoreType core_type) {
     // Check bounds
     if (next_task_id >= RUNTIME_MAX_TASKS) {
         fprintf(stderr, "[Runtime] ERROR: Task table full (max=%d)\n", RUNTIME_MAX_TASKS);
@@ -65,7 +65,7 @@ int Runtime::add_task(uint64_t* args, int num_args, int func_id, int core_type) 
         memcpy(task->args, args, num_args * sizeof(uint64_t));
     }
     task->function_bin_addr = 0;    // Will be set by host before copying to device
-    task->core_type = core_type;    // Set core type (0=AIC, 1=AIV)
+    task->core_type = core_type;    // Set core type
     task->fanin = 0;
     task->fanout_count = 0;
     memset(task->fanout, 0, sizeof(task->fanout));

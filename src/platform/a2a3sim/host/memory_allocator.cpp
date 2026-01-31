@@ -4,7 +4,7 @@
  * Uses standard malloc/free to simulate device memory operations.
  */
 
-#include "memory_allocator.h"
+#include "host/memory_allocator.h"
 
 #include <cstdlib>
 #include <iostream>

@@ -3,7 +3,8 @@
  */
 #include <cstdint>
 
-#include "aicore.h"
+#include "aicore/aicore.h"
+#include "common/core_type.h"
 
 class Runtime;
 
@@ -20,9 +21,9 @@ class Runtime;
 #endif
 
 [[block_local]] int block_idx;
-[[block_local]] int core_type;
+[[block_local]] CoreType core_type;
 
-extern __aicore__ void aicore_execute(__gm__ Runtime* runtime, int block_idx, int core_type);
+extern __aicore__ void aicore_execute(__gm__ Runtime* runtime, int block_idx, CoreType core_type);
 
 /**
  * Kernel entry point with control loop
@@ -43,10 +44,10 @@ extern "C" __global__ __aicore__ void KERNEL_ENTRY(aicore_kernel)(__gm__ Runtime
     // Calculate block_idx for this core
 #ifdef __AIV__
     block_idx = get_block_idx() * get_subblockdim() + get_subblockid() + get_block_num();
-    core_type = 1;
+    core_type = CoreType::AIV;
 #else
     block_idx = get_block_idx();
-    core_type = 0;
+    core_type = CoreType::AIC;
 #endif
     aicore_execute(runtime, block_idx, core_type);
 }

@@ -21,9 +21,9 @@
 #include <string>
 #include <vector>
 
-#include "function_cache.h"
-#include "kernel_args.h"
-#include "memory_allocator.h"
+#include "host/function_cache.h"
+#include "common/kernel_args.h"
+#include "host/memory_allocator.h"
 #include "runtime.h"
 
 /**

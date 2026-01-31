@@ -25,6 +25,8 @@
 
 #include <atomic>
 
+#include "common/core_type.h"
+
 // =============================================================================
 // Configuration Macros
 // =============================================================================
@@ -84,7 +86,7 @@
  * - task: Written by AICPU, read by AICore (0 = no task assigned)
  * - task_status: Written by both (AICPU=1 on dispatch, AICore=0 on completion)
  * - control: Written by AICPU, read by AICore (0 = continue, 1 = quit)
- * - core_type: Written by AICPU, read by AICore (0 = AIC, 1 = AIV)
+ * - core_type: Written by AICPU, read by AICore (CoreType::AIC or CoreType::AIV)
  */
 struct Handshake {
     volatile uint32_t aicpu_ready;  // AICPU ready signal: 0=not ready, 1=ready
@@ -92,20 +94,8 @@ struct Handshake {
     volatile uint64_t task;         // Task pointer: 0=no task, non-zero=Task* address
     volatile int32_t task_status;   // Task execution status: 0=idle, 1=busy
     volatile int32_t control;       // Control signal: 0=execute, 1=quit
-    volatile int32_t core_type;     // Core type: 0=AIC, 1=AIV
+    volatile CoreType core_type;    // Core type: CoreType::AIC or CoreType::AIV
 } __attribute__((aligned(64)));
-
-/**
- * Core type enumeration
- *
- * Specifies which AICore type a task should run on.
- * AIC (AICore Compute) handles compute-intensive operations.
- * AIV (AICore Vector) handles vector/SIMD operations.
- */
-enum class CoreType : int {
-    AIC = 0,  // AICore Compute
-    AIV = 1   // AICore Vector
-};
 
 /**
  * Tensor pair for tracking host-device memory mappings.
@@ -145,9 +135,9 @@ typedef struct {
     // It's cast to a function pointer at runtime: (KernelFunc)function_bin_addr
     uint64_t function_bin_addr;  // Address of kernel in device GM memory
 
-    // Core type specification (NEW)
-    // Specifies which core type this task should run on: 0=AIC, 1=AIV
-    int core_type;  // 0=AIC, 1=AIV
+    // Core type specification
+    // Specifies which core type this task should run on
+    CoreType core_type;  // CoreType::AIC or CoreType::AIV
 
     // Dependency tracking (using PTO runtime terminology)
     std::atomic<int> fanin;          // Number of predecessors (dependencies)
@@ -211,10 +201,10 @@ public:
      * @param args      Array of uint64_t arguments
      * @param num_args  Number of arguments (must be <= RUNTIME_MAX_ARGS)
      * @param func_id   Function identifier
-     * @param core_type Core type for this task (0=AIC, 1=AIV)
+     * @param core_type Core type for this task (CoreType::AIC or CoreType::AIV)
      * @return Task ID (>= 0) on success, -1 on failure
      */
-    int add_task(uint64_t *args, int num_args, int func_id, int core_type = 0);
+    int add_task(uint64_t *args, int num_args, int func_id, CoreType core_type = CoreType::AIC);
 
     /**
      * Add a dependency edge: from_task -> to_task

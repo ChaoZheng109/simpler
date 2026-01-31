@@ -6,7 +6,7 @@ cmake_minimum_required(VERSION 3.16.3)
 # Build complete include list
 set(CMAKE_CUSTOM_INCLUDE_DIR_FLAGS "")
 list(APPEND CMAKE_CUSTOM_INCLUDE_DIR_FLAGS "-I${CMAKE_CURRENT_SOURCE_DIR}")
-list(APPEND CMAKE_CUSTOM_INCLUDE_DIR_FLAGS "-I${CMAKE_CURRENT_SOURCE_DIR}/../common")
+list(APPEND CMAKE_CUSTOM_INCLUDE_DIR_FLAGS "-I${CMAKE_CURRENT_SOURCE_DIR}/../../include")
 if(DEFINED CUSTOM_INCLUDE_DIRS)
     foreach(INC_DIR ${CUSTOM_INCLUDE_DIRS})
         list(APPEND CMAKE_CUSTOM_INCLUDE_DIR_FLAGS "-I${INC_DIR}")
@@ -16,10 +16,8 @@ else()
     message(FATAL_ERROR "MUST set CUSTOM_INCLUDE_DIRS to build with `Task` implementation")
 endif()
 
-# Build complete source list: kernel.cpp + common + CUSTOM_SOURCE_DIRS
+# Build complete source list: kernel.cpp + CUSTOM_SOURCE_DIRS
 set(ALL_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/kernel.cpp")
-file(GLOB COMMON_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/../common/*.cpp" "${CMAKE_CURRENT_SOURCE_DIR}/../common/*.c")
-list(APPEND ALL_SOURCES ${COMMON_SOURCES})
 if(DEFINED CUSTOM_SOURCE_DIRS)
     foreach(SRC_DIR ${CUSTOM_SOURCE_DIRS})
         file(GLOB DIR_SOURCES "${SRC_DIR}/*.cpp" "${SRC_DIR}/*.c")
@@ -43,6 +41,7 @@ set(AICORE_FLAGS
     -mllvm -cce-aicore-record-overflow=false \
     -mllvm -cce-aicore-addr-transform \
     -mllvm -cce-aicore-dcci-insert-for-scalar=false \
+    -D__PLATFORM_A2A3__ \
     ${CMAKE_CUSTOM_INCLUDE_DIR_FLAGS}"
 )
 separate_arguments(AICORE_FLAGS)

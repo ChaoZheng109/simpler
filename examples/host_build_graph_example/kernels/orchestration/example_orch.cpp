@@ -100,7 +100,7 @@ int build_example_graph(Runtime* runtime, uint64_t* args, int arg_count) {
     args_t0[1] = reinterpret_cast<uint64_t>(dev_b);  // src1
     args_t0[2] = reinterpret_cast<uint64_t>(dev_c);  // out
     args_t0[3] = SIZE;                                // size
-    int t0 = runtime->add_task(args_t0, 4, 0, 1);
+    int t0 = runtime->add_task(args_t0, 4, 0, CoreType::AIV);
 
     // Task 1: d = c + 1 (func_id=1: kernel_add_scalar, AIV)
     uint64_t args_t1[4];
@@ -109,7 +109,7 @@ int build_example_graph(Runtime* runtime, uint64_t* args, int arg_count) {
     args_t1[1] = scalar_converter.u64;                // scalar=1.0
     args_t1[2] = reinterpret_cast<uint64_t>(dev_d);  // out
     args_t1[3] = SIZE;                                // size
-    int t1 = runtime->add_task(args_t1, 4, 1, 1);
+    int t1 = runtime->add_task(args_t1, 4, 1, CoreType::AIV);
 
     // Task 2: e = c + 2 (func_id=1: kernel_add_scalar, AIV)
     uint64_t args_t2[4];
@@ -118,7 +118,7 @@ int build_example_graph(Runtime* runtime, uint64_t* args, int arg_count) {
     args_t2[1] = scalar_converter.u64;                // scalar=2.0
     args_t2[2] = reinterpret_cast<uint64_t>(dev_e);  // out
     args_t2[3] = SIZE;                                // size
-    int t2 = runtime->add_task(args_t2, 4, 1, 1);
+    int t2 = runtime->add_task(args_t2, 4, 1, CoreType::AIV);
 
     // Task 3: f = d * e (func_id=2: kernel_mul, AIV)
     uint64_t args_t3[4];
@@ -126,7 +126,7 @@ int build_example_graph(Runtime* runtime, uint64_t* args, int arg_count) {
     args_t3[1] = reinterpret_cast<uint64_t>(dev_e);  // src1
     args_t3[2] = reinterpret_cast<uint64_t>(dev_f);  // out
     args_t3[3] = SIZE;                                // size
-    int t3 = runtime->add_task(args_t3, 4, 2, 1);
+    int t3 = runtime->add_task(args_t3, 4, 2, CoreType::AIV);
 
     // Add dependencies
     runtime->add_successor(t0, t1);  // t0 → t1

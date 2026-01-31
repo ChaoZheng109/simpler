@@ -1,9 +1,11 @@
 #include <cstdint>
 #include <cstdio>
 
-#include "device_log.h"
-#include "kernel_args.h"
-#include "runtime.h"
+#include "aicpu/device_log.h"
+#include "common/kernel_args.h"
+
+// Forward declaration (no need for full runtime.h)
+class Runtime;
 
 // Forward declaration of aicpu_execute (implemented in aicpu_executor.cpp)
 extern "C" int aicpu_execute(Runtime *arg);
