@@ -21,8 +21,9 @@
 #include <string>
 #include <vector>
 
-#include "host/function_cache.h"
 #include "common/kernel_args.h"
+#include "common/platform_config.h"
+#include "host/function_cache.h"
 #include "host/memory_allocator.h"
 #include "runtime.h"
 
@@ -301,7 +302,7 @@ private:
     // Internal state
     int device_id_{-1};
     int block_dim_{0};
-    int cores_per_blockdim_{3};
+    int cores_per_blockdim_{PLATFORM_CORES_PER_BLOCKDIM};
     int worker_count_{0};  // Stored for print_handshake_results in destructor
     std::vector<uint8_t> aicore_kernel_binary_;
 

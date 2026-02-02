@@ -3,12 +3,19 @@
 #include <mutex>
 
 #include "aicpu/device_log.h"
+#include "common/platform_config.h"
 #include "runtime.h"
 
-constexpr int MAX_AICPU_THREADS = 4;
-constexpr int MAX_AIC_PER_THREAD = 24;
-constexpr int MAX_AIV_PER_THREAD = 48;
-constexpr int MAX_CORES_PER_THREAD = MAX_AIC_PER_THREAD + MAX_AIV_PER_THREAD;
+constexpr int MAX_AICPU_THREADS = PLATFORM_MAX_AICPU_THREADS;
+constexpr int MAX_AIC_PER_THREAD = PLATFORM_MAX_AIC_PER_THREAD;
+constexpr int MAX_AIV_PER_THREAD = PLATFORM_MAX_AIV_PER_THREAD;
+constexpr int MAX_CORES_PER_THREAD = PLATFORM_MAX_CORES_PER_THREAD;
+
+// Core information for discovery
+struct CoreInfo {
+    int worker_id;     // Index in runtime.workers[]
+    CoreType core_type;
+};
 
 struct AicpuExecutor {
     // ===== Thread management state =====
@@ -20,9 +27,14 @@ struct AicpuExecutor {
 
     int thread_num_{0};
     int cores_total_num_{0};
-    int blockdim_cores_num_{3};
     int thread_cores_num_{0};
     int core_assignments_[MAX_AICPU_THREADS][MAX_CORES_PER_THREAD];
+
+    // Core discovery arrays (space-time tradeoff: avoid sorting)
+    CoreInfo aic_cores_[MAX_CORES_PER_THREAD];
+    CoreInfo aiv_cores_[MAX_CORES_PER_THREAD];
+    int aic_count_{0};
+    int aiv_count_{0};
 
     // ===== Task queue state =====
     std::mutex ready_queue_aic_mutex_;
@@ -40,7 +52,8 @@ struct AicpuExecutor {
 
     // ===== Methods =====
     int init(Runtime* runtime);
-    int hank_aicore(Runtime* runtime, int thread_idx, const int* cur_thread_cores);
+    int handshake_all_cores(Runtime* runtime);
+    void assign_cores_to_threads();
     int resolve_and_dispatch(Runtime& runtime, int thread_idx, const int* cur_thread_cores, int core_num);
     int shutdown_aicore(Runtime* runtime, int thread_idx, const int* cur_thread_cores);
     int run(Runtime* runtime);
@@ -69,72 +82,29 @@ int AicpuExecutor::init(Runtime* runtime) {
 
     // Read execution parameters from runtime
     thread_num_ = runtime->sche_cpu_num;
-    if (thread_num_ == 0) thread_num_ = 1;
 
+    // Simplified defensive check
     if (thread_num_ < 1 || thread_num_ > MAX_AICPU_THREADS) {
-        DEV_ERROR("Invalid thread_num: %d", thread_num_);
+        DEV_ERROR("Invalid thread_num: %d (valid range: 1-%d)", thread_num_, MAX_AICPU_THREADS);
         init_failed_.store(true, std::memory_order_release);
         return -1;
     }
 
-    cores_total_num_ = runtime->block_dim * blockdim_cores_num_;
+    // Perform core discovery: handshake with all cores and collect core type information
+    int rc = handshake_all_cores(runtime);
+    if (rc != 0) {
+        DEV_ERROR("Core discovery failed");
+        init_failed_.store(true, std::memory_order_release);
+        return -1;
+    }
+
+    // Calculate cores per thread
     thread_cores_num_ = cores_total_num_ / thread_num_;
-
-    if (cores_total_num_ > MAX_CORES_PER_THREAD) {
-        DEV_ERROR("Total cores %d exceeds maximum %d", cores_total_num_, MAX_CORES_PER_THREAD);
-        init_failed_.store(true, std::memory_order_release);
-        return -1;
-    }
 
     DEV_INFO("Config: threads=%d, cores=%d, cores_per_thread=%d", thread_num_, cores_total_num_, thread_cores_num_);
 
-    // Pre-compute core assignments for each thread
-    // Each thread manages blocks_per_thread blocks
-    // For each block b: AIC is core b, AIVs are cores (nrAic + b*2) and (nrAic
-    // + b*2 + 1)
-    int num_aic = runtime->block_dim;  // Total AIC cores (= block_dim)
-    int blocks_per_thread = runtime->block_dim / thread_num_;
-
-    // Validate block distribution
-    if (runtime->block_dim % thread_num_ != 0) {
-        DEV_ERROR("block_dim (%d) must be divisible by thread_num (%d)", runtime->block_dim, thread_num_);
-        init_failed_.store(true, std::memory_order_release);
-        return -1;
-    }
-
-    DEV_INFO("Block assignment: %d blocks, %d threads, %d blocks per thread",
-        runtime->block_dim,
-        thread_num_,
-        blocks_per_thread);
-
-    for (int t = 0; t < thread_num_; t++) {
-        int start_block = t * blocks_per_thread;
-        int end_block = (t + 1) * blocks_per_thread;
-        int core_idx = 0;
-
-        // Assign AIC cores for all blocks managed by this thread
-        for (int b = start_block; b < end_block; b++) {
-            core_assignments_[t][core_idx++] = b;  // AIC core ID = block ID
-        }
-
-        // Assign AIV cores for all blocks managed by this thread
-        for (int b = start_block; b < end_block; b++) {
-            int aiv_base = num_aic;                                   // AIV cores start after all AIC cores
-            core_assignments_[t][core_idx++] = aiv_base + b * 2;      // First AIV of block b
-            core_assignments_[t][core_idx++] = aiv_base + b * 2 + 1;  // Second AIV of block b
-        }
-
-        DEV_INFO(
-            "Thread %d: manages blockDims [%d-%d], cores: AIC[%d-%d] "
-            "AIV[%d-%d]",
-            t,
-            start_block,
-            end_block - 1,
-            start_block,
-            end_block - 1,
-            num_aic + start_block * 2,
-            num_aic + (end_block - 1) * 2 + 1);
-    }
+    // Assign discovered cores to threads
+    assign_cores_to_threads();
 
     // Initialize runtime execution state
     total_tasks_.store(runtime->get_task_count(), std::memory_order_release);
@@ -168,28 +138,153 @@ int AicpuExecutor::init(Runtime* runtime) {
 }
 
 /**
- * Handshake AICore - Initialize and synchronize with AICore kernels
+ * Handshake with all AICore workers and discover core types
+ *
+ * This function performs centralized handshaking with all cores and collects
+ * their type information. By doing this in a single thread, we avoid redundant
+ * handshakes and enable dynamic core assignment.
+ *
+ * Protocol:
+ * 1. Send aicpu_ready=1 to all cores
+ * 2. Wait for each core's aicore_done response
+ * 3. Read core_type reported by each core
+ * 4. Classify cores into aic_cores_[] and aiv_cores_[] arrays
+ *
+ * @param runtime Runtime pointer
+ * @return 0 on success, -1 on failure
  */
-int AicpuExecutor::hank_aicore(Runtime* runtime, int thread_idx, const int* cur_thread_cores) {
+int AicpuExecutor::handshake_all_cores(Runtime* runtime) {
     Handshake* all_hanks = (Handshake*)runtime->workers;
+    cores_total_num_ = runtime->worker_count;
 
-    DEV_INFO("Thread %d: Handshaking with %d cores", thread_idx, thread_cores_num_);
-
-    for (int i = 0; i < thread_cores_num_; i++) {
-        int core_id = cur_thread_cores[i];
-        Handshake* hank = &all_hanks[core_id];
-        DEV_INFO("Thread %d: AICPU hank addr = 0x%lx", thread_idx, (uint64_t)hank);
-        hank->aicpu_ready = 1;
+    if (cores_total_num_ == 0) {
+        DEV_ERROR("worker_count is 0, no cores to handshake");
+        return -1;
     }
 
-    for (int i = 0; i < thread_cores_num_; i++) {
-        int core_id = cur_thread_cores[i];
-        Handshake* hank = &all_hanks[core_id];
+    // Simplified defensive check
+    if (cores_total_num_ > MAX_CORES_PER_THREAD) {
+        DEV_ERROR("Total cores %d exceeds maximum %d", cores_total_num_, MAX_CORES_PER_THREAD);
+        return -1;
+    }
+
+    aic_count_ = 0;
+    aiv_count_ = 0;
+
+    DEV_INFO("Core Discovery: Handshaking with %d cores", cores_total_num_);
+
+    // Step 1: Send handshake signal to all cores
+    for (int i = 0; i < cores_total_num_; i++) {
+        all_hanks[i].aicpu_ready = 1;
+    }
+
+    // Step 2: Wait for all cores to respond and collect core type information
+    for (int i = 0; i < cores_total_num_; i++) {
+        Handshake* hank = &all_hanks[i];
+
+        // Wait for aicore_done signal
         while (hank->aicore_done == 0) {
+            // Busy wait for core response
         }
-        DEV_INFO("Thread %d: success hank->aicore_done = %u", thread_idx, hank->aicore_done);
+
+        // Read core type (written by AICore during handshake)
+        CoreType type = hank->core_type;
+
+        // Classify and store core information
+        if (type == CoreType::AIC) {
+            aic_cores_[aic_count_].worker_id = i;
+            aic_cores_[aic_count_].core_type = type;
+            aic_count_++;
+        } else if (type == CoreType::AIV) {
+            aiv_cores_[aiv_count_].worker_id = i;
+            aiv_cores_[aiv_count_].core_type = type;
+            aiv_count_++;
+        } else {
+            DEV_ERROR("Unknown core type %d for core %d", static_cast<int>(type), i);
+            return -1;
+        }
+
+        DEV_INFO("  Core %d: type=%s", i, core_type_to_string(type));
     }
+
+    DEV_INFO("Discovery complete: AIC=%d, AIV=%d, Total=%d", aic_count_, aiv_count_, cores_total_num_);
     return 0;
+}
+
+/**
+ * Assign discovered cores to threads using even distribution strategy
+ *
+ * Each thread receives an equal number of AIC and AIV cores.
+ * Cores are assigned in the order they were discovered.
+ *
+ * Strategy: Evenly distribute each core type across all threads
+ * - Thread assignment formula: cores_of_type[thread_idx * cores_per_thread : (thread_idx+1) * cores_per_thread]
+ *
+ * Requirements (strict mode):
+ * - aic_count_ % thread_num_ == 0
+ * - aiv_count_ % thread_num_ == 0
+ */
+void AicpuExecutor::assign_cores_to_threads() {
+    // Validate even distribution (strict mode)
+    if (aic_count_ % thread_num_ != 0) {
+        DEV_ERROR("AIC cores (%d) cannot be evenly distributed to %d threads", aic_count_, thread_num_);
+        init_failed_.store(true, std::memory_order_release);
+        return;
+    }
+
+    if (aiv_count_ % thread_num_ != 0) {
+        DEV_ERROR("AIV cores (%d) cannot be evenly distributed to %d threads", aiv_count_, thread_num_);
+        init_failed_.store(true, std::memory_order_release);
+        return;
+    }
+
+    int aic_per_thread = aic_count_ / thread_num_;
+    int aiv_per_thread = aiv_count_ / thread_num_;
+
+    DEV_INFO("Core Assignment: %d AIC/thread, %d AIV/thread", aic_per_thread, aiv_per_thread);
+
+    for (int t = 0; t < thread_num_; t++) {
+        int core_idx = 0;
+
+        // Assign AIC cores to this thread
+        int aic_start = t * aic_per_thread;
+        int aic_end = (t + 1) * aic_per_thread;
+        for (int i = aic_start; i < aic_end; i++) {
+            core_assignments_[t][core_idx++] = aic_cores_[i].worker_id;
+        }
+
+        // Assign AIV cores to this thread
+        int aiv_start = t * aiv_per_thread;
+        int aiv_end = (t + 1) * aiv_per_thread;
+        for (int i = aiv_start; i < aiv_end; i++) {
+            core_assignments_[t][core_idx++] = aiv_cores_[i].worker_id;
+        }
+
+        // Build detailed log message with specific core IDs
+        char log_buffer[256];
+        int offset = 0;
+
+        offset += snprintf(log_buffer + offset, sizeof(log_buffer) - offset,
+                          "Thread %d: assigned %d cores - AIC[", t, core_idx);
+
+        for (int i = 0; i < aic_per_thread; i++) {
+            if (i > 0) offset += snprintf(log_buffer + offset, sizeof(log_buffer) - offset, ",");
+            offset += snprintf(log_buffer + offset, sizeof(log_buffer) - offset,
+                             "%d", aic_cores_[aic_start + i].worker_id);
+        }
+
+        offset += snprintf(log_buffer + offset, sizeof(log_buffer) - offset, "] AIV[");
+
+        for (int i = 0; i < aiv_per_thread; i++) {
+            if (i > 0) offset += snprintf(log_buffer + offset, sizeof(log_buffer) - offset, ",");
+            offset += snprintf(log_buffer + offset, sizeof(log_buffer) - offset,
+                             "%d", aiv_cores_[aiv_start + i].worker_id);
+        }
+
+        offset += snprintf(log_buffer + offset, sizeof(log_buffer) - offset, "]");
+
+        DEV_INFO("%s", log_buffer);
+    }
 }
 
 /**
@@ -406,16 +501,12 @@ int AicpuExecutor::run(Runtime* runtime) {
 
     const int* cur_thread_cores = core_assignments_[thread_idx];
 
-    auto rc = hank_aicore(runtime, thread_idx, cur_thread_cores);
-    if (rc != 0) {
-        return rc;
-    }
-
+    // Handshaking is already done in init() - no per-thread handshake needed
     DEV_INFO("Thread %d: Runtime has %d tasks", thread_idx, runtime->get_task_count());
     int completed = resolve_and_dispatch(*runtime, thread_idx, cur_thread_cores, thread_cores_num_);
     DEV_INFO("Thread %d: Executed %d tasks from runtime", thread_idx, completed);
 
-    rc = shutdown_aicore(runtime, thread_idx, cur_thread_cores);
+    int rc = shutdown_aicore(runtime, thread_idx, cur_thread_cores);
     if (rc != 0) {
         return rc;
     }

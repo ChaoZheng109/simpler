@@ -47,7 +47,6 @@ __aicore__ __attribute__((always_inline)) static void execute_task(__gm__ Task* 
 }
 
 __aicore__ __attribute__((weak)) void aicore_execute(__gm__ Runtime* runtime, int block_idx, CoreType core_type) {
-    (void)core_type;
     __gm__ Handshake* my_hank = (__gm__ Handshake*)(&runtime->workers[block_idx]);
 
     // Phase 1: Wait for AICPU initialization signal
@@ -55,8 +54,9 @@ __aicore__ __attribute__((weak)) void aicore_execute(__gm__ Runtime* runtime, in
         dcci(my_hank, ENTIRE_DATA_CACHE, CACHELINE_OUT);
     }
 
-    // Phase 2: Signal AICore is ready (use core_id + 1 to avoid 0)
-    my_hank->aicore_done = block_idx + 1;
+    // Phase 2: Signal AICore is ready and report core type
+    my_hank->core_type = core_type;        // Report core type to AICPU
+    my_hank->aicore_done = block_idx + 1;  // Signal ready (use block_idx + 1 to avoid 0)
 
     // Phase 3: Main execution loop - poll for tasks until quit signal
     while (true) {

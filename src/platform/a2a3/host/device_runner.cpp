@@ -11,6 +11,7 @@
 #include <iostream>
 #include <vector>
 
+#include "common/platform_config.h"
 #include "runtime.h"
 
 // =============================================================================
@@ -243,6 +244,28 @@ int DeviceRunner::run(Runtime& runtime,
     const std::vector<uint8_t>& aicpu_so_binary,
     const std::vector<uint8_t>& aicore_kernel_binary,
     int launch_aicpu_num) {
+
+    // Validate launch_aicpu_num
+    if (launch_aicpu_num < 1 || launch_aicpu_num > PLATFORM_MAX_AICPU_THREADS) {
+        std::cerr << "Error: launch_aicpu_num (" << launch_aicpu_num
+                  << ") must be in range [1, " << PLATFORM_MAX_AICPU_THREADS << "]\n";
+        return -1;
+    }
+
+    // Validate block_dim
+    if (block_dim < 1 || block_dim > PLATFORM_MAX_BLOCKDIM) {
+        std::cerr << "Error: block_dim (" << block_dim
+                  << ") must be in range [1, " << PLATFORM_MAX_BLOCKDIM << "]\n";
+        return -1;
+    }
+
+    // Validate even distribution: block_dim must be divisible by launch_aicpu_num
+    if (block_dim % launch_aicpu_num != 0) {
+        std::cerr << "Error: block_dim (" << block_dim
+                  << ") must be evenly divisible by launch_aicpu_num (" << launch_aicpu_num << ")\n";
+        return -1;
+    }
+
     // Ensure device is initialized (lazy initialization)
     int rc = ensure_device_initialized(device_id, aicpu_so_binary, aicore_kernel_binary);
     if (rc != 0) {
@@ -262,7 +285,6 @@ int DeviceRunner::run(Runtime& runtime,
 
     runtime.worker_count = num_ai_core;
     worker_count_ = num_ai_core;  // Store for print_handshake_results in destructor
-    runtime.block_dim = block_dim;
     runtime.sche_cpu_num = launch_aicpu_num;
 
     // Calculate number of AIC cores (1/3 of total)

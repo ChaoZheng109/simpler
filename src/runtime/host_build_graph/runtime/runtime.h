@@ -26,6 +26,7 @@
 #include <atomic>
 
 #include "common/core_type.h"
+#include "common/platform_config.h"
 
 // =============================================================================
 // Configuration Macros
@@ -44,7 +45,7 @@
 #endif
 
 #ifndef RUNTIME_MAX_WORKER
-#define RUNTIME_MAX_WORKER 72  // 24 AIC + 48 AIV cores
+#define RUNTIME_MAX_WORKER PLATFORM_MAX_CORES_PER_THREAD
 #endif
 
 #ifndef RUNTIME_MAX_TENSOR_PAIRS
@@ -169,7 +170,6 @@ public:
     int worker_count;                       // Number of active workers
 
     // Execution parameters for AICPU scheduling
-    int block_dim;     // Number of AIC blocks (block dimension)
     int sche_cpu_num;  // Number of AICPU threads for scheduling
 
 private:

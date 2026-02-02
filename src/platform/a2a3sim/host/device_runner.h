@@ -19,9 +19,10 @@
 #include <string>
 #include <vector>
 
-#include "host/function_cache.h"
-#include "common/kernel_args.h"
 #include "common/core_type.h"
+#include "common/kernel_args.h"
+#include "common/platform_config.h"
+#include "host/function_cache.h"
 #include "host/memory_allocator.h"
 #include "runtime.h"
 
@@ -158,7 +159,7 @@ private:
     // Configuration
     int device_id_{-1};
     int block_dim_{0};
-    int cores_per_blockdim_{3};
+    int cores_per_blockdim_{PLATFORM_CORES_PER_BLOCKDIM};
     int worker_count_{0};
 
     // Memory management
