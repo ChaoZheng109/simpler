@@ -49,7 +49,7 @@
 
 // Function pointer types for dynamically loaded executors
 typedef int (*aicpu_execute_func_t)(Runtime* runtime);
-typedef void (*aicore_execute_func_t)(Runtime* runtime, int block_idx, int core_type);
+typedef void (*aicore_execute_func_t)(Runtime* runtime, int block_idx, CoreType core_type);
 
 // =============================================================================
 // DeviceRunner Implementation
@@ -120,7 +120,7 @@ int DeviceRunner::ensure_binaries_loaded(const std::vector<uint8_t>& aicpu_so_bi
             return -1;
         }
 
-        aicore_execute_func_ = reinterpret_cast<void(*)(Runtime*, int, int)>(dlsym(aicore_so_handle_, "aicore_execute_wrapper"));
+        aicore_execute_func_ = reinterpret_cast<void(*)(Runtime*, int, CoreType)>(dlsym(aicore_so_handle_, "aicore_execute_wrapper"));
         if (aicore_execute_func_ == nullptr) {
             std::cerr << "Error: dlsym failed for aicore_execute_wrapper: " << dlerror() << '\n';
             return -1;
@@ -191,8 +191,8 @@ int DeviceRunner::run(Runtime& runtime,
         runtime.workers[i].control = 0;
         runtime.workers[i].task = 0;
         runtime.workers[i].task_status = 0;
-        // First 1/3 are AIC (0), remaining 2/3 are AIV (1)
-        runtime.workers[i].core_type = (i < num_aic) ? 0 : 1;
+        // First 1/3 are AIC, remaining 2/3 are AIV
+        runtime.workers[i].core_type = (i < num_aic) ? CoreType::AIC : CoreType::AIV;
     }
 
     // Set function_bin_addr for all tasks
@@ -230,7 +230,7 @@ int DeviceRunner::run(Runtime& runtime,
     std::cout << "=== Launching " << num_cores << " AICore thread(s) ===" << '\n';
     std::vector<std::thread> aicore_threads;
     for (int i = 0; i < num_cores; i++) {
-        int core_type = runtime.workers[i].core_type;
+        CoreType core_type = runtime.workers[i].core_type;
         aicore_threads.emplace_back([this, &runtime, i, core_type]() {
             aicore_execute_func_(&runtime, i, core_type);
         });

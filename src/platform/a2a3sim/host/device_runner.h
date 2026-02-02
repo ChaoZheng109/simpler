@@ -19,9 +19,10 @@
 #include <string>
 #include <vector>
 
-#include "function_cache.h"
-#include "kernel_args.h"
-#include "memory_allocator.h"
+#include "host/function_cache.h"
+#include "common/kernel_args.h"
+#include "common/core_type.h"
+#include "host/memory_allocator.h"
 #include "runtime.h"
 
 /**
@@ -176,7 +177,7 @@ private:
     void* aicpu_so_handle_{nullptr};
     void* aicore_so_handle_{nullptr};
     int (*aicpu_execute_func_)(Runtime*){nullptr};
-    void (*aicore_execute_func_)(Runtime*, int, int){nullptr};
+    void (*aicore_execute_func_)(Runtime*, int, CoreType){nullptr};
     std::string aicpu_so_path_;
     std::string aicore_so_path_;
 

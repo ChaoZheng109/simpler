@@ -5,7 +5,7 @@
  * Ascend CANN runtime API with RAII pattern.
  */
 
-#include "memory_allocator.h"
+#include "host/memory_allocator.h"
 
 #include <runtime/rt.h>
 

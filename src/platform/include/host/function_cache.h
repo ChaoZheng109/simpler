@@ -1,8 +1,13 @@
 /**
- * Function Cache Structures
+ * @file function_cache.h
+ * @brief Function Cache Structures for Kernel Binary Management
  *
  * Defines data structures for caching compiled kernel binaries and managing
- * their addresses in device GM memory.
+ * their addresses in memory (device GM memory for a2a3, host memory for a2a3sim).
+ *
+ * Platform Support:
+ * - a2a3: Real hardware with device GM memory
+ * - a2a3sim: Host-based simulation with host memory
  *
  * These structures follow the production system design from:
  * - src/interface/cache/core_func_data.h
@@ -29,8 +34,8 @@
  * └────────────────────────────────────────────────┘
  */
 
-#ifndef RUNTIME_FUNCTION_CACHE_H
-#define RUNTIME_FUNCTION_CACHE_H
+#ifndef PLATFORM_FUNCTION_CACHE_H_
+#define PLATFORM_FUNCTION_CACHE_H_
 
 #include <cstdint>
 
@@ -52,13 +57,17 @@ struct CoreFunctionBin {
  * Binary cache structure for all kernels
  *
  * This structure packs multiple kernel binaries into a single contiguous
- * memory block for efficient device memory allocation and copying.
+ * memory block for efficient memory allocation and copying.
  *
  * Memory Layout:
  * [data_size][num_kernels][offset0][offset1]...[offsetN][CoreFunctionBin0][CoreFunctionBin1]...
  *
  * Each offset points to the start of a CoreFunctionBin structure relative
  * to the beginning of the cache.
+ *
+ * Platform Behavior:
+ * - a2a3: Binaries are copied to device GM memory
+ * - a2a3sim: Binaries are kept in host memory or registered as function pointers
  */
 struct CoreFunctionBinCache {
     uint64_t data_size;    // Total size of all data (excluding this header)
@@ -76,12 +85,14 @@ struct CoreFunctionBinCache {
      * Get pointer to binary data region
      * @return Pointer to start of binary data
      */
-    uint8_t* get_binary_data() { return reinterpret_cast<uint8_t*>(get_offsets()) + num_kernels * sizeof(uint64_t); }
+    uint8_t* get_binary_data() {
+        return reinterpret_cast<uint8_t*>(get_offsets()) + num_kernels * sizeof(uint64_t);
+    }
 
     /**
      * Get CoreFunctionBin by index
      * @param index  Kernel index
-     * @return Pointer to CoreFunctionBin structure
+     * @return Pointer to CoreFunctionBin structure, nullptr if invalid index
      */
     CoreFunctionBin* get_kernel(uint64_t index) {
         if (index >= num_kernels) {
@@ -95,7 +106,9 @@ struct CoreFunctionBinCache {
      * Calculate total cache size including header
      * @return Total size in bytes
      */
-    uint64_t get_total_size() const { return sizeof(CoreFunctionBinCache) + num_kernels * sizeof(uint64_t) + data_size; }
+    uint64_t get_total_size() const {
+        return sizeof(CoreFunctionBinCache) + num_kernels * sizeof(uint64_t) + data_size;
+    }
 };
 
-#endif  // RUNTIME_FUNCTION_CACHE_H
+#endif  // PLATFORM_FUNCTION_CACHE_H_

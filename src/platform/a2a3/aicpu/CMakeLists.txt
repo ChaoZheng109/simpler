@@ -8,7 +8,7 @@ project(aicpu_kernel LANGUAGES C CXX)
 
 # Build complete include list
 set(CMAKE_CUSTOM_INCLUDE_DIRS "")
-list(APPEND CMAKE_CUSTOM_INCLUDE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/../common")
+list(APPEND CMAKE_CUSTOM_INCLUDE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/../../include")
 if(DEFINED CUSTOM_INCLUDE_DIRS)
     foreach(INC_DIR ${CUSTOM_INCLUDE_DIRS})
         list(APPEND CMAKE_CUSTOM_INCLUDE_DIRS "${INC_DIR}")
@@ -21,8 +21,6 @@ endif()
 set(AICPU_KERNEL_SOURCES "")
 file(GLOB AICPU_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/*.cpp")
 list(APPEND AICPU_KERNEL_SOURCES ${AICPU_SOURCES})
-file(GLOB DIR_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/../common/*.cpp" "${CMAKE_CURRENT_SOURCE_DIR}/../common/*.c")
-list(APPEND AICPU_KERNEL_SOURCES ${DIR_SOURCES})
 if(DEFINED CUSTOM_SOURCE_DIRS)
     foreach(SRC_DIR ${CUSTOM_SOURCE_DIRS})
         file(GLOB DIR_SOURCES "${SRC_DIR}/*.cpp" "${SRC_DIR}/*.c")
@@ -47,6 +45,12 @@ target_compile_options(aicpu_kernel
         -Wno-error=variadic-macros
         -fno-common
         -g
+)
+
+# Platform definition
+target_compile_definitions(aicpu_kernel
+    PRIVATE
+        __PLATFORM_A2A3__
 )
 
 target_include_directories(aicpu_kernel
