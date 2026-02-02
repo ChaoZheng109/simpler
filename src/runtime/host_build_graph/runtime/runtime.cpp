@@ -22,6 +22,7 @@ Runtime::Runtime() {
         tasks[i].num_args = 0;
         tasks[i].function_bin_addr = 0;
         tasks[i].core_type = CoreType::AIV;  // Default to AIV
+        tasks[i].name[0] = '\0';  // Empty name
         tasks[i].fanin = 0;
         tasks[i].fanout_count = 0;
         tasks[i].start_time = 0;
@@ -34,13 +35,18 @@ Runtime::Runtime() {
     worker_count = 0;
     sche_cpu_num = 1;
     tensor_pair_count = 0;
+
+    // Initialize trace buffer - FORCE ENABLE FOR TESTING
+    trace_buffer.enabled = true;  // TEMPORARY: Force enable
+    trace_buffer.event_count.store(0, std::memory_order_release);
+    printf("[DEBUG C++] Runtime::Runtime() - trace_buffer.enabled = %d (FORCED)\n", trace_buffer.enabled ? 1 : 0);
 }
 
 // =============================================================================
 // Task Management
 // =============================================================================
 
-int Runtime::add_task(uint64_t* args, int num_args, int func_id, CoreType core_type) {
+int Runtime::add_task(uint64_t* args, int num_args, int func_id, CoreType core_type, const char* name) {
     // Check bounds
     if (next_task_id >= RUNTIME_MAX_TASKS) {
         fprintf(stderr, "[Runtime] ERROR: Task table full (max=%d)\n", RUNTIME_MAX_TASKS);
@@ -65,6 +71,15 @@ int Runtime::add_task(uint64_t* args, int num_args, int func_id, CoreType core_t
     }
     task->function_bin_addr = 0;    // Will be set by host before copying to device
     task->core_type = core_type;    // Set core type
+
+    // Set task name (optional)
+    if (name != nullptr) {
+        strncpy(task->name, name, sizeof(task->name) - 1);
+        task->name[sizeof(task->name) - 1] = '\0';  // Ensure null termination
+    } else {
+        task->name[0] = '\0';  // Empty name
+    }
+
     task->fanin = 0;
     task->fanout_count = 0;
     memset(task->fanout, 0, sizeof(task->fanout));
@@ -211,3 +226,69 @@ int Runtime::get_tensor_pair_count() const {
 void Runtime::clear_tensor_pairs() {
     tensor_pair_count = 0;
 }
+
+// =============================================================================
+// Trace Event Management
+// =============================================================================
+
+void Runtime::enable_tracing(bool enabled) {
+    trace_buffer.enabled = enabled;
+    trace_buffer.event_count.store(0, std::memory_order_release);
+    printf("[DEBUG C++] Runtime::enable_tracing(%d) called, event_count=%d\n",
+           enabled ? 1 : 0,
+           trace_buffer.event_count.load(std::memory_order_acquire));
+}
+
+void Runtime::record_task_execution(int task_id, int core_id, uint64_t start_us, uint64_t end_us) {
+    if (!trace_buffer.enabled) {
+        printf("[DEBUG C++] record_task_execution: tracing NOT enabled\n");
+        return;
+    }
+
+    int idx = trace_buffer.event_count.fetch_add(1, std::memory_order_relaxed);
+    printf("[DEBUG C++] record_task_execution: task_id=%d, core_id=%d, idx=%d, enabled=%d\n",
+           task_id, core_id, idx, trace_buffer.enabled ? 1 : 0);
+
+    if (idx >= RUNTIME_MAX_TRACE_EVENTS) return;  // Silent drop on overflow
+
+    TraceEvent& evt = trace_buffer.events[idx];
+    evt.type = TRACE_EVENT_TASK_EXEC;
+    evt.timestamp_us = start_us;
+    evt.data.task_exec.task_id = task_id;
+    evt.data.task_exec.core_id = core_id;
+    evt.data.task_exec.duration_us = end_us - start_us;
+
+    // Copy task name from the task
+    if (task_id >= 0 && task_id < next_task_id) {
+        strncpy(evt.data.task_exec.name, tasks[task_id].name, sizeof(evt.data.task_exec.name) - 1);
+        evt.data.task_exec.name[sizeof(evt.data.task_exec.name) - 1] = '\0';
+    } else {
+        evt.data.task_exec.name[0] = '\0';
+    }
+}
+
+void Runtime::record_queue_count(int queue_type, uint64_t ts, int count) {
+    if (!trace_buffer.enabled) return;
+
+    int idx = trace_buffer.event_count.fetch_add(1, std::memory_order_relaxed);
+    if (idx >= RUNTIME_MAX_TRACE_EVENTS) return;
+
+    TraceEvent& evt = trace_buffer.events[idx];
+    evt.type = TRACE_EVENT_QUEUE_COUNT;
+    evt.timestamp_us = ts;
+    evt.data.queue_count.queue_type = queue_type;
+    evt.data.queue_count.count = count;
+}
+
+void Runtime::record_memory_usage(uint64_t ts, size_t bytes) {
+    if (!trace_buffer.enabled) return;
+
+    int idx = trace_buffer.event_count.fetch_add(1, std::memory_order_relaxed);
+    if (idx >= RUNTIME_MAX_TRACE_EVENTS) return;
+
+    TraceEvent& evt = trace_buffer.events[idx];
+    evt.type = TRACE_EVENT_MEMORY;
+    evt.timestamp_us = ts;
+    evt.data.memory.bytes = bytes;
+}
+

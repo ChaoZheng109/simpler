@@ -191,4 +191,66 @@ int register_kernel(int func_id, const uint8_t* bin_data, size_t bin_size) {
     }
 }
 
+/* ===========================================================================
+ * Trace Event API Implementation
+ * ===========================================================================
+ */
+
+int enable_runtime_tracing(RuntimeHandle runtime, int enabled) {
+    if (runtime == NULL) {
+        return -1;
+    }
+    try {
+        Runtime* r = static_cast<Runtime*>(runtime);
+        r->enable_tracing(enabled != 0);
+        return 0;
+    } catch (...) {
+        return -1;
+    }
+}
+
+int get_trace_events(RuntimeHandle runtime, const void** events_out, int* count_out) {
+    if (runtime == NULL || events_out == NULL || count_out == NULL) {
+        return -1;
+    }
+    try {
+        Runtime* r = static_cast<Runtime*>(runtime);
+        *events_out = r->trace_buffer.events;
+        *count_out = r->trace_buffer.event_count.load(std::memory_order_acquire);
+        return 0;
+    } catch (...) {
+        return -1;
+    }
+}
+
+int get_task_fanout(RuntimeHandle runtime, int task_id, const int** fanout_out, int* fanout_count) {
+    if (runtime == NULL || fanout_out == NULL || fanout_count == NULL) {
+        return -1;
+    }
+    try {
+        Runtime* r = static_cast<Runtime*>(runtime);
+        Task* task = r->get_task(task_id);
+        if (task == NULL) {
+            return -1;
+        }
+        *fanout_out = task->fanout;
+        *fanout_count = task->fanout_count;
+        return 0;
+    } catch (...) {
+        return -1;
+    }
+}
+
+int get_task_count(RuntimeHandle runtime) {
+    if (runtime == NULL) {
+        return -1;
+    }
+    try {
+        Runtime* r = static_cast<Runtime*>(runtime);
+        return r->get_task_count();
+    } catch (...) {
+        return -1;
+    }
+}
+
 } /* extern "C" */

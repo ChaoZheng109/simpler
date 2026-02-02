@@ -1,10 +1,18 @@
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <mutex>
 
 #include "aicpu/device_log.h"
 #include "common/platform_config.h"
 #include "runtime.h"
+
+// Helper function to get timestamp in microseconds
+static uint64_t get_timestamp_us() {
+    auto now = std::chrono::high_resolution_clock::now();
+    auto duration = now.time_since_epoch();
+    return std::chrono::duration_cast<std::chrono::microseconds>(duration).count();
+}
 
 constexpr int MAX_AICPU_THREADS = PLATFORM_MAX_AICPU_THREADS;
 constexpr int MAX_AIC_PER_THREAD = PLATFORM_MAX_AIC_PER_THREAD;
@@ -397,6 +405,14 @@ int AicpuExecutor::resolve_and_dispatch(Runtime& runtime, int thread_idx, const 
             if (h->task_status == 0 && h->task != 0) {
                 // Get completed task and immediately clear the pointer to prevent duplicate detection
                 Task* task = reinterpret_cast<Task*>(h->task);
+
+                // Record end time
+                task->end_time = get_timestamp_us();
+
+                // Record trace event if enabled
+                runtime.record_task_execution(task->task_id, core_id,
+                                               task->start_time, task->end_time);
+
                 h->task = 0;  // Clear immediately to minimize race condition window
 
                 int task_id = task->task_id;
@@ -420,6 +436,10 @@ int AicpuExecutor::resolve_and_dispatch(Runtime& runtime, int thread_idx, const 
                             // Enqueue to tail position (circular)
                             ready_queue_aic_[ready_queue_aic_tail_] = dep_id;
                             ready_queue_aic_tail_ = (ready_queue_aic_tail_ + 1) % RUNTIME_MAX_TASKS;
+
+                            // Record queue count change
+                            runtime.record_queue_count(0, get_timestamp_us(), ready_queue_aic_tail_);
+
                             ready_count_aic_.fetch_add(1, std::memory_order_release);
                             DEV_INFO("Thread %d: Task %d became ready -> AIC queue (tail=%d)",
                                      thread_idx, dep_id, ready_queue_aic_tail_);
@@ -428,6 +448,10 @@ int AicpuExecutor::resolve_and_dispatch(Runtime& runtime, int thread_idx, const 
                             // Enqueue to tail position (circular)
                             ready_queue_aiv_[ready_queue_aiv_tail_] = dep_id;
                             ready_queue_aiv_tail_ = (ready_queue_aiv_tail_ + 1) % RUNTIME_MAX_TASKS;
+
+                            // Record queue count change
+                            runtime.record_queue_count(1, get_timestamp_us(), ready_queue_aiv_tail_);
+
                             ready_count_aiv_.fetch_add(1, std::memory_order_release);
                             DEV_INFO("Thread %d: Task %d became ready -> AIV queue (tail=%d)",
                                      thread_idx, dep_id, ready_queue_aiv_tail_);
@@ -464,6 +488,9 @@ int AicpuExecutor::resolve_and_dispatch(Runtime& runtime, int thread_idx, const 
                                 ready_count_aic_.fetch_sub(1, std::memory_order_release);
                                 Task* task = runtime.get_task(task_id);
 
+                                // Record start time
+                                task->start_time = get_timestamp_us();
+
                                 DEV_INFO("Thread %d: Dispatching AIC task %d to core %d (head=%d)",
                                          thread_idx, task_id, core_id, ready_queue_aic_head_);
 
@@ -471,6 +498,9 @@ int AicpuExecutor::resolve_and_dispatch(Runtime& runtime, int thread_idx, const 
                                 h->task_status = 1;  // Mark as busy
                                 cur_thread_tasks_in_flight++;
                                 made_progress = true;
+
+                                // Record queue count change
+                                runtime.record_queue_count(0, get_timestamp_us(), count - 1);
                             }
                         }
                     } else if (h->core_type == CoreType::AIV) {  // AIV core
@@ -484,6 +514,9 @@ int AicpuExecutor::resolve_and_dispatch(Runtime& runtime, int thread_idx, const 
                                 ready_count_aiv_.fetch_sub(1, std::memory_order_release);
                                 Task* task = runtime.get_task(task_id);
 
+                                // Record start time
+                                task->start_time = get_timestamp_us();
+
                                 DEV_INFO("Thread %d: Dispatching AIV task %d to core %d (head=%d)",
                                          thread_idx, task_id, core_id, ready_queue_aiv_head_);
 
@@ -491,6 +524,9 @@ int AicpuExecutor::resolve_and_dispatch(Runtime& runtime, int thread_idx, const 
                                 h->task_status = 1;  // Mark as busy
                                 cur_thread_tasks_in_flight++;
                                 made_progress = true;
+
+                                // Record queue count change
+                                runtime.record_queue_count(1, get_timestamp_us(), count - 1);
                             }
                         }
                     }

@@ -94,6 +94,12 @@ Golden.py interface:
         help="Enable verbose output"
     )
 
+    parser.add_argument(
+        "--enable-swimlane",
+        action="store_true",
+        help="Enable swimlane JSON output for visualization (outputs to trace_output/)"
+    )
+
     args = parser.parse_args()
 
     # Add python directory to path
@@ -134,6 +140,7 @@ Golden.py interface:
             runtime_name=args.runtime,
             device_id=args.device,
             platform=args.platform,
+            enable_swimlane=args.enable_swimlane,
         )
 
         runner.run()

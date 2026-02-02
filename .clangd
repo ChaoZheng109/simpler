@@ -1,0 +1,18 @@
+CompileFlags:
+  Add:
+    # Runtime includes
+    - -I/data/w00949750/wzh_simpler/simpler/src/runtime/host_build_graph/runtime
+
+    # Platform includes
+    - -I/data/w00949750/wzh_simpler/simpler/src/platform/a2a3/host
+    - -I/data/w00949750/wzh_simpler/simpler/src/platform/include
+
+    # CANN includes
+    - -I/usr/local/Ascend/cann-8.5.0/include
+
+    # PTO includes (for AIV kernels)
+    - -I/data/czq/pto-isa-ci/include
+    - -I/data/czq/pto-isa-ci/include/pto
+
+    # C++ standard
+    - -std=c++17

@@ -144,6 +144,58 @@ int launch_runtime(RuntimeHandle runtime,
  */
 int finalize_runtime(RuntimeHandle runtime);
 
+/* ===========================================================================
+ * Trace Event API (for Swimlane Visualization)
+ * ===========================================================================
+ */
+
+/**
+ * Enable or disable runtime tracing.
+ *
+ * Must be called before init_runtime() to enable event recording.
+ * When enabled, the runtime will record task execution events, queue counts,
+ * and memory usage for swimlane visualization.
+ *
+ * @param runtime  Runtime handle
+ * @param enabled  1 to enable tracing, 0 to disable
+ * @return 0 on success, -1 on failure
+ */
+int enable_runtime_tracing(RuntimeHandle runtime, int enabled);
+
+/**
+ * Get trace events from runtime for swimlane visualization.
+ *
+ * Returns a pointer to the internal trace buffer and the number of recorded
+ * events. The buffer is valid until the runtime is finalized.
+ *
+ * @param runtime      Runtime handle
+ * @param events_out   Output pointer to trace events array
+ * @param count_out    Output pointer to number of events
+ * @return 0 on success, -1 on failure
+ */
+int get_trace_events(RuntimeHandle runtime, const void** events_out, int* count_out);
+
+/**
+ * Get task dependency information for flow visualization.
+ *
+ * Returns the fanout (successor) list for a specific task.
+ *
+ * @param runtime       Runtime handle
+ * @param task_id       Task ID to query
+ * @param fanout_out    Output pointer to fanout array (int*)
+ * @param fanout_count  Output pointer to number of successors
+ * @return 0 on success, -1 on failure
+ */
+int get_task_fanout(RuntimeHandle runtime, int task_id, const int** fanout_out, int* fanout_count);
+
+/**
+ * Get the total number of tasks in the runtime.
+ *
+ * @param runtime  Runtime handle
+ * @return Number of tasks, or -1 on failure
+ */
+int get_task_count(RuntimeHandle runtime);
+
 /**
  * Set device and create streams for memory operations.
  *

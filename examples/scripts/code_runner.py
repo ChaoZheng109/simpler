@@ -283,12 +283,17 @@ class CodeRunner:
         runtime_name: str = "host_build_graph",
         device_id: Optional[int] = None,
         platform: str = "a2a3",
+        enable_swimlane: bool = False,
     ):
         self.kernels_dir = Path(kernels_dir).resolve()
         self.golden_path = Path(golden_path).resolve()
         self.runtime_name = runtime_name
         self.platform = platform
         self.project_root = _get_project_root()
+
+        # Swimlane configuration - fixed output directory
+        self.enable_swimlane = enable_swimlane
+        self.output_dir = Path("trace_output")
 
         # Resolve device ID
         if device_id is None:
@@ -312,7 +317,7 @@ class CodeRunner:
 
         # Runtime configuration
         self.aicpu_thread_num = 3
-        self.block_dim = 3
+        self.block_dim = 24
 
     def _load_kernel_config(self):
         """Load kernel_config.py from kernels directory."""
@@ -532,6 +537,13 @@ class CodeRunner:
             # Create and initialize runtime
             print("\n=== Initializing Runtime ===")
             runtime = Runtime()
+
+            # Enable tracing if swimlane output is requested
+            if self.enable_swimlane:
+                print("[DEBUG] Enabling runtime tracing")
+                runtime.enable_tracing(True)
+                print("[DEBUG] Runtime tracing enabled")
+
             runtime.initialize(orch_so_binary, self.orchestration["function_name"], func_args)
 
             # Launch runtime
@@ -555,6 +567,16 @@ class CodeRunner:
             # Finalize
             print("\n=== Finalizing Runtime ===")
             runtime.finalize()
+
+            # Generate swimlane JSON if enabled
+            if self.enable_swimlane:
+                from swimlane_generator import SwimlaneGenerator
+                print("\n=== Generating Swimlane JSON ===")
+                self.output_dir.mkdir(parents=True, exist_ok=True)
+                generator = SwimlaneGenerator(runtime, self.block_dim)
+                output_file = self.output_dir / f"merged_swimlane_case{case_idx}.json"
+                generator.generate(str(output_file))
+                print(f"Swimlane JSON generated: {output_file}")
 
             # Compute golden and compare
             print("\n=== Comparing Results ===")

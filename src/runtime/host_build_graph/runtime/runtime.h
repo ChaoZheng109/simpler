@@ -140,6 +140,9 @@ typedef struct {
     // Specifies which core type this task should run on
     CoreType core_type;  // CoreType::AIC or CoreType::AIV
 
+    // Task name (optional, for visualization)
+    char name[64];  // Task name (e.g., "QK", "SF", "PV", "UP")
+
     // Dependency tracking (using PTO runtime terminology)
     std::atomic<int> fanin;          // Number of predecessors (dependencies)
     int fanout[RUNTIME_MAX_FANOUT];  // Successor task IDs
@@ -149,6 +152,49 @@ typedef struct {
     uint64_t start_time;  // Start time of the task
     uint64_t end_time;    // End time of the task
 } Task;
+
+// =============================================================================
+// Trace Events for Swimlane Visualization
+// =============================================================================
+
+#ifndef RUNTIME_MAX_TRACE_EVENTS
+#define RUNTIME_MAX_TRACE_EVENTS 10000
+#endif
+
+enum TraceEventType {
+    TRACE_EVENT_TASK_EXEC = 0,
+    TRACE_EVENT_QUEUE_COUNT = 1,
+    TRACE_EVENT_MEMORY = 2,
+};
+
+struct TraceEvent {
+    TraceEventType type;
+    uint64_t timestamp_us;
+
+    union {
+        struct {
+            int task_id;
+            int core_id;
+            uint64_t duration_us;
+            char name[64];  // Task name (e.g., "QK", "SF", "PV", "UP")
+        } task_exec;
+
+        struct {
+            int queue_type;  // 0=AIC, 1=AIV
+            int count;
+        } queue_count;
+
+        struct {
+            size_t bytes;
+        } memory;
+    } data;
+};
+
+struct TraceBuffer {
+    TraceEvent events[RUNTIME_MAX_TRACE_EVENTS];
+    std::atomic<int> event_count{0};
+    bool enabled{false};
+};
 
 // =============================================================================
 // Runtime Class
@@ -192,6 +238,49 @@ public:
     Runtime();
 
     // =========================================================================
+    // Trace Event Management (for Swimlane Visualization)
+    // =========================================================================
+
+    /**
+     * Trace buffer for recording runtime events
+     */
+    TraceBuffer trace_buffer;
+
+    /**
+     * Enable or disable runtime tracing.
+     *
+     * @param enabled  true to enable tracing, false to disable
+     */
+    void enable_tracing(bool enabled);
+
+    /**
+     * Record task execution event.
+     *
+     * @param task_id    Task ID
+     * @param core_id    Core ID where task executed
+     * @param start_us   Start timestamp in microseconds
+     * @param end_us     End timestamp in microseconds
+     */
+    void record_task_execution(int task_id, int core_id, uint64_t start_us, uint64_t end_us);
+
+    /**
+     * Record queue count change event.
+     *
+     * @param queue_type  0=AIC, 1=AIV
+     * @param ts          Timestamp in microseconds
+     * @param count       Queue count
+     */
+    void record_queue_count(int queue_type, uint64_t ts, int count);
+
+    /**
+     * Record memory usage event.
+     *
+     * @param ts      Timestamp in microseconds
+     * @param bytes   Memory usage in bytes
+     */
+    void record_memory_usage(uint64_t ts, size_t bytes);
+
+    // =========================================================================
     // Task Management
     // =========================================================================
 
@@ -202,9 +291,10 @@ public:
      * @param num_args  Number of arguments (must be <= RUNTIME_MAX_ARGS)
      * @param func_id   Function identifier
      * @param core_type Core type for this task (CoreType::AIC or CoreType::AIV)
+     * @param name      Optional task name for visualization (default: nullptr)
      * @return Task ID (>= 0) on success, -1 on failure
      */
-    int add_task(uint64_t *args, int num_args, int func_id, CoreType core_type = CoreType::AIC);
+    int add_task(uint64_t *args, int num_args, int func_id, CoreType core_type = CoreType::AIC, const char* name = nullptr);
 
     /**
      * Add a dependency edge: from_task -> to_task

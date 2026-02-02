@@ -117,6 +117,19 @@ class RuntimeLibraryLoader:
         self.lib.set_device.argtypes = [c_int]
         self.lib.set_device.restype = c_int
 
+        # Trace Event API
+        self.lib.enable_runtime_tracing.argtypes = [c_void_p, c_int]
+        self.lib.enable_runtime_tracing.restype = c_int
+
+        self.lib.get_trace_events.argtypes = [c_void_p, POINTER(c_void_p), POINTER(c_int)]
+        self.lib.get_trace_events.restype = c_int
+
+        self.lib.get_task_fanout.argtypes = [c_void_p, c_int, POINTER(POINTER(c_int)), POINTER(c_int)]
+        self.lib.get_task_fanout.restype = c_int
+
+        self.lib.get_task_count.argtypes = [c_void_p]
+        self.lib.get_task_count.restype = c_int
+
 
 # ============================================================================
 # Python Wrapper Classes
@@ -212,6 +225,163 @@ class Runtime:
         rc = self.lib.finalize_runtime(self._handle)
         if rc != 0:
             raise RuntimeError(f"finalize_runtime failed: {rc}")
+
+    def enable_tracing(self, enabled: bool = True) -> None:
+        """
+        Enable or disable runtime tracing for swimlane visualization.
+
+        Must be called before initialize() to enable event recording.
+        When enabled, the runtime records task execution events, queue counts,
+        and memory usage.
+
+        Args:
+            enabled: True to enable tracing, False to disable
+
+        Raises:
+            RuntimeError: If enable operation fails
+        """
+        rc = self.lib.enable_runtime_tracing(self._handle, 1 if enabled else 0)
+        if rc != 0:
+            raise RuntimeError(f"enable_runtime_tracing failed: {rc}")
+
+    def get_trace_events(self) -> list:
+        """
+        Get trace events for swimlane JSON generation.
+
+        Returns a list of trace event dictionaries with the following types:
+        - 'task_exec': Task execution events with timestamp, task_id, core_id, duration, name
+        - 'queue_count': Ready queue count changes with timestamp, queue_type, count
+        - 'memory': Memory usage events with timestamp, bytes
+
+        Returns:
+            List of trace event dictionaries
+
+        Raises:
+            RuntimeError: If get operation fails
+        """
+        import ctypes
+
+        # Define TraceEvent structure matching C layout
+        class TaskExecData(ctypes.Structure):
+            _fields_ = [
+                ("task_id", ctypes.c_int),
+                ("core_id", ctypes.c_int),
+                ("duration_us", ctypes.c_uint64),
+                ("name", ctypes.c_char * 64),
+            ]
+
+        class QueueCountData(ctypes.Structure):
+            _fields_ = [
+                ("queue_type", ctypes.c_int),
+                ("count", ctypes.c_int),
+            ]
+
+        class MemoryData(ctypes.Structure):
+            _fields_ = [
+                ("bytes", ctypes.c_size_t),
+            ]
+
+        class TraceEventData(ctypes.Union):
+            _fields_ = [
+                ("task_exec", TaskExecData),
+                ("queue_count", QueueCountData),
+                ("memory", MemoryData),
+            ]
+
+        class TraceEvent(ctypes.Structure):
+            _fields_ = [
+                ("type", ctypes.c_int),
+                ("timestamp_us", ctypes.c_uint64),
+                ("data", TraceEventData),
+            ]
+
+        events_ptr = ctypes.c_void_p()
+        count = ctypes.c_int()
+
+        rc = self.lib.get_trace_events(self._handle, ctypes.byref(events_ptr), ctypes.byref(count))
+        if rc != 0:
+            raise RuntimeError(f"get_trace_events failed: {rc}")
+
+        # Parse events
+        events_array = ctypes.cast(events_ptr, ctypes.POINTER(TraceEvent))
+        result = []
+
+        for i in range(count.value):
+            evt = events_array[i]
+            if evt.type == 0:  # TRACE_EVENT_TASK_EXEC
+                task_name = evt.data.task_exec.name.decode('utf-8').rstrip('\x00')
+                result.append({
+                    'type': 'task_exec',
+                    'timestamp_us': evt.timestamp_us,
+                    'task_id': evt.data.task_exec.task_id,
+                    'core_id': evt.data.task_exec.core_id,
+                    'duration_us': evt.data.task_exec.duration_us,
+                    'name': task_name,
+                })
+            elif evt.type == 1:  # TRACE_EVENT_QUEUE_COUNT
+                result.append({
+                    'type': 'queue_count',
+                    'timestamp_us': evt.timestamp_us,
+                    'queue_type': evt.data.queue_count.queue_type,
+                    'count': evt.data.queue_count.count,
+                })
+            elif evt.type == 2:  # TRACE_EVENT_MEMORY
+                result.append({
+                    'type': 'memory',
+                    'timestamp_us': evt.timestamp_us,
+                    'bytes': evt.data.memory.bytes,
+                })
+
+        return result
+
+    def get_task_count(self) -> int:
+        """
+        Get the total number of tasks in the runtime.
+
+        Returns:
+            Number of tasks
+
+        Raises:
+            RuntimeError: If operation fails
+        """
+        count = self.lib.get_task_count(self._handle)
+        if count < 0:
+            raise RuntimeError("get_task_count failed")
+        return count
+
+    def get_task_fanout(self, task_id: int) -> list:
+        """
+        Get the fanout (successors) of a task.
+
+        Args:
+            task_id: Task ID to query
+
+        Returns:
+            List of successor task IDs
+
+        Raises:
+            RuntimeError: If operation fails
+        """
+        import ctypes
+
+        fanout_ptr = ctypes.POINTER(ctypes.c_int)()
+        fanout_count = ctypes.c_int()
+
+        rc = self.lib.get_task_fanout(
+            self._handle,
+            task_id,
+            ctypes.byref(fanout_ptr),
+            ctypes.byref(fanout_count)
+        )
+        if rc != 0:
+            raise RuntimeError(f"get_task_fanout failed for task {task_id}")
+
+        # Convert C array to Python list
+        result = []
+        for i in range(fanout_count.value):
+            result.append(fanout_ptr[i])
+
+        return result
 
     def __del__(self):
         """Clean up runtime resources."""
