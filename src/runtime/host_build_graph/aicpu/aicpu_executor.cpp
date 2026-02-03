@@ -40,10 +40,14 @@ struct AicpuExecutor {
     std::mutex ready_queue_aic_mutex_;
     int ready_queue_aic_[RUNTIME_MAX_TASKS];
     std::atomic<int> ready_count_aic_{0};
+    int ready_queue_aic_head_{0};  // Circular queue: read position (front)
+    int ready_queue_aic_tail_{0};  // Circular queue: write position (back)
 
     std::mutex ready_queue_aiv_mutex_;
     int ready_queue_aiv_[RUNTIME_MAX_TASKS];
     std::atomic<int> ready_count_aiv_{0};
+    int ready_queue_aiv_head_{0};  // Circular queue: read position (front)
+    int ready_queue_aiv_tail_{0};  // Circular queue: write position (back)
 
     // Task execution tracking
     std::atomic<int> completed_tasks_{0};
@@ -115,14 +119,26 @@ int AicpuExecutor::init(Runtime* runtime) {
 
     DEV_INFO("Init: Found %d initially ready tasks", initial_count);
 
+    // Reset circular queue indices
+    ready_queue_aic_head_ = 0;
+    ready_queue_aic_tail_ = 0;
+    ready_queue_aiv_head_ = 0;
+    ready_queue_aiv_tail_ = 0;
+
     int aic_count = 0;
     int aiv_count = 0;
     for (int i = 0; i < initial_count; i++) {
         Task* task = runtime->get_task(initial_ready[i]);
         if (task->core_type == CoreType::AIC) {  // AIC
-            ready_queue_aic_[aic_count++] = initial_ready[i];
+            // Enqueue to tail position (circular)
+            ready_queue_aic_[ready_queue_aic_tail_] = initial_ready[i];
+            ready_queue_aic_tail_ = (ready_queue_aic_tail_ + 1) % RUNTIME_MAX_TASKS;
+            aic_count++;
         } else {  // AIV
-            ready_queue_aiv_[aiv_count++] = initial_ready[i];
+            // Enqueue to tail position (circular)
+            ready_queue_aiv_[ready_queue_aiv_tail_] = initial_ready[i];
+            ready_queue_aiv_tail_ = (ready_queue_aiv_tail_ + 1) % RUNTIME_MAX_TASKS;
+            aiv_count++;
         }
     }
     ready_count_aic_.store(aic_count, std::memory_order_release);
@@ -401,16 +417,20 @@ int AicpuExecutor::resolve_and_dispatch(Runtime& runtime, int thread_idx, const 
                     if (prev_fanin == 1) {
                         if (dep->core_type == CoreType::AIC) {  // AIC task
                             std::lock_guard<std::mutex> lock(ready_queue_aic_mutex_);
-                            int idx = ready_count_aic_.load(std::memory_order_relaxed);
-                            ready_queue_aic_[idx] = dep_id;
+                            // Enqueue to tail position (circular)
+                            ready_queue_aic_[ready_queue_aic_tail_] = dep_id;
+                            ready_queue_aic_tail_ = (ready_queue_aic_tail_ + 1) % RUNTIME_MAX_TASKS;
                             ready_count_aic_.fetch_add(1, std::memory_order_release);
-                            DEV_INFO("Thread %d: Task %d became ready -> AIC queue", thread_idx, dep_id);
+                            DEV_INFO("Thread %d: Task %d became ready -> AIC queue (tail=%d)",
+                                     thread_idx, dep_id, ready_queue_aic_tail_);
                         } else {  // AIV task
                             std::lock_guard<std::mutex> lock(ready_queue_aiv_mutex_);
-                            int idx = ready_count_aiv_.load(std::memory_order_relaxed);
-                            ready_queue_aiv_[idx] = dep_id;
+                            // Enqueue to tail position (circular)
+                            ready_queue_aiv_[ready_queue_aiv_tail_] = dep_id;
+                            ready_queue_aiv_tail_ = (ready_queue_aiv_tail_ + 1) % RUNTIME_MAX_TASKS;
                             ready_count_aiv_.fetch_add(1, std::memory_order_release);
-                            DEV_INFO("Thread %d: Task %d became ready -> AIV queue", thread_idx, dep_id);
+                            DEV_INFO("Thread %d: Task %d became ready -> AIV queue (tail=%d)",
+                                     thread_idx, dep_id, ready_queue_aiv_tail_);
                         }
                     }
                 }
@@ -438,11 +458,14 @@ int AicpuExecutor::resolve_and_dispatch(Runtime& runtime, int thread_idx, const 
                             std::lock_guard<std::mutex> lock(ready_queue_aic_mutex_);
                             int count = ready_count_aic_.load(std::memory_order_relaxed);
                             if (count > 0) {
+                                // Dequeue from head position (circular) - FIFO order
+                                int task_id = ready_queue_aic_[ready_queue_aic_head_];
+                                ready_queue_aic_head_ = (ready_queue_aic_head_ + 1) % RUNTIME_MAX_TASKS;
                                 ready_count_aic_.fetch_sub(1, std::memory_order_release);
-                                int task_id = ready_queue_aic_[count - 1];
                                 Task* task = runtime.get_task(task_id);
 
-                                DEV_INFO("Thread %d: Dispatching AIC task %d to core %d", thread_idx, task_id, core_id);
+                                DEV_INFO("Thread %d: Dispatching AIC task %d to core %d (head=%d)",
+                                         thread_idx, task_id, core_id, ready_queue_aic_head_);
 
                                 h->task = reinterpret_cast<uint64_t>(task);
                                 h->task_status = 1;  // Mark as busy
@@ -455,11 +478,14 @@ int AicpuExecutor::resolve_and_dispatch(Runtime& runtime, int thread_idx, const 
                             std::lock_guard<std::mutex> lock(ready_queue_aiv_mutex_);
                             int count = ready_count_aiv_.load(std::memory_order_relaxed);
                             if (count > 0) {
+                                // Dequeue from head position (circular) - FIFO order
+                                int task_id = ready_queue_aiv_[ready_queue_aiv_head_];
+                                ready_queue_aiv_head_ = (ready_queue_aiv_head_ + 1) % RUNTIME_MAX_TASKS;
                                 ready_count_aiv_.fetch_sub(1, std::memory_order_release);
-                                int task_id = ready_queue_aiv_[count - 1];
                                 Task* task = runtime.get_task(task_id);
 
-                                DEV_INFO("Thread %d: Dispatching AIV task %d to core %d", thread_idx, task_id, core_id);
+                                DEV_INFO("Thread %d: Dispatching AIV task %d to core %d (head=%d)",
+                                         thread_idx, task_id, core_id, ready_queue_aiv_head_);
 
                                 h->task = reinterpret_cast<uint64_t>(task);
                                 h->task_status = 1;  // Mark as busy
@@ -527,6 +553,13 @@ void AicpuExecutor::deinit() {
     // Cleanup runtime execution state
     ready_count_aic_.store(0, std::memory_order_release);
     ready_count_aiv_.store(0, std::memory_order_release);
+
+    // Reset circular queue indices
+    ready_queue_aic_head_ = 0;
+    ready_queue_aic_tail_ = 0;
+    ready_queue_aiv_head_ = 0;
+    ready_queue_aiv_tail_ = 0;
+
     completed_tasks_.store(0, std::memory_order_release);
     total_tasks_.store(0, std::memory_order_release);
     finished_count_.store(0, std::memory_order_release);
