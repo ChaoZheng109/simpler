@@ -409,11 +409,10 @@ int AicpuExecutor::resolve_and_dispatch(Runtime& runtime, int thread_idx, const 
                 // Record end time
                 task->end_time = get_timestamp_us();
 
-                // Record trace event if enabled
-                runtime.record_task_execution(task->task_id, core_id,
-                                               task->start_time, task->end_time);
-
                 h->task = 0;  // Clear immediately to minimize race condition window
+
+                // Record trace event if enabled
+                runtime.record_task_execution(task->task_id, core_id, task->start_time, task->end_time);
 
                 int task_id = task->task_id;
 
@@ -441,6 +440,7 @@ int AicpuExecutor::resolve_and_dispatch(Runtime& runtime, int thread_idx, const 
                             runtime.record_queue_count(0, get_timestamp_us(), ready_queue_aic_tail_);
 
                             ready_count_aic_.fetch_add(1, std::memory_order_release);
+
                             DEV_INFO("Thread %d: Task %d became ready -> AIC queue (tail=%d)",
                                      thread_idx, dep_id, ready_queue_aic_tail_);
                         } else {  // AIV task
@@ -453,6 +453,7 @@ int AicpuExecutor::resolve_and_dispatch(Runtime& runtime, int thread_idx, const 
                             runtime.record_queue_count(1, get_timestamp_us(), ready_queue_aiv_tail_);
 
                             ready_count_aiv_.fetch_add(1, std::memory_order_release);
+
                             DEV_INFO("Thread %d: Task %d became ready -> AIV queue (tail=%d)",
                                      thread_idx, dep_id, ready_queue_aiv_tail_);
                         }
@@ -467,10 +468,14 @@ int AicpuExecutor::resolve_and_dispatch(Runtime& runtime, int thread_idx, const 
             }
         }
 
+        // int dispatched_num = 0;
+        // const int MAX_DISPATCH = 1;
+
         // Load balancing: Skip dispatch if all my cores are busy
         if (cur_thread_tasks_in_flight < core_num) {
             // Phase 2: Dispatch new tasks from matching ready queue to idle cores
             for (int i = 0; i < core_num; i++) {
+            // for (int i = 0; i < core_num && dispatched_num < MAX_DISPATCH; i++) {
                 int core_id = cur_thread_cores[i];
                 Handshake* h = &hank[core_id];
 
@@ -496,11 +501,13 @@ int AicpuExecutor::resolve_and_dispatch(Runtime& runtime, int thread_idx, const 
 
                                 h->task = reinterpret_cast<uint64_t>(task);
                                 h->task_status = 1;  // Mark as busy
-                                cur_thread_tasks_in_flight++;
-                                made_progress = true;
 
                                 // Record queue count change
                                 runtime.record_queue_count(0, get_timestamp_us(), count - 1);
+
+                                cur_thread_tasks_in_flight++;
+                                made_progress = true;
+                                // dispatched_num++;
                             }
                         }
                     } else if (h->core_type == CoreType::AIV) {  // AIV core
@@ -522,16 +529,21 @@ int AicpuExecutor::resolve_and_dispatch(Runtime& runtime, int thread_idx, const 
 
                                 h->task = reinterpret_cast<uint64_t>(task);
                                 h->task_status = 1;  // Mark as busy
-                                cur_thread_tasks_in_flight++;
-                                made_progress = true;
 
                                 // Record queue count change
                                 runtime.record_queue_count(1, get_timestamp_us(), count - 1);
+
+                                cur_thread_tasks_in_flight++;
+                                made_progress = true;
+                                // dispatched_num++;
                             }
                         }
                     }
                 }
             }
+            // if (dispatched_num >= MAX_DISPATCH) {
+            //     DEV_INFO("Thread %d: Dispatched %d tasks, reached MAX_DISPATCH", thread_idx, dispatched_num);
+            // }
         }
 
         // Timeout detection: track idle iterations when no progress
