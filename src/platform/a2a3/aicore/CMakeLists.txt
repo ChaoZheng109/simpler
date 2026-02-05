@@ -41,7 +41,6 @@ set(AICORE_FLAGS
     -mllvm -cce-aicore-record-overflow=false \
     -mllvm -cce-aicore-addr-transform \
     -mllvm -cce-aicore-dcci-insert-for-scalar=false \
-    -D__PLATFORM_A2A3__ \
     ${CMAKE_CUSTOM_INCLUDE_DIR_FLAGS}"
 )
 separate_arguments(AICORE_FLAGS)

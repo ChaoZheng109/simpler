@@ -7,8 +7,8 @@
  * the appropriate backend with a layered design to minimize code duplication.
  *
  * Platform Support:
- * - a2a3 (__PLATFORM_A2A3__): Real hardware with CANN dlog API
- * - a2a3sim (default): Host-based simulation using printf
+ * - a2a3: Real hardware with CANN dlog API
+ * - a2a3sim: Host-based simulation using printf
  */
 
 #ifndef PLATFORM_DEVICE_LOG_H_
@@ -33,90 +33,54 @@
 // Log Enable Flags
 // =============================================================================
 
-#if defined(__PLATFORM_A2A3__)
-    // Real hardware: flags defined in device_log.cpp
-    extern bool g_is_log_enable_debug;
-    extern bool g_is_log_enable_info;
-    extern bool g_is_log_enable_warn;
-    extern bool g_is_log_enable_error;
-#else
-    // Simulation: always enabled
-    static bool g_is_log_enable_debug = true;
-    static bool g_is_log_enable_info = true;
-    static bool g_is_log_enable_warn = true;
-    static bool g_is_log_enable_error = true;
-#endif
+// Unified: flags defined in platform-specific device_log.cpp
+extern bool g_is_log_enable_debug;
+extern bool g_is_log_enable_info;
+extern bool g_is_log_enable_warn;
+extern bool g_is_log_enable_error;
+
+// Platform constant (defined in platform-specific device_log.cpp)
+extern const char* TILE_FWK_DEVICE_MACHINE;
 
 // =============================================================================
-// Backend-Specific Logging Macros (Low-Level Layer)
+// Platform-Specific Logging Functions (Low-Level Layer)
 // =============================================================================
 
-#if defined(__PLATFORM_A2A3__)
-    // Real hardware: use CANN dlog API
-    #include "dlog_pub.h"
-
-    constexpr const char* TILE_FWK_DEVICE_MACHINE = "AI_CPU";
-
-    // Low-level logging backends
-    #define BACKEND_LOG_DEBUG(fmt, ...) \
-        dlog_debug(AICPU, "%lu %s\n" #fmt, GET_TID(), __FUNCTION__, ##__VA_ARGS__)
-
-    #define BACKEND_LOG_INFO(fmt, ...) \
-        dlog_info(AICPU, "%lu %s\n" #fmt, GET_TID(), __FUNCTION__, ##__VA_ARGS__)
-
-    #define BACKEND_LOG_WARN(fmt, ...) \
-        dlog_warn(AICPU, "%lu %s\n" #fmt, GET_TID(), __FUNCTION__, ##__VA_ARGS__)
-
-    #define BACKEND_LOG_ERROR(fmt, ...) \
-        dlog_error(AICPU, "%lu %s\n" #fmt, GET_TID(), __FUNCTION__, ##__VA_ARGS__)
-
-#else
-    // Simulation: use printf
-    constexpr const char* TILE_FWK_DEVICE_MACHINE = "SIM_CPU";
-
-    // Low-level logging backends
-    #define BACKEND_LOG_DEBUG(fmt, ...) \
-        printf("[DEBUG] %s: " fmt "\n", __FUNCTION__, ##__VA_ARGS__)
-
-    #define BACKEND_LOG_INFO(fmt, ...) \
-        printf("[INFO] %s: " fmt "\n", __FUNCTION__, ##__VA_ARGS__)
-
-    #define BACKEND_LOG_WARN(fmt, ...) \
-        printf("[WARN] %s: " fmt "\n", __FUNCTION__, ##__VA_ARGS__)
-
-    #define BACKEND_LOG_ERROR(fmt, ...) \
-        printf("[ERROR] %s: " fmt "\n", __FUNCTION__, ##__VA_ARGS__)
-#endif
+// Platform-specific logging functions (implemented in device_log.cpp)
+void dev_log_debug(const char* func, const char* fmt, ...);
+void dev_log_info(const char* func, const char* fmt, ...);
+void dev_log_warn(const char* func, const char* fmt, ...);
+void dev_log_error(const char* func, const char* fmt, ...);
 
 // =============================================================================
-// Unified High-Level Logging Macros (Platform-Independent Layer)
+// High-Level Logging Macros (Platform-Independent Layer)
 // =============================================================================
 
 #define D_DEV_LOGD(MODE_NAME, fmt, ...) \
     do { \
         if (is_log_enable_debug()) { \
-            BACKEND_LOG_DEBUG(fmt, ##__VA_ARGS__); \
+            dev_log_debug(__FUNCTION__, fmt, ##__VA_ARGS__); \
         } \
     } while(0)
 
 #define D_DEV_LOGI(MODE_NAME, fmt, ...) \
     do { \
         if (is_log_enable_info()) { \
-            BACKEND_LOG_INFO(fmt, ##__VA_ARGS__); \
+            dev_log_info(__FUNCTION__, fmt, ##__VA_ARGS__); \
         } \
     } while(0)
 
 #define D_DEV_LOGW(MODE_NAME, fmt, ...) \
     do { \
         if (is_log_enable_warn()) { \
-            BACKEND_LOG_WARN(fmt, ##__VA_ARGS__); \
+            dev_log_warn(__FUNCTION__, fmt, ##__VA_ARGS__); \
         } \
     } while(0)
 
 #define D_DEV_LOGE(MODE_NAME, fmt, ...) \
     do { \
         if (is_log_enable_error()) { \
-            BACKEND_LOG_ERROR(fmt, ##__VA_ARGS__); \
+            dev_log_error(__FUNCTION__, fmt, ##__VA_ARGS__); \
         } \
     } while(0)
 
@@ -132,14 +96,12 @@
 // Platform-Specific Assertion
 // =============================================================================
 
-#if defined(__PLATFORM_A2A3__)
-    // Real hardware: enable assertions for debugging
-    #include <cassert>
-    #define DEV_ASSERT(condition) assert(condition)
-#else
-    // Simulation: disable assertions (graceful error handling)
-    #define DEV_ASSERT(condition) ((void)0)
-#endif
+// =============================================================================
+// Assertion (Unified: both platforms use assert)
+// =============================================================================
+
+#include <cassert>
+#define DEV_ASSERT(condition) assert(condition)
 
 // =============================================================================
 // Conditional Check Macros
@@ -183,10 +145,6 @@ inline bool is_log_enable_warn()  { return g_is_log_enable_warn; }
 inline bool is_log_enable_error() { return g_is_log_enable_error; }
 
 // Initialize log switch (platform-specific implementation)
-#if defined(__PLATFORM_A2A3__)
-    void init_log_switch();  // Implemented in device_log.cpp
-#else
-    inline void init_log_switch() {}  // No-op for simulation
-#endif
+void init_log_switch();
 
 #endif  // PLATFORM_DEVICE_LOG_H_

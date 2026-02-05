@@ -47,12 +47,6 @@ target_compile_options(host_runtime
         -g
 )
 
-# Platform definition
-target_compile_definitions(host_runtime
-    PRIVATE
-        __PLATFORM_A2A3__
-)
-
 # Include directories - always include local headers
 target_include_directories(host_runtime
     PRIVATE

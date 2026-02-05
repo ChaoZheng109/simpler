@@ -47,12 +47,6 @@ target_compile_options(aicpu_kernel
         -g
 )
 
-# Platform definition
-target_compile_definitions(aicpu_kernel
-    PRIVATE
-        __PLATFORM_A2A3__
-)
-
 target_include_directories(aicpu_kernel
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}

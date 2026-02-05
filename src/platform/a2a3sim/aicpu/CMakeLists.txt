@@ -22,9 +22,14 @@ else()
     message(FATAL_ERROR "MUST set CUSTOM_INCLUDE_DIRS to build AICPU (simulation)")
 endif()
 
-# Build complete source list
+# Build complete source list from CUSTOM_SOURCE_DIRS and platform sources
 set(AICPU_SOURCES "")
 
+# First, collect all .cpp files from the current platform directory
+file(GLOB PLATFORM_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/*.cpp")
+list(APPEND AICPU_SOURCES ${PLATFORM_SOURCES})
+
+# Then, collect sources from CUSTOM_SOURCE_DIRS (runtime sources)
 if(DEFINED CUSTOM_SOURCE_DIRS)
     foreach(SRC_DIR ${CUSTOM_SOURCE_DIRS})
         file(GLOB DIR_SOURCES "${SRC_DIR}/*.cpp" "${SRC_DIR}/*.c")

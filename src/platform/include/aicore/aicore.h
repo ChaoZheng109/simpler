@@ -7,8 +7,8 @@
  * the appropriate implementation.
  *
  * Platform Support:
- * - a2a3 (__PLATFORM_A2A3__): Real Ascend hardware with CANN compiler
- * - a2a3sim (default): Host-based simulation using standard C++
+ * - a2a3: Real Ascend hardware with CANN compiler
+ * - a2a3sim: Host-based simulation using standard C++
  */
 
 #ifndef PLATFORM_AICORE_H_
@@ -37,23 +37,11 @@
 // =============================================================================
 // Platform-Specific Definitions
 // =============================================================================
+// Platform-specific macros (__aicore__, dcci) are defined in inner_kernel.h
+// The build system selects the correct implementation based on platform:
+// - src/platform/a2a3/aicore/inner_kernel.h (real hardware)
+// - src/platform/a2a3sim/aicore/inner_kernel.h (simulation)
 
-#if defined(__PLATFORM_A2A3__)
-    // Real hardware: Use CANN compiler attributes
-    #ifndef __aicore__
-    #define __aicore__ [aicore]
-    #endif
-
-#else
-    // Simulation: No-op macros for host execution
-    #ifndef __aicore__
-    #define __aicore__
-    #endif
-
-    // Cache coherency operations (no-op on unified memory)
-    #define ENTIRE_DATA_CACHE 0
-    #define CACHELINE_OUT 0
-    #define dcci(addr, mode, opt) ((void)0)
-#endif
+#include "inner_kernel.h"
 
 #endif  // PLATFORM_AICORE_H_
