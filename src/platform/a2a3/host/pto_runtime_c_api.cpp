@@ -191,4 +191,17 @@ int register_kernel(int func_id, const uint8_t* bin_data, size_t bin_size) {
     }
 }
 
+int enable_runtime_profiling(RuntimeHandle runtime, int enabled) {
+    if (runtime == NULL) {
+        return -1;
+    }
+    try {
+        Runtime* r = static_cast<Runtime*>(runtime);
+        r->enable_profiling = (enabled != 0);
+        return 0;
+    } catch (...) {
+        return -1;
+    }
+}
+
 } /* extern "C" */

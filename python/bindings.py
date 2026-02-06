@@ -117,6 +117,10 @@ class RuntimeLibraryLoader:
         self.lib.set_device.argtypes = [c_int]
         self.lib.set_device.restype = c_int
 
+        # enable_runtime_profiling - enable profiling for swimlane
+        self.lib.enable_runtime_profiling.argtypes = [c_void_p, c_int]
+        self.lib.enable_runtime_profiling.restype = c_int
+
 
 # ============================================================================
 # Python Wrapper Classes
@@ -212,6 +216,24 @@ class Runtime:
         rc = self.lib.finalize_runtime(self._handle)
         if rc != 0:
             raise RuntimeError(f"finalize_runtime failed: {rc}")
+
+    def enable_profiling(self, enabled: bool = True) -> None:
+        """
+        Enable or disable performance profiling for swimlane visualization.
+
+        Must be called before initialize() to enable profiling.
+        When enabled, the runtime records task execution timestamps and
+        generates swim_time.json after finalize().
+
+        Args:
+            enabled: True to enable profiling, False to disable
+
+        Raises:
+            RuntimeError: If enable operation fails
+        """
+        rc = self.lib.enable_runtime_profiling(self._handle, 1 if enabled else 0)
+        if rc != 0:
+            raise RuntimeError(f"enable_runtime_profiling failed: {rc}")
 
     def __del__(self):
         """Clean up runtime resources."""

@@ -176,6 +176,19 @@ int set_device(int device_id);
  */
 int register_kernel(int func_id, const uint8_t* bin_data, size_t bin_size);
 
+/**
+ * Enable or disable performance profiling for swimlane visualization.
+ *
+ * Must be called before init_runtime() to enable profiling.
+ * When enabled, the runtime will record task execution timestamps on AICore/AICPU
+ * and generate swim_time.json after finalize_runtime().
+ *
+ * @param runtime  Runtime handle
+ * @param enabled  1 to enable profiling, 0 to disable
+ * @return 0 on success, -1 on failure
+ */
+int enable_runtime_profiling(RuntimeHandle runtime, int enabled);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif
