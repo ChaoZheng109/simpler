@@ -94,6 +94,12 @@ Golden.py interface:
         help="Enable verbose output"
     )
 
+    parser.add_argument(
+        "--profile",
+        action="store_true",
+        help="Enable profiling and generate swim_time.json"
+    )
+
     args = parser.parse_args()
 
     # Add python directory to path
@@ -134,6 +140,7 @@ Golden.py interface:
             runtime_name=args.runtime,
             device_id=args.device,
             platform=args.platform,
+            enable_profiling=args.profile,
         )
 
         runner.run()

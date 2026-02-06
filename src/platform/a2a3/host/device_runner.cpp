@@ -12,7 +12,22 @@
 #include <vector>
 
 #include "common/platform_config.h"
+#include "common/perf_profiling.h"
 #include "runtime.h"
+#include "ascend_hal.h"
+
+// =============================================================================
+// Memory Barrier Definitions
+// =============================================================================
+
+// Memory barriers for shared memory synchronization between Host and AICPU
+#ifdef __aarch64__
+    #define rmb() __asm__ __volatile__("dsb ld":::"memory")  // Read memory barrier
+    #define wmb() __asm__ __volatile__("dsb st":::"memory")  // Write memory barrier
+#else
+    #define rmb() __asm__ __volatile__("":::"memory")
+    #define wmb() __asm__ __volatile__("":::"memory")
+#endif
 
 // =============================================================================
 // KernelArgsHelper Implementation
@@ -276,21 +291,21 @@ int DeviceRunner::run(Runtime& runtime,
     // Calculate execution parameters
     block_dim_ = block_dim;
 
-    int num_ai_core = block_dim * cores_per_blockdim_;
+    int num_aicore = block_dim * cores_per_blockdim_;
     // Initialize handshake buffers in runtime
-    if (num_ai_core > RUNTIME_MAX_WORKER) {
+    if (num_aicore > RUNTIME_MAX_WORKER) {
         std::cerr << "Error: block_dim (" << block_dim << ") exceeds RUNTIME_MAX_WORKER (" << RUNTIME_MAX_WORKER << ")\n";
         return -1;
     }
 
-    runtime.worker_count = num_ai_core;
-    worker_count_ = num_ai_core;  // Store for print_handshake_results in destructor
+    runtime.worker_count = num_aicore;
+    worker_count_ = num_aicore;  // Store for print_handshake_results in destructor
     runtime.sche_cpu_num = launch_aicpu_num;
 
     // Calculate number of AIC cores (1/3 of total)
     int num_aic = block_dim;  // Round up for 1/3
 
-    for (int i = 0; i < num_ai_core; i++) {
+    for (int i = 0; i < num_aicore; i++) {
         runtime.workers[i].aicpu_ready = 0;
         runtime.workers[i].aicore_done = 0;
         runtime.workers[i].control = 0;
@@ -298,6 +313,8 @@ int DeviceRunner::run(Runtime& runtime,
         runtime.workers[i].task_status = 0;
         // Set core type: first 1/3 are AIC, remaining 2/3 are AIV
         runtime.workers[i].core_type = (i < num_aic) ? CoreType::AIC : CoreType::AIV;
+        runtime.workers[i].perf_records_addr = (uint64_t)nullptr;
+        runtime.workers[i].perf_buffer_status = 0;
     }
 
     // Set function_bin_addr for all tasks (NEW - Runtime function pointer
@@ -313,6 +330,129 @@ int DeviceRunner::run(Runtime& runtime,
         }
     }
     std::cout << '\n';
+
+    // ==========================================================================
+    // Performance Profiling: Allocate and Initialize Shared Memory
+    // ==========================================================================
+    if (runtime.enable_profiling) {
+        std::cout << "\n=== Initializing Performance Profiling ===" << '\n';
+
+        // ----------------------------------------------------------------------
+        // 步骤1: 计算总内存大小（包含头部和所有 DoubleBuffer）
+        // ----------------------------------------------------------------------
+        size_t total_size = calc_perf_data_size(num_aicore);
+
+        size_t header_size = sizeof(PerfDataHeader);
+        size_t single_db_size = sizeof(DoubleBuffer);
+        size_t buffers_size = num_aicore * single_db_size;
+
+        std::cout << "  Memory allocation plan:\n";
+        std::cout << "    - Number of cores:      " << num_aicore << '\n';
+        std::cout << "    - Header size:          " << header_size << " bytes\n";
+        std::cout << "      (includes ready queue: " << PLATFORM_MAX_CORES * 2 << " entries)\n";
+        std::cout << "    - Single DoubleBuffer:  " << single_db_size << " bytes\n";
+        std::cout << "    - All DoubleBuffers:    " << buffers_size << " bytes\n";
+        std::cout << "    - Total size:           " << total_size << " bytes ("
+                  << total_size / 1024 << " KB, " << total_size / (1024 * 1024) << " MB)\n";
+
+        // ----------------------------------------------------------------------
+        // 步骤2: 分配设备端共享内存
+        // ----------------------------------------------------------------------
+        void* perf_dev_ptr = mem_alloc_.alloc(total_size);
+        if (perf_dev_ptr == nullptr) {
+            std::cerr << "Error: Failed to allocate device memory for profiling ("
+                      << total_size << " bytes)\n";
+            return -1;
+        }
+        std::cout << "  Allocated device memory: " << perf_dev_ptr << '\n';
+
+        // ----------------------------------------------------------------------
+        // 步骤3: 注册到主机映射（创建 Host-Device 共享内存）
+        // ----------------------------------------------------------------------
+        void* perf_host_ptr = nullptr;
+        rc = halHostRegister(perf_dev_ptr, total_size, DEV_SVM_MAP_HOST,
+                            device_id, &perf_host_ptr);
+        if (rc != 0) {
+            std::cerr << "Error: halHostRegister failed: " << rc << '\n';
+            mem_alloc_.free(perf_dev_ptr);
+            return rc;
+        }
+        std::cout << "  Mapped to host memory:   " << perf_host_ptr << '\n';
+
+        // ----------------------------------------------------------------------
+        // 步骤4: 初始化固定头部（使用 host_ptr）
+        // ----------------------------------------------------------------------
+        PerfDataHeader* header = get_perf_header(perf_host_ptr);
+
+        // 初始化队列
+        memset(header->queue, 0, sizeof(header->queue));
+        header->queue_head = 0;
+        header->queue_tail = 0;
+
+        // 初始化元数据
+        header->num_cores = num_aicore;
+        header->buffer_capacity = PLATFORM_PROF_BUFFER_SIZE;
+
+        // 初始化控制标志
+        header->profiling_enabled = 1;
+        header->profiling_finished = 0;
+
+        // 对齐填充
+        memset(header->padding, 0, sizeof(header->padding));
+
+        std::cout << "  Initialized PerfDataHeader:\n";
+        std::cout << "    - num_aicore:        " << header->num_cores << '\n';
+        std::cout << "    - buffer_capacity:  " << header->buffer_capacity << '\n';
+        std::cout << "    - queue capacity:   " << PLATFORM_MAX_CORES * 2 << '\n';
+
+        // ----------------------------------------------------------------------
+        // 步骤5: 初始化所有 DoubleBuffer（所有 buffer 初始状态为 0=空闲）
+        // ----------------------------------------------------------------------
+        DoubleBuffer* buffers = get_double_buffers(perf_host_ptr);
+
+        for (int i = 0; i < num_aicore; i++) {
+            DoubleBuffer* db = &buffers[i];
+
+            // 初始化 buffer1
+            memset(&db->buffer1, 0, sizeof(PerfBuffer));
+            db->buffer1.count = 0;
+            db->buffer1.first_task_time = 0;
+            db->buffer1.first_task_recorded = 0;
+            db->buffer1_status = PERF_BUFFER_STATUS_IDLE;  // 0=空闲
+
+            // 初始化 buffer2
+            memset(&db->buffer2, 0, sizeof(PerfBuffer));
+            db->buffer2.count = 0;
+            db->buffer2.first_task_time = 0;
+            db->buffer2.first_task_recorded = 0;
+            db->buffer2_status = PERF_BUFFER_STATUS_IDLE;  // 0=空闲
+
+            // 对齐填充
+            memset(db->padding, 0, sizeof(db->padding));
+        }
+
+        std::cout << "  Initialized " << num_aicore << " DoubleBuffers (all status=0, idle)\n";
+
+        // ----------------------------------------------------------------------
+        // 步骤6: 写内存屏障（确保所有初始化对 Device 可见）
+        // ----------------------------------------------------------------------
+        wmb();
+
+        // ----------------------------------------------------------------------
+        // 步骤7: 传递给 Runtime（设备端基地址）
+        // ----------------------------------------------------------------------
+        runtime.perf_data_base = (uint64_t)perf_dev_ptr;
+
+        std::cout << "  Set runtime.perf_data_base = " << std::hex << runtime.perf_data_base << std::dec << '\n';
+
+        // ----------------------------------------------------------------------
+        // 步骤9: 保存指针到成员变量（用于后续清理）
+        // ----------------------------------------------------------------------
+        perf_shared_mem_dev_ = perf_dev_ptr;
+        perf_shared_mem_host_ = perf_host_ptr;
+
+        std::cout << "=== Performance Profiling Initialized ===" << "\n\n";
+    }
 
     // Initialize runtime args
     rc = kernel_args_.init_runtime_args(runtime, mem_alloc_);
@@ -344,6 +484,7 @@ int DeviceRunner::run(Runtime& runtime,
         kernel_args_.finalize_runtime_args();
         return rc;
     }
+    // host和device性能数据传输交互位置
 
     // Synchronize streams
     rc = rtStreamSynchronize(stream_aicpu_);
@@ -359,6 +500,7 @@ int DeviceRunner::run(Runtime& runtime,
         kernel_args_.finalize_runtime_args();
         return rc;
     }
+    //性能数据生成json文件位置
 
     // Note: FinalizeRuntimeArgs is deferred to Finalize() so PrintHandshakeResults can access device data
 
@@ -412,6 +554,26 @@ int DeviceRunner::finalize() {
     if (stream_aicore_ != nullptr) {
         rtStreamDestroy(stream_aicore_);
         stream_aicore_ = nullptr;
+    }
+
+    // ===================================================================
+    // Cleanup profiling shared memory (NEW)
+    // ===================================================================
+    if (perf_shared_mem_host_ != nullptr) {
+        std::cout << "Cleaning up profiling shared memory...\n";
+
+        // Unregister host mapping
+        halHostUnregister(perf_shared_mem_host_, device_id_);
+        perf_shared_mem_host_ = nullptr;
+
+        std::cout << "  Host mapping unregistered\n";
+    }
+
+    if (perf_shared_mem_dev_ != nullptr) {
+        // Free device memory (managed by mem_alloc_, will be freed in finalize())
+        perf_shared_mem_dev_ = nullptr;
+
+        std::cout << "  Device memory marked for cleanup\n";
     }
 
     // Free all remaining allocations (including handshake buffer and binGmAddr)

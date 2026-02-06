@@ -64,12 +64,14 @@ target_include_directories(host_runtime
         ${ASCEND_HOME_PATH}/pkg_inc
         ${ASCEND_HOME_PATH}/pkg_inc/runtime
         ${ASCEND_HOME_PATH}/pkg_inc/profiling
+        ${ASCEND_HOME_PATH}/aarch64-linux/include/driver
 )
 
 target_link_directories(host_runtime
     PRIVATE
         ${ASCEND_HOME_PATH}/lib64
         ${ASCEND_HOME_PATH}/runtime/lib64
+        ${ASCEND_HOME_PATH}/../driver/lib64/driver
 )
 
 # Link against CANN runtime libraries
@@ -77,6 +79,7 @@ target_link_libraries(host_runtime
     PRIVATE
         runtime
         ascendcl
+        ascend_hal
 )
 
 set_target_properties(host_runtime PROPERTIES OUTPUT_NAME "host_runtime")

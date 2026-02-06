@@ -320,6 +320,10 @@ private:
     bool binaries_loaded_{false};            // true after AICPU SO loaded
     std::map<int, uint64_t> func_id_to_addr_;  // func_id -> function_bin_addr (device GM)
 
+    // Performance profiling shared memory management (manually allocated, not tracked by mem_alloc_)
+    void* perf_shared_mem_dev_{nullptr};   ///< 设备端共享内存指针（包含Header + DoubleBuffers）
+    void* perf_shared_mem_host_{nullptr};  ///< 主机端映射指针（Host 访问共享内存）
+
     /**
      * Ensure device is initialized (lazy initialization)
      *

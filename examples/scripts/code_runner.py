@@ -283,11 +283,13 @@ class CodeRunner:
         runtime_name: str = "host_build_graph",
         device_id: Optional[int] = None,
         platform: str = "a2a3",
+        enable_profiling: bool = False,
     ):
         self.kernels_dir = Path(kernels_dir).resolve()
         self.golden_path = Path(golden_path).resolve()
         self.runtime_name = runtime_name
         self.platform = platform
+        self.enable_profiling = enable_profiling
         self.project_root = _get_project_root()
 
         # Resolve device ID
@@ -311,8 +313,8 @@ class CodeRunner:
         self.tensor_order = getattr(self._golden_module, 'TENSOR_ORDER', None)
 
         # Runtime configuration
-        self.aicpu_thread_num = 3
-        self.block_dim = 3
+        self.aicpu_thread_num = 2
+        self.block_dim = 2
 
     def _load_kernel_config(self):
         """Load kernel_config.py from kernels directory."""
@@ -539,6 +541,12 @@ class CodeRunner:
             # Create and initialize runtime
             print("\n=== Initializing Runtime ===")
             runtime = Runtime()
+
+            # Enable profiling if requested (must be before initialize)
+            if self.enable_profiling:
+                runtime.enable_profiling(True)
+                print("Profiling enabled")
+
             runtime.initialize(orch_so_binary, self.orchestration["function_name"], func_args)
 
             # Launch runtime

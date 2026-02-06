@@ -6,6 +6,19 @@
 #include "common/platform_config.h"
 #include "runtime.h"
 
+// =============================================================================
+// Memory Barrier Definitions
+// =============================================================================
+
+// Memory barriers for shared memory synchronization between AICPU and Host
+#ifdef __aarch64__
+    #define rmb() __asm__ __volatile__("dsb ld":::"memory")  // Read memory barrier
+    #define wmb() __asm__ __volatile__("dsb st":::"memory")  // Write memory barrier
+#else
+    #define rmb() __asm__ __volatile__("":::"memory")
+    #define wmb() __asm__ __volatile__("":::"memory")
+#endif
+
 constexpr int MAX_AICPU_THREADS = PLATFORM_MAX_AICPU_THREADS;
 constexpr int MAX_AIC_PER_THREAD = PLATFORM_MAX_AIC_PER_THREAD;
 constexpr int MAX_AIV_PER_THREAD = PLATFORM_MAX_AIV_PER_THREAD;
@@ -64,6 +77,7 @@ struct AicpuExecutor {
     void deinit();
     void diagnose_stuck_state(Runtime& runtime, int thread_idx, const int* cur_thread_cores,
                               int core_num, Handshake* hank);
+    void collect_and_transfer_perf_data(Runtime* runtime, int thread_idx, const int* cur_thread_cores, int core_num);
 };
 
 static AicpuExecutor g_aicpu_executor;
