@@ -92,6 +92,8 @@ struct Handshake {
     volatile int32_t task_status;   // Task execution status: 0=idle, 1=busy
     volatile int32_t control;       // Control signal: 0=execute, 1=quit
     volatile CoreType core_type;    // Core type: CoreType::AIC or CoreType::AIV
+    volatile uint64_t perf_records_addr; // Performance records address
+    volatile uint32_t perf_buffer_status; // 0 = not full, 1 == full
 } __attribute__((aligned(64)));
 
 /**
@@ -150,6 +152,10 @@ public:
     // PTO2 integration: kernel_id -> GM function_bin_addr mapping
     // NOTE: Made public for direct access from aicore code
     uint64_t func_id_to_addr_[RUNTIME_MAX_FUNC_ID];
+
+    // Profiling support
+    bool enable_profiling;                  // Enable profiling flag
+    uint64_t perf_data_base;                // Performance data shared memory base address (device-side)
 
 private:
     // Tensor pairs for host-device memory tracking

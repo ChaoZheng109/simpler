@@ -1,7 +1,82 @@
 #include "aicore/aicore.h"
 #include "runtime.h"
+#include "common/perf_profiling.h"
+#include "common/memory_barrier.h"
 
 typedef void (*KernelFunc)(__gm__ int64_t*);
+
+/**
+ * @brief Record task execution performance data
+ *
+ * This function records the performance metrics of a task execution to the profiling buffer.
+ * It writes the task timing data, metadata, and marks the buffer as full when needed.
+ *
+ * @param my_hank Pointer to the handshake structure containing perf buffer info
+ * @param task_ptr Pointer to the executed task
+ * @param start_time Task start timestamp
+ * @param end_time Task end timestamp
+ * @param block_idx AICore block index
+ * @param core_type Core type (AIC or AIV)
+ */
+__aicore__ __attribute__((always_inline)) static void record_task_performance(
+    __gm__ Handshake* my_hank,
+    __gm__ Task* task_ptr,
+    uint64_t start_time,
+    uint64_t end_time,
+    int block_idx,
+    CoreType core_type) {
+
+    // Check if buffer is available for writing
+    if (my_hank->perf_buffer_status != 0) {
+        return;  // Buffer full, skip recording
+    }
+
+    // Get current performance buffer pointer
+    __gm__ PerfBuffer* perf_buf = (__gm__ PerfBuffer*)my_hank->perf_records_addr;
+
+    // Get current count (no atomic operation needed - single writer)
+    uint32_t idx = perf_buf->count;
+
+    // Check if buffer has space
+    if (idx < PLATFORM_PROF_BUFFER_SIZE) {
+        // Get pointer to the record slot
+        __gm__ PerfRecord* record = (__gm__ PerfRecord*)&perf_buf->records[idx];
+
+        // Write record data
+        record->start_time = start_time;
+        record->end_time = end_time;
+        record->duration = end_time - start_time;
+        record->task_id = task_ptr->task_id;
+        record->func_id = task_ptr->func_id;
+        record->core_id = block_idx;
+        record->core_type = core_type;
+        record->fanout_count = task_ptr->fanout_count;
+
+        // Copy fanout array
+        for (int32_t i = 0; i < task_ptr->fanout_count && i < RUNTIME_MAX_FANOUT; i++) {
+            record->fanout[i] = task_ptr->fanout[i];
+        }
+
+        // Record first task time if this is the first record
+        if (idx == 0) {
+            perf_buf->first_task_time = start_time;
+        }
+
+        // Increment count after writing record
+        perf_buf->count = idx + 1;
+
+        // Write memory barrier: ensure performance data is visible to Host
+        wmb();
+
+        // Check if buffer is full after this write
+        if (perf_buf->count >= PLATFORM_PROF_BUFFER_SIZE) {
+            my_hank->perf_buffer_status = 1;  // Notify AICPU: buffer full
+        }
+    } else {
+        // Buffer is already full
+        my_hank->perf_buffer_status = 1;
+    }
+}
 
 __aicore__ __attribute__((always_inline)) static void execute_task(__gm__ Task* task) {
     if (task->function_bin_addr == 0) {
@@ -23,6 +98,9 @@ __aicore__ __attribute__((weak)) void aicore_execute(__gm__ Runtime* runtime, in
     my_hank->core_type = core_type;        // Report core type to AICPU
     my_hank->aicore_done = block_idx + 1;  // Signal ready (use block_idx + 1 to avoid 0)
 
+    // Check if profiling is enabled
+    bool profiling_enabled = runtime->enable_profiling;
+
     // Phase 3: Main execution loop - poll for tasks until quit signal
     while (true) {
         dcci(my_hank, ENTIRE_DATA_CACHE, CACHELINE_OUT);
@@ -34,7 +112,23 @@ __aicore__ __attribute__((weak)) void aicore_execute(__gm__ Runtime* runtime, in
 
         // Execute task if assigned (task != 0 means valid task pointer)
         if (my_hank->task_status == 1 && my_hank->task != 0) {
-            execute_task(reinterpret_cast<__gm__ Task*>(my_hank->task));
+            __gm__ Task* task_ptr = reinterpret_cast<__gm__ Task*>(my_hank->task);
+
+            // Performance profiling: record start time
+            uint64_t start_time = 0;
+            if (profiling_enabled) {
+                start_time = get_sys_cnt();
+            }
+
+            // Execute the task
+            execute_task(task_ptr);
+
+            // Performance profiling: record task execution
+            if (profiling_enabled) {
+                uint64_t end_time = get_sys_cnt();
+                record_task_performance(my_hank, task_ptr, start_time, end_time, block_idx, core_type);
+            }
+
             // Mark task as complete (task_status: 0=idle, 1=busy)
             my_hank->task_status = 0;
         }

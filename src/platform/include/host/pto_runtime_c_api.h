@@ -223,6 +223,19 @@ void set_pto2_gm_sm_ptr(RuntimeHandle runtime, void* dev_ptr);
  */
 int32_t get_pto2_sm_size(RuntimeHandle runtime);
 
+/**
+ * Enable or disable performance profiling for swimlane visualization.
+ *
+ * Must be called before init_runtime() to enable profiling.
+ * When enabled, the runtime will record task execution timestamps on AICore/AICPU
+ * and generate swim_time.json after finalize_runtime().
+ *
+ * @param runtime  Runtime handle
+ * @param enabled  1 to enable profiling, 0 to disable
+ * @return 0 on success, -1 on failure
+ */
+int enable_runtime_profiling(RuntimeHandle runtime, int enabled);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif

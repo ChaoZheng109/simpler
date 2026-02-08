@@ -113,6 +113,8 @@ struct Handshake {
     volatile int32_t task_status;   // Task execution status: 0=idle, 1=busy
     volatile int32_t control;       // Control signal: 0=execute, 1=quit
     volatile CoreType core_type;    // Core type: CoreType::AIC or CoreType::AIV
+    volatile uint64_t perf_records_addr; // Performance records address
+    volatile uint32_t perf_buffer_status; // 0 = not full, 1 == full
 } __attribute__((aligned(64)));
 
 /**
@@ -307,6 +309,10 @@ public:
      * against `aicpu_runtime_*` symbols directly.
      */
     AicpuBuildApi aicpu_build_api;
+
+    // Profiling support
+    bool enable_profiling;                  // Enable profiling flag
+    uint64_t perf_data_base;                // Performance data shared memory base address (device-side)
 
 private:
     // Task storage

@@ -7,13 +7,47 @@
 
 #include "device_runner.h"
 
-#include <cstring>
-#include <iostream>
-#include <vector>
 
-#include "common/platform_config.h"
-#include "common/unified_log.h"
-#include "runtime.h"
+#include <dlfcn.h>
+
+// Use real HAL constant from CANN (compile-time only; we do not link ascend_hal)
+#include "ascend_hal.h"
+
+// =============================================================================
+// Lazy-loaded HAL (ascend_hal) for profiling host-register only
+// =============================================================================
+
+namespace {
+void* g_hal_handle = nullptr;
+
+using HalHostRegisterFn = int (*)(void* dev_ptr, size_t size, unsigned int flags, int device_id, void** host_ptr);
+using HalHostUnregisterFn = int (*)(void* host_ptr, int device_id);
+
+int load_hal_if_needed() {
+    if (g_hal_handle != nullptr) {
+        return 0;
+    }
+    g_hal_handle = dlopen("libascend_hal.so", RTLD_NOW | RTLD_LOCAL);
+    if (g_hal_handle == nullptr) {
+        return -1;
+    }
+    return 0;
+}
+
+HalHostRegisterFn get_halHostRegister() {
+    if (g_hal_handle == nullptr) {
+        return nullptr;
+    }
+    return reinterpret_cast<HalHostRegisterFn>(dlsym(g_hal_handle, "halHostRegister"));
+}
+
+HalHostUnregisterFn get_halHostUnregister() {
+    if (g_hal_handle == nullptr) {
+        return nullptr;
+    }
+    return reinterpret_cast<HalHostUnregisterFn>(dlsym(g_hal_handle, "halHostUnregister"));
+}
+}  // namespace
 
 // =============================================================================
 // KernelArgsHelper Implementation
@@ -279,22 +313,22 @@ int DeviceRunner::run(Runtime& runtime,
     // Calculate execution parameters
     block_dim_ = block_dim;
 
-    int num_ai_core = block_dim * cores_per_blockdim_;
+    int num_aicore = block_dim * cores_per_blockdim_;
     // Initialize handshake buffers in runtime
-    if (num_ai_core > RUNTIME_MAX_WORKER) {
+    if (num_aicore > RUNTIME_MAX_WORKER) {
         LOG_ERROR("block_dim (%d) exceeds RUNTIME_MAX_WORKER (%d)",
                       block_dim, RUNTIME_MAX_WORKER);
         return -1;
     }
 
-    runtime.worker_count = num_ai_core;
-    worker_count_ = num_ai_core;  // Store for print_handshake_results in destructor
+    runtime.worker_count = num_aicore;
+    worker_count_ = num_aicore;  // Store for print_handshake_results in destructor
     runtime.sche_cpu_num = launch_aicpu_num;
 
     // Calculate number of AIC cores (1/3 of total)
     int num_aic = block_dim;  // Round up for 1/3
 
-    for (int i = 0; i < num_ai_core; i++) {
+    for (int i = 0; i < num_aicore; i++) {
         runtime.workers[i].aicpu_ready = 0;
         runtime.workers[i].aicore_done = 0;
         runtime.workers[i].control = 0;
@@ -302,6 +336,8 @@ int DeviceRunner::run(Runtime& runtime,
         runtime.workers[i].task_status = 0;
         // Set core type: first 1/3 are AIC, remaining 2/3 are AIV
         runtime.workers[i].core_type = (i < num_aic) ? CoreType::AIC : CoreType::AIV;
+        runtime.workers[i].perf_records_addr = (uint64_t)nullptr;
+        runtime.workers[i].perf_buffer_status = 0;
     }
 
     // Set function_bin_addr for all tasks from Runtime's func_id_to_addr_[] array
@@ -317,6 +353,15 @@ int DeviceRunner::run(Runtime& runtime,
         }
     }
     LOG_DEBUG("");
+
+    // Initialize performance profiling if enabled
+    if (runtime.enable_profiling) {
+        rc = init_performance_profiling(runtime, num_aicore, device_id);
+        if (rc != 0) {
+            LOG_ERROR("init_performance_profiling failed: %d", rc);
+            return rc;
+        }
+    }
 
     // Initialize runtime args
     rc = kernel_args_.init_runtime_args(runtime, mem_alloc_);
@@ -349,6 +394,11 @@ int DeviceRunner::run(Runtime& runtime,
         return rc;
     }
 
+    // Poll and collect performance data (must be before stream sync)
+    if (runtime.enable_profiling) {
+        poll_and_collect_performance_data(runtime.worker_count, runtime.get_task_count());
+    }
+
     // Synchronize streams
     rc = rtStreamSynchronize(stream_aicpu_);
     if (rc != 0) {
@@ -362,6 +412,11 @@ int DeviceRunner::run(Runtime& runtime,
         LOG_ERROR("rtStreamSynchronize (AICore) failed: %d", rc);
         kernel_args_.finalize_runtime_args();
         return rc;
+    }
+
+    // Print collected performance data (after stream sync)
+    if (runtime.enable_profiling) {
+        print_performance_data();
     }
 
     // Note: FinalizeRuntimeArgs is deferred to Finalize() so PrintHandshakeResults can access device data
@@ -416,6 +471,27 @@ int DeviceRunner::finalize() {
     if (stream_aicore_ != nullptr) {
         rtStreamDestroy(stream_aicore_);
         stream_aicore_ = nullptr;
+    }
+
+    // Cleanup profiling shared memory
+    if (perf_shared_mem_host_ != nullptr) {
+        LOG_DEBUG("Cleaning up profiling shared memory...");
+
+        // Unregister host mapping
+        HalHostUnregisterFn fn = get_halHostUnregister();
+        if (fn != nullptr) {
+            fn(perf_shared_mem_host_, device_id_);
+        }
+        perf_shared_mem_host_ = nullptr;
+
+        LOG_DEBUG("  Host mapping unregistered");
+    }
+
+    if (perf_shared_mem_dev_ != nullptr) {
+        // Free device memory (managed by mem_alloc_, will be freed in finalize())
+        perf_shared_mem_dev_ = nullptr;
+
+        LOG_DEBUG("  Device memory marked for cleanup");
     }
 
     // Free all remaining allocations (including handshake buffer and binGmAddr)
@@ -552,4 +628,288 @@ uint64_t DeviceRunner::upload_kernel_binary(int func_id, const uint8_t* bin_data
     LOG_DEBUG("  func_id=%d -> function_bin_addr=0x%lx", func_id, function_bin_addr);
 
     return function_bin_addr;
+}
+
+int DeviceRunner::init_performance_profiling(Runtime& runtime, int num_aicore, int device_id) {
+    LOG_INFO("=== Initializing Performance Profiling ===");
+
+    // Step 1: Calculate total memory size (header + all DoubleBuffers)
+    size_t total_size = calc_perf_data_size(num_aicore);
+
+    size_t header_size = sizeof(PerfDataHeader);
+    size_t single_db_size = sizeof(DoubleBuffer);
+    size_t buffers_size = num_aicore * single_db_size;
+
+    LOG_DEBUG("  Memory allocation plan:");
+    LOG_DEBUG("    - Number of cores:      %d", num_aicore);
+    LOG_DEBUG("    - Header size:          %zu bytes", header_size);
+    LOG_DEBUG("      (includes ready queue: %d entries)", PLATFORM_MAX_CORES * 2);
+    LOG_DEBUG("    - Single DoubleBuffer:  %zu bytes", single_db_size);
+    LOG_DEBUG("    - All DoubleBuffers:    %zu bytes", buffers_size);
+    LOG_DEBUG("    - Total size:           %zu bytes (%zu KB, %zu MB)",
+              total_size, total_size / 1024, total_size / (1024 * 1024));
+
+    // Step 2: Allocate device shared memory
+    void* perf_dev_ptr = mem_alloc_.alloc(total_size);
+    if (perf_dev_ptr == nullptr) {
+        LOG_ERROR("Failed to allocate device memory for profiling (%zu bytes)", total_size);
+        return -1;
+    }
+    LOG_DEBUG("  Allocated device memory: %p", perf_dev_ptr);
+
+    // Step 3: Register to host mapping (create Host-Device shared memory)
+    if (load_hal_if_needed() != 0) {
+        LOG_ERROR("Failed to load ascend_hal for profiling: %s", dlerror());
+        mem_alloc_.free(perf_dev_ptr);
+        return -1;
+    }
+    HalHostRegisterFn fn = get_halHostRegister();
+    if (fn == nullptr) {
+        LOG_ERROR("halHostRegister symbol not found: %s", dlerror());
+        mem_alloc_.free(perf_dev_ptr);
+        return -1;
+    }
+    void* perf_host_ptr = nullptr;
+    int rc = fn(perf_dev_ptr, total_size, DEV_SVM_MAP_HOST, device_id, &perf_host_ptr);
+    if (rc != 0) {
+        LOG_ERROR("halHostRegister failed: %d", rc);
+        mem_alloc_.free(perf_dev_ptr);
+        return rc;
+    }
+    LOG_DEBUG("  Mapped to host memory: %p", perf_host_ptr);
+
+    // Step 4: Initialize fixed header (using host_ptr)
+    PerfDataHeader* header = get_perf_header(perf_host_ptr);
+
+    // Initialize queue
+    memset(header->queue, 0, sizeof(header->queue));
+    header->queue_head = 0;
+    header->queue_tail = 0;
+
+    // Initialize metadata
+    header->num_cores = num_aicore;
+
+    LOG_DEBUG("  Initialized PerfDataHeader:");
+    LOG_DEBUG("    - num_cores:        %d", header->num_cores);
+    LOG_DEBUG("    - buffer_capacity:  %d", PLATFORM_PROF_BUFFER_SIZE);
+    LOG_DEBUG("    - queue capacity:   %d", PLATFORM_MAX_CORES * 2);
+
+    // Step 5: Initialize all DoubleBuffers (all buffers start as 0=idle)
+    DoubleBuffer* buffers = get_double_buffers(perf_host_ptr);
+
+    for (int i = 0; i < num_aicore; i++) {
+        DoubleBuffer* db = &buffers[i];
+
+        // Initialize buffer1
+        memset(&db->buffer1, 0, sizeof(PerfBuffer));
+        db->buffer1.count = 0;
+        db->buffer1.first_task_time = 0;
+        db->buffer1_status = BufferStatus::IDLE;
+
+        // Initialize buffer2
+        memset(&db->buffer2, 0, sizeof(PerfBuffer));
+        db->buffer2.count = 0;
+        db->buffer2.first_task_time = 0;
+        db->buffer2_status = BufferStatus::IDLE;
+    }
+
+    LOG_DEBUG("  Initialized %d DoubleBuffers (all status=0, idle)", num_aicore);
+
+    // Step 6: Write memory barrier (ensure all initialization visible to Device)
+    wmb();
+
+    // Step 7: Pass to Runtime (device base address)
+    runtime.perf_data_base = (uint64_t)perf_dev_ptr;
+
+    LOG_DEBUG("  Set runtime.perf_data_base = 0x%lx", runtime.perf_data_base);
+
+    // Step 8: Save pointers to member variables
+    perf_shared_mem_dev_ = perf_dev_ptr;
+    perf_shared_mem_host_ = perf_host_ptr;
+
+    LOG_INFO("=== Performance Profiling Initialized ===");
+
+    return 0;
+}
+
+void DeviceRunner::poll_and_collect_performance_data(int num_cores, int expected_tasks) {
+    if (perf_shared_mem_host_ == nullptr) {
+        return;  // Profiling not enabled
+    }
+
+    LOG_INFO("=== Collecting Performance Data ===");
+    LOG_DEBUG("  Expected tasks: %d", expected_tasks);
+
+    PerfDataHeader* header = get_perf_header(perf_shared_mem_host_);
+    DoubleBuffer* buffers = get_double_buffers(perf_shared_mem_host_);
+
+    uint32_t capacity = PLATFORM_MAX_CORES * 2;
+    int total_records_collected = 0;
+    int buffers_processed = 0;
+
+    // Clear previous collection
+    collected_perf_records_.clear();
+
+    // Timeout configuration
+    const auto timeout_duration = std::chrono::seconds(PLATFORM_PROF_TIMEOUT_SECONDS);  // 30 second timeout
+    const auto start_time = std::chrono::steady_clock::now();
+    int empty_poll_count = 0;
+
+    // Poll the ready queue until all expected tasks are collected
+    while (total_records_collected < expected_tasks) {
+        // Read queue status with memory barrier
+        rmb();
+        uint32_t head = header->queue_head;
+        uint32_t tail = header->queue_tail;
+
+        // Check if queue is empty
+        if (head == tail) {
+            // Queue is empty but we haven't collected all tasks yet
+            // Check for timeout periodically
+            empty_poll_count++;
+            if (empty_poll_count >= PLATFORM_PROF_EMPTY_POLLS_CHECK_NUM) {
+                empty_poll_count = 0;
+                auto elapsed = std::chrono::steady_clock::now() - start_time;
+                if (elapsed >= timeout_duration) {
+                    LOG_WARN("\n  WARNING: Performance data collection timeout after %ld seconds",
+                             std::chrono::duration_cast<std::chrono::seconds>(elapsed).count());
+                    LOG_WARN("  Collected %d / %d records before timeout",
+                             total_records_collected, expected_tasks);
+                    break;  // Exit with partial data
+                }
+            }
+            // Continue polling (AICPU may still be producing data)
+            continue;
+        }
+
+        // Reset empty poll counter when we find data
+        empty_poll_count = 0;
+
+        // Dequeue entry
+        ReadyQueueEntry entry = header->queue[head];
+        uint32_t core_index = entry.core_index;
+        uint32_t buffer_id = entry.buffer_id;
+
+        // Validate core index
+        if (core_index >= static_cast<uint32_t>(num_cores)) {
+            LOG_ERROR("Invalid core_index %u (max=%d)", core_index, num_cores);
+            break;
+        }
+
+        LOG_DEBUG("  Processing: core=%u, buffer=%u", core_index, buffer_id);
+
+        // Get the buffer and status pointer
+        DoubleBuffer* db = &buffers[core_index];
+        PerfBuffer* buf = nullptr;
+        volatile BufferStatus* status = nullptr;
+        get_buffer_and_status(db, buffer_id, &buf, &status);
+
+        // Read buffer data with memory barrier
+        rmb();
+        uint32_t count = buf->count;
+        uint64_t first_task_time = buf->first_task_time;
+
+        LOG_DEBUG("    Records in buffer: %u", count);
+        LOG_DEBUG("    First task time: %lu", first_task_time);
+
+        // Collect records
+        for (uint32_t i = 0; i < count && i < PLATFORM_PROF_BUFFER_SIZE; i++) {
+            collected_perf_records_.push_back(buf->records[i]);
+            total_records_collected++;
+        }
+
+        // Clear buffer
+        buf->count = 0;
+        buf->first_task_time = 0;
+
+        // Set buffer status to IDLE
+        *status = BufferStatus::IDLE;
+        wmb();  // Ensure status is visible to AICPU
+
+        // Update queue head
+        header->queue_head = (head + 1) % capacity;
+        wmb();  // Ensure head update is visible to AICPU
+
+        buffers_processed++;
+    }
+
+    LOG_INFO("  Total buffers processed: %d", buffers_processed);
+    LOG_INFO("  Total records collected: %d", total_records_collected);
+
+    if (total_records_collected < expected_tasks) {
+        LOG_WARN("  Incomplete collection (%d / %d records)",
+                 total_records_collected, expected_tasks);
+    }
+
+    LOG_INFO("=== Performance Data Collection Complete ===");
+}
+
+void DeviceRunner::print_performance_data() {
+    if (collected_perf_records_.empty()) {
+        LOG_INFO("=== No Performance Data to Print ===");
+        return;
+    }
+
+    LOG_INFO("=== Performance Records Detail ===");
+
+    // Calculate min start time for normalization
+    uint64_t min_time = UINT64_MAX;
+    for (const auto& record : collected_perf_records_) {
+        if (record.start_time < min_time) {
+            min_time = record.start_time;
+        }
+    }
+
+    // Print detailed records only in DEBUG mode
+    LOG_DEBUG("  Base time (for normalization): %lu", min_time);
+    LOG_DEBUG("");
+    LOG_DEBUG("  Task execution records:");
+    LOG_DEBUG("  ┌────────┬─────────┬─────────┬────────────┬──────────────────┬──────────────────┬──────────────┬──────────┐");
+    LOG_DEBUG("  │ Task ID│ Func ID │ Core ID │ Core Type  │  Start (cycles)  │   End (cycles)   │Duration(cyc) │  Fanout  │");
+    LOG_DEBUG("  ├────────┼─────────┼─────────┼────────────┼──────────────────┼──────────────────┼──────────────┼──────────┤");
+
+    for (size_t i = 0; i < collected_perf_records_.size() && i < 50; i++) {  // Limit to first 50 for display
+        const PerfRecord& record = collected_perf_records_[i];
+
+        // Normalize times
+        uint64_t norm_start = record.start_time - min_time;
+        uint64_t norm_end = record.end_time - min_time;
+
+        char line_buf[256];
+        snprintf(line_buf, sizeof(line_buf),
+                 "  │ %6u │ %7u │ %7u │ %10s │ %16lu │ %16lu │ %12lu │ %8u │",
+                 record.task_id, record.func_id, record.core_id,
+                 (record.core_type == CoreType::AIC ? "AIC" : "AIV"),
+                 norm_start, norm_end, record.duration, record.fanout_count);
+        LOG_DEBUG("%s", line_buf);
+    }
+
+    LOG_DEBUG("  └────────┴─────────┴─────────┴────────────┴──────────────────┴──────────────────┴──────────────┴──────────┘");
+
+    if (collected_perf_records_.size() > 50) {
+        LOG_DEBUG("  ... (%zu more records not shown)", collected_perf_records_.size() - 50);
+    }
+
+    // Calculate statistics
+    uint64_t total_duration = 0;
+    uint64_t max_duration = 0;
+    uint64_t min_duration = UINT64_MAX;
+
+    for (const auto& record : collected_perf_records_) {
+        total_duration += record.duration;
+        if (record.duration > max_duration) max_duration = record.duration;
+        if (record.duration < min_duration) min_duration = record.duration;
+    }
+
+    double avg_duration = static_cast<double>(total_duration) / collected_perf_records_.size();
+
+    LOG_INFO("");
+    LOG_INFO("  Performance Statistics:");
+    LOG_INFO("    Total tasks:     %zu", collected_perf_records_.size());
+    LOG_INFO("    Avg duration:    %lu cycles", static_cast<uint64_t>(avg_duration));
+    LOG_INFO("    Min duration:    %lu cycles", min_duration);
+    LOG_INFO("    Max duration:    %lu cycles", max_duration);
+    LOG_INFO("    Total duration:  %lu cycles", total_duration);
+
+    LOG_INFO("=== Performance Data Print Complete ===");
 }

@@ -111,6 +111,12 @@ Golden.py interface:
         help="Set log level explicitly (overrides --verbose and --silent)"
     )
 
+    parser.add_argument(
+        "--enable-profiling",
+        action="store_true",
+        help="Enable profiling and generate swimlane.json"
+    )
+
     args = parser.parse_args()
 
     # Determine log level from arguments
@@ -172,6 +178,7 @@ Golden.py interface:
             golden_path=str(args.golden),
             device_id=args.device,
             platform=args.platform,
+            enable_profiling=args.enable_profiling,
         )
 
         runner.run()

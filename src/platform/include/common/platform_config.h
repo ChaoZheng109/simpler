@@ -61,4 +61,31 @@ constexpr int PLATFORM_MAX_AIV_PER_THREAD =
 constexpr int PLATFORM_MAX_CORES_PER_THREAD =
     PLATFORM_MAX_AIC_PER_THREAD + PLATFORM_MAX_AIV_PER_THREAD;  // 72
 
+// =============================================================================
+// Performance Profiling Configuration
+// =============================================================================
+
+/**
+ * Maximum number of cores that can be profiled simultaneously
+ * Calculated as: MAX_BLOCKDIM * CORES_PER_BLOCKDIM = 24 * 3 = 72
+ */
+constexpr int PLATFORM_MAX_CORES =
+    PLATFORM_MAX_BLOCKDIM * PLATFORM_CORES_PER_BLOCKDIM;  // 72
+
+/**
+ * DoubleBuffer size for AICPU-Host communication
+ * TEMPORARY: Set to 200 records for functional verification of Ping-Pong logic.
+ * This will be increased to 20000 after validation.
+ */
+constexpr int PLATFORM_PROF_BUFFER_SIZE = 20;
+
+/**
+ * System counter frequency (get_sys_cnt)
+ * Used to convert timestamps to microseconds.
+ */
+constexpr uint64_t PLATFORM_PROF_SYS_CNT_FREQ = 1850000000;  // 1850 MHz
+
+constexpr int PLATFORM_PROF_TIMEOUT_SECONDS = 10;
+
+constexpr int PLATFORM_PROF_EMPTY_POLLS_CHECK_NUM = 1000;
 #endif  // PLATFORM_COMMON_PLATFORM_CONFIG_H_

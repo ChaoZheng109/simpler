@@ -16,13 +16,20 @@
 
 #include <runtime/rt.h>
 
+#include <chrono>
 #include <cstdint>
+#include <cstring>
+#include <iomanip>
+#include <iostream>
 #include <map>
 #include <string>
 #include <vector>
 
 #include "common/kernel_args.h"
+#include "common/memory_barrier.h"
+#include "common/perf_profiling.h"
 #include "common/platform_config.h"
+#include "common/unified_log.h"
 #include "host/function_cache.h"
 #include "host/memory_allocator.h"
 #include "runtime.h"
@@ -220,6 +227,26 @@ public:
     void print_handshake_results();
 
     /**
+     * Poll and collect performance data from device
+     *
+     * Polls the ready queue and collects performance records from full buffers.
+     * This is a synchronous polling function that should be called after
+     * launching kernels but before stream synchronization.
+     *
+     * @param num_cores Number of cores
+     * @param expected_tasks Expected total number of tasks (used for exit condition)
+     */
+    void poll_and_collect_performance_data(int num_cores, int expected_tasks);
+
+    /**
+     * Print collected performance data
+     *
+     * Prints detailed performance records and statistics from the last collection.
+     * Should be called after stream synchronization.
+     */
+    void print_performance_data();
+
+    /**
      * Cleanup all resources
      *
      * Frees all device memory, destroys streams, and resets state.
@@ -313,6 +340,11 @@ private:
     bool binaries_loaded_{false};            // true after AICPU SO loaded
     std::map<int, uint64_t> func_id_to_addr_;  // func_id -> function_bin_addr (device GM)
 
+    // Performance profiling shared memory management (manually allocated, not tracked by mem_alloc_)
+    void* perf_shared_mem_dev_{nullptr};   // Device shared memory pointer (includes Header + DoubleBuffers)
+    void* perf_shared_mem_host_{nullptr};  // Host-mapped pointer (Host accesses shared memory)
+    std::vector<PerfRecord> collected_perf_records_;  // Collected performance records (for deferred printing)
+
     /**
      * Ensure device is initialized (lazy initialization)
      *
@@ -343,6 +375,22 @@ private:
      * @return 0 on success, error code on failure
      */
     int ensure_binaries_loaded(const std::vector<uint8_t>& aicpu_so_binary, const std::vector<uint8_t>& aicore_kernel_binary);
+
+    /**
+     * Initialize performance profiling shared memory
+     *
+     * Allocates and initializes shared memory for performance profiling:
+     * - Allocates device memory for PerfDataHeader and DoubleBuffers
+     * - Maps to host memory for Host-Device shared access
+     * - Initializes all data structures (header, buffers, status fields)
+     * - Sets up runtime.perf_data_base pointer
+     *
+     * @param runtime Runtime instance to configure
+     * @param num_aicore Number of AICore instances
+     * @param device_id Device ID for host registration
+     * @return 0 on success, error code on failure
+     */
+    int init_performance_profiling(Runtime& runtime, int num_aicore, int device_id);
 };
 
 #endif  // RUNTIME_DEVICERUNNER_H

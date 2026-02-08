@@ -355,6 +355,7 @@ class CodeRunner:
         runtime_name: Optional[str] = None,
         device_id: Optional[int] = None,
         platform: str = "a2a3",
+        enable_profiling: bool = False,
     ):
         # Setup logging if not already configured (e.g., when used directly, not via run_example.py)
         _setup_logging_if_needed()
@@ -362,6 +363,7 @@ class CodeRunner:
         self.kernels_dir = Path(kernels_dir).resolve()
         self.golden_path = Path(golden_path).resolve()
         self.platform = platform
+        self.enable_profiling = enable_profiling
         self.project_root = _get_project_root()
 
         # Resolve device ID
@@ -763,6 +765,11 @@ class CodeRunner:
                 )
             if run_env:
                 logger.debug(f"Runtime init env overrides: {run_env}")
+            
+            # Enable profiling if requested (must be before initialize)
+            if self.enable_profiling:
+                runtime.enable_profiling(True)
+                logger.info("Profiling enabled")
 
             with _temporary_env(run_env):
                 runtime.initialize(

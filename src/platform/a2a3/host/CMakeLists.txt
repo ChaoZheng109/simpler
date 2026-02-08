@@ -65,6 +65,7 @@ target_include_directories(host_runtime
         ${ASCEND_HOME_PATH}/pkg_inc
         ${ASCEND_HOME_PATH}/pkg_inc/runtime
         ${ASCEND_HOME_PATH}/pkg_inc/profiling
+        ${ASCEND_HOME_PATH}/aarch64-linux/include/driver
 )
 
 target_link_directories(host_runtime
@@ -74,10 +75,13 @@ target_link_directories(host_runtime
 )
 
 # Link against CANN runtime libraries
+# ascend_hal is NOT linked here; it is loaded lazily via dlopen in device_runner
+# when performance profiling is used, so set_device() does not pull in driver/HAL.
 target_link_libraries(host_runtime
     PRIVATE
         runtime
         ascendcl
+        dl
 )
 
 set_target_properties(host_runtime PROPERTIES OUTPUT_NAME "host_runtime")

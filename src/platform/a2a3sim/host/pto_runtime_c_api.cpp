@@ -210,6 +210,19 @@ int set_device(int device_id) {
     return 0;
 }
 
+int enable_runtime_profiling(RuntimeHandle runtime, int enabled) {
+    if (runtime == NULL) {
+        return -1;
+    }
+    try {
+        Runtime* r = static_cast<Runtime*>(runtime);
+        r->enable_profiling = (enabled != 0);
+        return 0;
+    } catch (...) {
+        return -1;
+    }
+}
+
 /* Note: register_kernel() has been internalized into init_runtime().
  * Kernel binaries are now passed directly to init_runtime() which handles
  * registration and stores addresses in Runtime's func_id_to_addr_[] array.

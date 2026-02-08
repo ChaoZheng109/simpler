@@ -243,4 +243,17 @@ int32_t get_pto2_sm_size(RuntimeHandle runtime) {
     return 4 * 1024 * 1024;  // 4 MiB
 }
 
+int enable_runtime_profiling(RuntimeHandle runtime, int enabled) {
+    if (runtime == NULL) {
+        return -1;
+    }
+    try {
+        Runtime* r = static_cast<Runtime*>(runtime);
+        r->enable_profiling = (enabled != 0);
+        return 0;
+    } catch (...) {
+        return -1;
+    }
+}
+
 } /* extern "C" */

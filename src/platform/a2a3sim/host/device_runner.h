@@ -14,14 +14,27 @@
 #ifndef RUNTIME_DEVICERUNNER_H
 #define RUNTIME_DEVICERUNNER_H
 
+#include <algorithm>
+#include <chrono>
 #include <cstdint>
+#include <cstdio>
+#include <cstring>
+#include <dlfcn.h>
+#include <fstream>
+#include <iomanip>
+#include <iostream>
 #include <map>
 #include <string>
+#include <thread>
+#include <unistd.h>
 #include <vector>
 
 #include "common/core_type.h"
 #include "common/kernel_args.h"
+#include "common/memory_barrier.h"
+#include "common/perf_profiling.h"
 #include "common/platform_config.h"
+#include "common/unified_log.h"
 #include "host/function_cache.h"
 #include "host/memory_allocator.h"
 #include "runtime.h"
@@ -122,6 +135,26 @@ public:
     void print_handshake_results();
 
     /**
+     * Poll and collect performance data from shared memory
+     *
+     * Polls the ready queue and collects performance records from full buffers.
+     * This is a synchronous polling function that should be called after
+     * launching kernels but before thread synchronization.
+     *
+     * @param num_cores Number of cores
+     * @param expected_tasks Expected total number of tasks (used for exit condition)
+     */
+    void poll_and_collect_performance_data(int num_cores, int expected_tasks);
+
+    /**
+     * Print collected performance data
+     *
+     * Prints detailed performance records and statistics from the last collection.
+     * Should be called after execution completes.
+     */
+    void print_performance_data();
+
+    /**
      * Cleanup all resources
      *
      * @return 0 on success
@@ -175,12 +208,31 @@ private:
     std::string aicpu_so_path_;
     std::string aicore_so_path_;
 
+    // Performance profiling shared memory management (manually allocated, not tracked by mem_alloc_)
+    void* perf_shared_mem_dev_{nullptr};   // Device shared memory pointer (same as host in simulation)
+    void* perf_shared_mem_host_{nullptr};  // Host-mapped pointer (same as dev in simulation)
+    std::vector<PerfRecord> collected_perf_records_;  // Collected performance records (for deferred printing)
+
     // Private helper methods
     int ensure_device_initialized(int device_id,
                                   const std::vector<uint8_t>& aicpu_so_binary,
                                   const std::vector<uint8_t>& aicore_kernel_binary);
     int ensure_binaries_loaded(const std::vector<uint8_t>& aicpu_so_binary,
                                const std::vector<uint8_t>& aicore_kernel_binary);
+
+    /**
+     * Initialize performance profiling shared memory
+     *
+     * Allocates and initializes host memory for performance profiling.
+     * In simulation, perf_shared_mem_dev_ and perf_shared_mem_host_ point
+     * to the same malloc'd memory for consistency with a2a3 interface.
+     *
+     * @param runtime Runtime instance to configure
+     * @param num_cores Number of cores
+     * @param device_id Device ID (ignored in simulation)
+     * @return 0 on success, error code on failure
+     */
+    int init_performance_profiling(Runtime& runtime, int num_cores, int device_id);
 };
 
 #endif  // RUNTIME_DEVICERUNNER_H
