@@ -36,6 +36,8 @@ import importlib.util
 import logging
 import os
 import sys
+import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -282,6 +284,51 @@ def _ensure_pto_isa_root(verbose: bool = False) -> Optional[str]:
     return pto_isa_root
 
 
+def _kernel_config_runtime_env(kernel_config_module, kernels_dir: Path) -> Dict[str, str]:
+    """
+    Optional per-example environment variables for runtime compilation.
+
+    `kernel_config.py` may define:
+        RUNTIME_ENV = {"ENV_KEY": "value", ...}
+
+    If a value looks like a path (ENV key ends with _DIR/_PATH, or is
+    PTO_AICPU_ORCH_SO) and is not absolute, it is resolved relative to
+    `kernels_dir`.
+    """
+    runtime_env = getattr(kernel_config_module, "RUNTIME_ENV", None)
+    if not isinstance(runtime_env, dict):
+        return {}
+
+    out: Dict[str, str] = {}
+    for k, v in runtime_env.items():
+        if not isinstance(k, str):
+            continue
+        s = str(v)
+        is_path_like = k.endswith("_DIR") or k.endswith("_PATH") or (k == "PTO_AICPU_ORCH_SO")
+        if is_path_like and s:
+            p = Path(s)
+            if not p.is_absolute():
+                s = str((kernels_dir / p).resolve())
+        out[k] = s
+    return out
+
+
+@contextmanager
+def _temporary_env(env_updates: Dict[str, str]):
+    """Temporarily apply env vars for the duration of the context."""
+    old = {k: os.environ.get(k) for k in env_updates.keys()}
+    for k, v in env_updates.items():
+        os.environ[k] = v
+    try:
+        yield
+    finally:
+        for k, prev in old.items():
+            if prev is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = prev
+
+
 class CodeRunner:
     """
     Simplified test runner that loads kernel config and golden script.
@@ -329,6 +376,7 @@ class CodeRunner:
         # Extract kernel configuration
         self.kernels = self._kernel_config.KERNELS
         self.orchestration = self._kernel_config.ORCHESTRATION
+        self.aicpu_orchestration = getattr(self._kernel_config, "AICPU_ORCHESTRATION", None)
 
         # Extract golden configuration
         self.params_list = getattr(self._golden_module, 'PARAMS_LIST', [{}])
@@ -356,6 +404,71 @@ class CodeRunner:
                 f"Expected: {config_path}"
             )
         return _load_module_from_path(config_path, f"kernel_config_{id(self)}")
+
+    def _compile_aicpu_orchestration_plugin(self, pto_compiler) -> Optional[Path]:
+        """
+        Compile the AICPU-side orchestration plugin (a small .so loaded via dlopen on AICPU).
+
+        The example config must provide:
+            AICPU_ORCHESTRATION = {"source": ".../build_graph_aicpu.cpp", "function_name": "build_graph_aicpu"}
+
+        Returns:
+            Host path to the compiled plugin .so (kept on disk until the run completes), or None.
+        """
+        if self.runtime_name != "aicpu_build_graph":
+            return None
+
+        cfg = self.aicpu_orchestration
+        if cfg is None:
+            return None
+        if not isinstance(cfg, dict):
+            raise TypeError("AICPU_ORCHESTRATION must be a dict when provided")
+
+        source_path = cfg.get("source")
+        func_name = cfg.get("function_name", "build_graph_aicpu")
+        if not source_path or not isinstance(source_path, str):
+            raise ValueError("AICPU_ORCHESTRATION['source'] must be a non-empty string")
+        if not func_name or not isinstance(func_name, str):
+            raise ValueError("AICPU_ORCHESTRATION['function_name'] must be a non-empty string")
+
+        source_p = Path(source_path)
+        if not source_p.is_absolute():
+            source_p = (self.kernels_dir / source_p).resolve()
+        source_path = str(source_p)
+
+        runtime_include_dir = str(self.project_root / "src" / "runtime" / self.runtime_name / "runtime")
+        platform_include_dir = str(self.project_root / "src" / "platform" / "include")
+        include_dirs = [runtime_include_dir, platform_include_dir]
+
+        # Secure, unique output path in /tmp.
+        fd, out_s = tempfile.mkstemp(prefix="aicpu_orch_", suffix=".so", dir="/tmp")
+        os.close(fd)
+        out_path = Path(out_s)
+
+        logger.info("=== Compiling AICPU Orchestration Plugin ===")
+        logger.info(f"AICPU plugin entry: {func_name}")
+        logger.info(f"Output: {out_path}")
+
+        try:
+            out_s = pto_compiler.compile_aicpu_orchestration_plugin(
+                source_path,
+                output_path=str(out_path),
+                extra_include_dirs=include_dirs,
+            )
+            if out_s != str(out_path):
+                raise RuntimeError(f"Unexpected AICPU plugin output path: {out_s} (expected {out_path})")
+        except Exception:
+            try:
+                out_path.unlink()
+            except FileNotFoundError:
+                pass
+            raise
+
+        if not out_path.is_file():
+            raise RuntimeError(f"AICPU orchestration plugin compilation succeeded but output not found: {out_path}")
+
+        logger.info(f"Compiled AICPU orchestration plugin: {out_path} ({out_path.stat().st_size} bytes)")
+        return out_path
 
     def _load_golden_module(self):
         """Load golden.py script."""
@@ -565,6 +678,24 @@ class CodeRunner:
             )
             logger.debug(f"Compiled orchestration: {len(orch_so_binary)} bytes")
 
+        # Compile AICPU orchestration plugin if needed (for aicpu_build_graph runtime)
+        aicpu_orch_plugin_path: Optional[Path] = None
+        if self.runtime_name == "aicpu_build_graph":
+            if self.aicpu_orchestration is not None:
+                aicpu_orch_plugin_path = self._compile_aicpu_orchestration_plugin(pto_compiler)
+            else:
+                # Allow advanced users to supply a prebuilt plugin path via RUNTIME_ENV.
+                base_env = _kernel_config_runtime_env(self._kernel_config, self.kernels_dir)
+                aicpu_orch_so = base_env.get("PTO_AICPU_ORCH_SO")
+                if not aicpu_orch_so:
+                    raise RuntimeError(
+                        "aicpu_build_graph requires an AICPU orchestration plugin. Either:\n"
+                        "- Define AICPU_ORCHESTRATION in kernels/kernel_config.py, or\n"
+                        "- Provide PTO_AICPU_ORCH_SO in RUNTIME_ENV pointing to a prebuilt .so"
+                    )
+                if not Path(aicpu_orch_so).is_file():
+                    raise FileNotFoundError(f"PTO_AICPU_ORCH_SO does not exist: {aicpu_orch_so}")
+
         # Step 4: Compile kernels (will be registered during runtime.initialize)
         logger.info("=== Compiling Kernels ===")
 
@@ -621,14 +752,27 @@ class CodeRunner:
             # Create and initialize runtime (including kernel registration)
             logger.info("=== Initializing Runtime ===")
             runtime = Runtime()
-            runtime.initialize(
-                orch_so_binary,
-                self.orchestration["function_name"],
-                func_args,
-                arg_types=arg_types,
-                arg_sizes=arg_sizes,
-                kernel_binaries=kernel_binaries,
-            )
+
+            # Build environment for runtime initialization
+            run_env = _kernel_config_runtime_env(self._kernel_config, self.kernels_dir)
+            if aicpu_orch_plugin_path is not None:
+                run_env = dict(run_env)
+                run_env["PTO_AICPU_ORCH_SO"] = str(aicpu_orch_plugin_path)
+                run_env["PTO_AICPU_ORCH_FUNC"] = str(
+                    self.aicpu_orchestration.get("function_name", "build_graph_aicpu")
+                )
+            if run_env:
+                logger.debug(f"Runtime init env overrides: {run_env}")
+
+            with _temporary_env(run_env):
+                runtime.initialize(
+                    orch_so_binary,
+                    self.orchestration["function_name"],
+                    func_args,
+                    arg_types=arg_types,
+                    arg_sizes=arg_sizes,
+                    kernel_binaries=kernel_binaries,
+                )
 
             # Launch runtime
             logger.info("=== Launching Runtime ===")

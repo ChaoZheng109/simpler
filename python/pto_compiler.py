@@ -1,7 +1,9 @@
 import logging
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import List, Optional
@@ -72,6 +74,46 @@ class PTOCompiler:
             str(self.platform_dir / "host"),
             str(self.platform_dir.parent / "include"),  # For common headers like core_type.h
         ]
+
+    def _resolve_host_cxx(self) -> str:
+        """Resolve host C++ compiler."""
+        cxx = os.environ.get("CXX") or shutil.which("g++") or shutil.which("c++")
+        if not cxx:
+            raise RuntimeError("Host C++ compiler not found (g++). Please install g++ or set CXX.")
+        return cxx
+
+    def _resolve_aicpu_cxx(self) -> str:
+        """
+        Resolve the C++ compiler used to build AICPU-side orchestration plugins.
+
+        For platform=a2a3, the plugin must be aarch64 ELF. We try, in order:
+        1) Env override: PTO_AICPU_CXX
+        2) Ascend toolkit hcc toolchain (ASCEND_HOME_PATH/tools/hcc/bin/aarch64-target-linux-gnu-g++)
+        3) Common cross compiler names on PATH (aarch64-linux-gnu-g++)
+
+        For platform=a2a3sim, we use the host compiler.
+        """
+        if self.platform != "a2a3":
+            return self._resolve_host_cxx()
+
+        override = os.environ.get("PTO_AICPU_CXX")
+        if override:
+            return override
+
+        if self.ascend_home_path:
+            hcc_cxx = os.path.join(self.ascend_home_path, "tools", "hcc", "bin", "aarch64-target-linux-gnu-g++")
+            if os.path.isfile(hcc_cxx):
+                return hcc_cxx
+
+        for name in ("aarch64-linux-gnu-g++", "aarch64-linux-gnu-g++-12", "aarch64-linux-gnu-g++-11"):
+            p = shutil.which(name)
+            if p:
+                return p
+
+        raise FileNotFoundError(
+            "AICPU cross-compiler not found. Set PTO_AICPU_CXX, or install an aarch64 cross toolchain, "
+            "or ensure ASCEND_HOME_PATH is set and contains tools/hcc."
+        )
 
     def compile_incore(
         self,
@@ -367,6 +409,87 @@ class PTOCompiler:
 
         logger.info(f"[Orchestration] Compilation successful: {len(binary_data)} bytes")
         return binary_data
+
+    def compile_aicpu_orchestration_plugin(
+        self,
+        source_path: str,
+        *,
+        output_path: Optional[str] = None,
+        extra_include_dirs: Optional[List[str]] = None,
+        extra_cxxflags: Optional[List[str]] = None,
+    ) -> str:
+        """
+        Compile the AICPU-side orchestration plugin (.so) for `aicpu_build_graph`.
+
+        - a2a3: compiled for aarch64 (AICPU) via cross compiler.
+        - a2a3sim: compiled for host (runs in host threads).
+
+        Returns:
+            Path to the compiled plugin shared library on the host filesystem.
+            (Caller owns lifecycle and may delete it after run.)
+        """
+        source_path = os.path.abspath(source_path)
+        if not os.path.isfile(source_path):
+            raise FileNotFoundError(f"Source file not found: {source_path}")
+
+        if output_path is None:
+            fd, out_s = tempfile.mkstemp(prefix="aicpu_orch_", suffix=".so", dir="/tmp")
+            os.close(fd)
+            output_path = out_s
+
+        cxx = self._resolve_aicpu_cxx()
+
+        # Build compilation command
+        cmd = [cxx, "-shared", "-fPIC", "-O3", "-g"]
+
+        # For a2a3, match the platform AICPU build include search paths (subset).
+        extra_inc: List[str] = []
+        if self.platform == "a2a3":
+            cmd.append("-std=gnu++17")
+            # Prefer a self-contained plugin on device to reduce runtime deps.
+            cmd.extend(["-static-libstdc++", "-static-libgcc"])
+            if self.ascend_home_path:
+                extra_inc.extend([
+                    os.path.join(self.ascend_home_path, "include"),
+                    os.path.join(self.ascend_home_path, "include", "toolchain"),
+                    os.path.join(self.ascend_home_path, "pkg_inc", "base"),
+                ])
+        else:
+            cmd.append("-std=c++17")
+
+        if extra_cxxflags:
+            cmd.extend(extra_cxxflags)
+
+        if extra_include_dirs:
+            for inc_dir in extra_include_dirs:
+                cmd.append(f"-I{os.path.abspath(inc_dir)}")
+        for inc_dir in extra_inc:
+            cmd.append(f"-I{os.path.abspath(inc_dir)}")
+
+        cmd.extend(["-o", output_path, source_path])
+
+        logger.info(f"[AICPU Orchestration Plugin] Compiling: {source_path}")
+        logger.debug(f"  Command: {' '.join(cmd)}")
+
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            if result.stdout and logger.isEnabledFor(10):
+                logger.debug(f"[AICPU Orchestration Plugin] stdout:\n{result.stdout}")
+            if result.stderr and logger.isEnabledFor(10):
+                logger.debug(f"[AICPU Orchestration Plugin] stderr:\n{result.stderr}")
+            if result.returncode != 0:
+                logger.error(f"[AICPU Orchestration Plugin] Compilation failed: {result.stderr}")
+                raise RuntimeError(
+                    f"AICPU orchestration plugin compilation failed with exit code {result.returncode}:\n{result.stderr}"
+                )
+        except FileNotFoundError:
+            raise RuntimeError(f"AICPU C++ compiler not found: {cxx}")
+
+        if not os.path.isfile(output_path):
+            raise RuntimeError(f"AICPU orchestration plugin compilation succeeded but output not found: {output_path}")
+
+        logger.info(f"[AICPU Orchestration Plugin] Compilation successful: {os.path.getsize(output_path)} bytes")
+        return output_path
 
     def compile_incore_sim(
         self,
