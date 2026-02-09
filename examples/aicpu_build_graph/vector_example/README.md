@@ -6,17 +6,17 @@ This example runs the same computation as `host_build_graph_example`, but the ta
 
 ```bash
 python examples/scripts/run_example.py \
-  -k examples/aicpu_build_graph_example/kernels \
-  -g examples/aicpu_build_graph_example/golden.py \
-  -p a2a3sim \
-  -r aicpu_build_graph
+  -k examples/aicpu_build_graph/vector_example/kernels \
+  -g examples/aicpu_build_graph/vector_example/golden.py \
+  -p a2a3sim
 ```
 
-## Key difference vs host_build_graph_example
+## Key difference vs host_build_graph/vector_example
 
 - `kernels/orchestration/example_orch.cpp` does **prepare + marshal only**:
   - allocates/copies tensors,
   - writes `runtime->orch_argc` / `runtime->orch_args[]`,
   - does **not** call `runtime->add_task()` / `runtime->add_successor()`.
-- The AICPU binary contains `build_graph_aicpu(Runtime*)`, which reads `orch_args[]` and builds/publishes tasks on device.
-
+- `kernels/aicpu/build_graph_aicpu.cpp` is compiled into a small AICPU-side plugin `.so`.
+  - The host orchestration embeds the plugin bytes into `Runtime`.
+  - The AICPU runtime `dlopen()`s the embedded plugin and calls `build_graph_aicpu(Runtime*)` on device.
