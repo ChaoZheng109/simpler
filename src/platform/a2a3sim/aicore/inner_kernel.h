@@ -33,21 +33,8 @@
 /**
  * Simulated system counter for performance profiling
  *
- * Mimics hardware counter behavior by returning a monotonic value
- * at 1850 MHz frequency (matching a2a3 hardware counter).
- *
- * Implementation:
- * - Uses std::chrono::high_resolution_clock as time source
- * - Converts elapsed nanoseconds to counter ticks
- * - Counter frequency: PLATFORM_PROF_SYS_CNT_FREQ (1850 MHz)
- *
- * This ensures performance data calculation uses the same formula
- * as the real a2a3 platform:
- *   duration_us = (counter_ticks * 1000000) / 1850000000
- *
- * Thread-safety: The static variable is initialized once globally,
- * ensuring all threads share the same time base for consistent
- * cross-thread time comparison.
+ * Returns monotonic counter value at 1850 MHz frequency.
+ * Uses std::chrono::high_resolution_clock and converts to counter ticks.
  *
  * @return Simulated counter value (ticks since program start)
  */
@@ -60,12 +47,8 @@ inline uint64_t get_sys_cnt() {
         now - program_start
     ).count();
 
-    // Convert nanoseconds to counter ticks at PLATFORM_PROF_SYS_CNT_FREQ (1850 MHz)
-    // Formula: ticks = (ns * freq_hz) / 1e9
-    //
-    // To avoid overflow, break down the calculation:
-    // 1. Split elapsed_ns into seconds and remainder nanoseconds
-    // 2. Calculate ticks for each part separately
+    // Convert nanoseconds to counter ticks at PLATFORM_PROF_SYS_CNT_FREQ
+    // Split elapsed_ns into seconds and remainder to avoid overflow
     uint64_t seconds = elapsed_ns / 1000000000ULL;
     uint64_t remaining_ns = elapsed_ns % 1000000000ULL;
 

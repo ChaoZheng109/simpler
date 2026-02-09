@@ -155,6 +155,18 @@ public:
     void print_performance_data();
 
     /**
+     * Export performance data to merged_swimlane.json
+     *
+     * Converts collected performance records to Chrome Trace Event Format
+     * and writes to outputs/merged_swimlane_<timestamp>.json for visualization in Perfetto.
+     * Should be called after execution completes.
+     *
+     * @param output_path Path to output directory (default: "outputs")
+     * @return 0 on success, error code on failure
+     */
+    int export_swimlane_json(const std::string& output_path = "outputs");
+
+    /**
      * Cleanup all resources
      *
      * @return 0 on success
@@ -208,7 +220,7 @@ private:
     std::string aicpu_so_path_;
     std::string aicore_so_path_;
 
-    // Performance profiling shared memory management (manually allocated, not tracked by mem_alloc_)
+    // Performance profiling shared memory management
     void* perf_shared_mem_dev_{nullptr};   // Device shared memory pointer (same as host in simulation)
     void* perf_shared_mem_host_{nullptr};  // Host-mapped pointer (same as dev in simulation)
     std::vector<PerfRecord> collected_perf_records_;  // Collected performance records (for deferred printing)
@@ -224,15 +236,13 @@ private:
      * Initialize performance profiling shared memory
      *
      * Allocates and initializes host memory for performance profiling.
-     * In simulation, perf_shared_mem_dev_ and perf_shared_mem_host_ point
-     * to the same malloc'd memory for consistency with a2a3 interface.
      *
      * @param runtime Runtime instance to configure
-     * @param num_cores Number of cores
+     * @param num_aicore Number of cores
      * @param device_id Device ID (ignored in simulation)
      * @return 0 on success, error code on failure
      */
-    int init_performance_profiling(Runtime& runtime, int num_cores, int device_id);
+    int init_performance_profiling(Runtime& runtime, int num_aicore, int device_id);
 };
 
 #endif  // RUNTIME_DEVICERUNNER_H

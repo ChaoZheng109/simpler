@@ -73,19 +73,31 @@ constexpr int PLATFORM_MAX_CORES =
     PLATFORM_MAX_BLOCKDIM * PLATFORM_CORES_PER_BLOCKDIM;  // 72
 
 /**
- * DoubleBuffer size for AICPU-Host communication
- * TEMPORARY: Set to 200 records for functional verification of Ping-Pong logic.
- * This will be increased to 20000 after validation.
+ * Performance buffer capacity for each double buffer
+ * Number of PerfRecord entries per buffer (ping or pong)
  */
 constexpr int PLATFORM_PROF_BUFFER_SIZE = 20;
+
+/**
+ * Ready queue capacity for performance data collection
+ * Queue holds (core_index, buffer_id) entries for buffers ready to be read by Host.
+ * Capacity = PLATFORM_MAX_CORES * 2 (each core has 2 buffers: ping and pong)
+ */
+constexpr int PLATFORM_PROF_READYQUEUE_SIZE = PLATFORM_MAX_CORES * 2;  // 144
 
 /**
  * System counter frequency (get_sys_cnt)
  * Used to convert timestamps to microseconds.
  */
-constexpr uint64_t PLATFORM_PROF_SYS_CNT_FREQ = 1850000000;  // 1850 MHz
+constexpr uint64_t PLATFORM_PROF_SYS_CNT_FREQ = 50000000;  // 50 MHz
 
-constexpr int PLATFORM_PROF_TIMEOUT_SECONDS = 10;
+/**
+ * Timeout duration for performance data collection (seconds)
+ */
+constexpr int PLATFORM_PROF_TIMEOUT_SECONDS = 2;
 
+/**
+ * Number of empty polling iterations before checking timeout
+ */
 constexpr int PLATFORM_PROF_EMPTY_POLLS_CHECK_NUM = 1000;
 #endif  // PLATFORM_COMMON_PLATFORM_CONFIG_H_

@@ -247,6 +247,18 @@ public:
     void print_performance_data();
 
     /**
+     * Export performance data to merged_swimlane.json
+     *
+     * Converts collected performance records to Chrome Trace Event Format
+     * and writes to outputs/merged_swimlane.json for visualization in Perfetto.
+     * Should be called after stream synchronization.
+     *
+     * @param output_path Path to output directory (default: "outputs")
+     * @return 0 on success, error code on failure
+     */
+    int export_swimlane_json(const std::string& output_path = "outputs");
+
+    /**
      * Cleanup all resources
      *
      * Frees all device memory, destroys streams, and resets state.
@@ -340,7 +352,7 @@ private:
     bool binaries_loaded_{false};            // true after AICPU SO loaded
     std::map<int, uint64_t> func_id_to_addr_;  // func_id -> function_bin_addr (device GM)
 
-    // Performance profiling shared memory management (manually allocated, not tracked by mem_alloc_)
+    // Performance profiling shared memory management
     void* perf_shared_mem_dev_{nullptr};   // Device shared memory pointer (includes Header + DoubleBuffers)
     void* perf_shared_mem_host_{nullptr};  // Host-mapped pointer (Host accesses shared memory)
     std::vector<PerfRecord> collected_perf_records_;  // Collected performance records (for deferred printing)
@@ -379,11 +391,8 @@ private:
     /**
      * Initialize performance profiling shared memory
      *
-     * Allocates and initializes shared memory for performance profiling:
-     * - Allocates device memory for PerfDataHeader and DoubleBuffers
-     * - Maps to host memory for Host-Device shared access
-     * - Initializes all data structures (header, buffers, status fields)
-     * - Sets up runtime.perf_data_base pointer
+     * Allocates device memory, maps to host for shared access, and initializes
+     * performance data structures (header and double buffers).
      *
      * @param runtime Runtime instance to configure
      * @param num_aicore Number of AICore instances
