@@ -26,6 +26,7 @@ list(APPEND HOST_RUNTIME_SOURCES
     "${CMAKE_CURRENT_SOURCE_DIR}/platform_compile_info.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/../../src/host/host_log.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/../../src/host/unified_log_host.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../src/performance_collector.cpp"
 )
 if(DEFINED CUSTOM_SOURCE_DIRS)
     foreach(SRC_DIR ${CUSTOM_SOURCE_DIRS})
@@ -76,8 +77,8 @@ target_link_directories(host_runtime
 )
 
 # Link against CANN runtime libraries
-# ascend_hal is NOT linked here; it is loaded lazily via dlopen in device_runner
-# when performance profiling is used, so set_device() does not pull in driver/HAL.
+# ascend_hal is dynamically loaded at runtime via dlopen in device_runner
+# when performance profiling is enabled
 target_link_libraries(host_runtime
     PRIVATE
         runtime

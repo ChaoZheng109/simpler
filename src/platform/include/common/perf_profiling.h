@@ -5,21 +5,21 @@
  * Architecture: Fixed header + dynamic tail
  *
  * Memory layout:
- * ┌────────────────────────────────────────────────────────────┐
- * │ PerfDataHeader (fixed header)                              │
- * │  - ReadyQueue (FIFO, capacity=PLATFORM_MAX_CORES*2)        │
- * │  - Metadata (num_cores, buffer_capacity, flags)            │
- * ├────────────────────────────────────────────────────────────┤
- * │ DoubleBuffer[0] (Core 0)                                   │
- * │  - buffer1, buffer2 (PerfBuffer)                           │
- * │  - buffer1_status, buffer2_status (0/1/2)                  │
- * ├────────────────────────────────────────────────────────────┤
- * │ DoubleBuffer[1] (Core 1)                                   │
- * ├────────────────────────────────────────────────────────────┤
- * │ ...                                                        │
- * ├────────────────────────────────────────────────────────────┤
- * │ DoubleBuffer[num_cores-1]                                  │
- * └────────────────────────────────────────────────────────────┘
+ * ┌─────────────────────────────────────────────────────────────┐
+ * │ PerfDataHeader (fixed header)                               │
+ * │  - ReadyQueue (FIFO, capacity=PLATFORM_PROF_READYQUEUE_SIZE)│
+ * │  - Metadata (num_cores, buffer_capacity, flags)             │
+ * ├─────────────────────────────────────────────────────────────┤
+ * │ DoubleBuffer[0] (Core 0)                                    │
+ * │  - buffer1, buffer2 (PerfBuffer)                            │
+ * │  - buffer1_status, buffer2_status (IDLE/WRITING/READY)      │
+ * ├─────────────────────────────────────────────────────────────┤
+ * │ DoubleBuffer[1] (Core 1)                                    │
+ * ├─────────────────────────────────────────────────────────────┤
+ * │ ...                                                         │
+ * ├─────────────────────────────────────────────────────────────┤
+ * │ DoubleBuffer[num_cores-1]                                   │
+ * └─────────────────────────────────────────────────────────────┘
  *
  * Total size = sizeof(PerfDataHeader) + num_cores * sizeof(DoubleBuffer)
  */
@@ -74,9 +74,12 @@ enum class BufferStatus : uint32_t {
  */
 struct PerfRecord {
     // Timing information (device clock timestamps)
-    uint64_t start_time;      // Task start timestamp (get_sys_cnt)
-    uint64_t end_time;        // Task end timestamp
-    uint64_t duration;        // Execution duration (end - start)
+    uint64_t start_time;         // Task start timestamp (get_sys_cnt)
+    uint64_t end_time;           // Task end timestamp
+    uint64_t duration;           // Execution duration (end - start)
+    uint64_t kernel_ready_time;  // Kernel ready timestamp (before first task)
+                                 // Records when AICore enters main loop (ready to execute)
+                                 // Used for: 1) startup overhead analysis, 2) cross-core alignment
 
     // Task identification
     uint32_t task_id;         // Task unique identifier
@@ -100,15 +103,10 @@ static_assert(sizeof(PerfRecord) % 64 == 0,
  * Fixed-size performance record buffer
  *
  * Capacity: PLATFORM_PROF_BUFFER_SIZE (defined in platform_config.h)
- *
- * Additional feature: Records the first task's time for cross-core time alignment
  */
 struct PerfBuffer {
     PerfRecord records[PLATFORM_PROF_BUFFER_SIZE];  // Record array
     volatile uint32_t count;                         // Current record count
-
-    // Time alignment support (each buffer records independently)
-    volatile uint64_t first_task_time;               // Start time of first task
 } __attribute__((aligned(64)));
 
 // =============================================================================
@@ -118,19 +116,12 @@ struct PerfBuffer {
 /**
  * Per-core double buffer with status management
  *
- * Design highlights:
- * 1. Two independent PerfBuffers (buffer1, buffer2)
- * 2. Each buffer has independent status field (0/1/2)
- * 3. AICPU checks status to decide if buffer can be allocated to AICore
- * 4. Host retrieves ready buffers from queue for reading
+ * Two independent PerfBuffers with independent status fields.
+ * AICPU manages buffer allocation and status transitions (0→1→2).
+ * AICore only writes records and increments count.
+ * Host reads ready buffers and resets status to idle (2→0).
  *
- * State transitions:
- * - AICPU: 0→1 (allocation), 1→2 (detected full, enqueue)
- * - AICore: Only writes records, increments count (does not modify status)
- * - Host:   2→0 (after reading, clear to zero)
- *
- * Priority strategy:
- * - When both buffers are idle, AICPU prioritizes buffer1
+ * When both buffers are idle, AICPU prioritizes buffer1.
  */
 struct DoubleBuffer {
     // Buffer 1 (Ping)
@@ -169,7 +160,7 @@ struct ReadyQueueEntry {
  * 2. Metadata (core count)
  *
  * Ready queue design:
- * - Capacity: PLATFORM_MAX_CORES * 2 (max 2 buffers ready per core)
+ * - Capacity: PLATFORM_PROF_READYQUEUE_SIZE (max 2 buffers ready per core)
  * - Implementation: Circular Buffer
  * - Producer: AICPU (adds full buffers)
  * - Consumer: Host (reads and clears buffers)
@@ -178,12 +169,13 @@ struct ReadyQueueEntry {
  */
 struct PerfDataHeader {
     // Ready queue (FIFO Circular Buffer)
-    ReadyQueueEntry queue[PLATFORM_MAX_CORES * 2];  // Queue array (capacity=144)
+    ReadyQueueEntry queue[PLATFORM_PROF_READYQUEUE_SIZE];  // Queue array
     volatile uint32_t queue_head;                    // Consumer read position (Host modifies)
     volatile uint32_t queue_tail;                    // Producer write position (AICPU modifies)
 
     // Metadata (Host initializes, Device read-only)
     uint32_t num_cores;                              // Actual number of cores launched
+    volatile uint32_t total_tasks;                   // Total tasks (AICPU writes after orchestration)
 } __attribute__((aligned(64)));
 
 // =============================================================================

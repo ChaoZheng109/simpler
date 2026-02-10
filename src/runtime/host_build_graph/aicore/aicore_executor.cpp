@@ -17,6 +17,7 @@ typedef void (*KernelFunc)(__gm__ int64_t*);
  * @param end_time Task end timestamp
  * @param block_idx AICore block index
  * @param core_type Core type (AIC or AIV)
+ * @param kernel_ready_time Kernel ready timestamp (when AICore entered main loop)
  */
 __aicore__ __attribute__((always_inline)) static void record_task_performance(
     __gm__ Handshake* my_hank,
@@ -24,7 +25,8 @@ __aicore__ __attribute__((always_inline)) static void record_task_performance(
     uint64_t start_time,
     uint64_t end_time,
     int block_idx,
-    CoreType core_type) {
+    CoreType core_type,
+    uint64_t kernel_ready_time) {
 
     // Check if buffer is available for writing
     if (my_hank->perf_buffer_status != 0) {
@@ -34,7 +36,7 @@ __aicore__ __attribute__((always_inline)) static void record_task_performance(
     // Get current performance buffer pointer
     __gm__ PerfBuffer* perf_buf = (__gm__ PerfBuffer*)my_hank->perf_records_addr;
 
-    // Get current count (no atomic operation needed - single writer)
+    // Get current count
     uint32_t idx = perf_buf->count;
 
     // Check if buffer has space
@@ -42,25 +44,14 @@ __aicore__ __attribute__((always_inline)) static void record_task_performance(
         // Get pointer to the record slot
         __gm__ PerfRecord* record = (__gm__ PerfRecord*)&perf_buf->records[idx];
 
-        // Write record data
+        // Write record data (only essential fields, fanout filled by AICPU)
         record->start_time = start_time;
         record->end_time = end_time;
-        record->duration = end_time - start_time;
+        record->kernel_ready_time = kernel_ready_time;
         record->task_id = task_ptr->task_id;
         record->func_id = task_ptr->func_id;
         record->core_id = block_idx;
         record->core_type = core_type;
-        record->fanout_count = task_ptr->fanout_count;
-
-        // Copy fanout array
-        for (int32_t i = 0; i < task_ptr->fanout_count && i < RUNTIME_MAX_FANOUT; i++) {
-            record->fanout[i] = task_ptr->fanout[i];
-        }
-
-        // Record first task time if this is the first record
-        if (idx == 0) {
-            perf_buf->first_task_time = start_time;
-        }
 
         // Increment count after writing record
         perf_buf->count = idx + 1;
@@ -101,6 +92,15 @@ __aicore__ __attribute__((weak)) void aicore_execute(__gm__ Runtime* runtime, in
     // Check if profiling is enabled
     bool profiling_enabled = runtime->enable_profiling;
 
+    // Record kernel ready time (before entering main loop)
+    // This timestamp represents when the AICore is ready to execute tasks
+    // but hasn't started executing any task yet.
+    // Used for: 1) Startup overhead analysis, 2) Cross-core time alignment
+    uint64_t kernel_ready_time = 0;
+    if (profiling_enabled) {
+        kernel_ready_time = get_sys_cnt();
+    }
+
     // Phase 3: Main execution loop - poll for tasks until quit signal
     while (true) {
         dcci(my_hank, ENTIRE_DATA_CACHE, CACHELINE_OUT);
@@ -116,9 +116,8 @@ __aicore__ __attribute__((weak)) void aicore_execute(__gm__ Runtime* runtime, in
 
             // Performance profiling: record start time
             uint64_t start_time = 0;
-            if (profiling_enabled) {
-                start_time = get_sys_cnt();
-            }
+            start_time = get_sys_cnt();
+            
 
             // Execute the task
             execute_task(task_ptr);
@@ -126,7 +125,7 @@ __aicore__ __attribute__((weak)) void aicore_execute(__gm__ Runtime* runtime, in
             // Performance profiling: record task execution
             if (profiling_enabled) {
                 uint64_t end_time = get_sys_cnt();
-                record_task_performance(my_hank, task_ptr, start_time, end_time, block_idx, core_type);
+                record_task_performance(my_hank, task_ptr, start_time, end_time, block_idx, core_type, kernel_ready_time);
             }
 
             // Mark task as complete (task_status: 0=idle, 1=busy)
