@@ -16,12 +16,10 @@
 
 #include "device_runner.h"
 
-#include <optional>
-#include <set>
-#include <sstream>
+#include <fstream>
 #include <sys/stat.h>
 #include <sys/types.h>
-#include <ctime>
+#include <thread>
 
 // Function pointer types for dynamically loaded executors
 typedef int (*aicpu_execute_func_t)(Runtime* runtime);
@@ -706,38 +704,26 @@ void DeviceRunner::print_performance_data() {
     LOG_INFO("Performance Data Print Complete");
 }
 
+/**
+ * Export performance data to JSON file
+ */
 int DeviceRunner::export_swimlane_json(const std::string& output_path) {
+    // Step 1: Validate collected data
     if (collected_perf_records_.empty()) {
         LOG_WARN("Warning: No performance data to export.");
         return -1;
     }
 
-    // Step 1: Create output directory if it doesn't exist
+    // Step 2: Create output directory if it doesn't exist
     struct stat st;
     if (stat(output_path.c_str(), &st) == -1) {
         if (mkdir(output_path.c_str(), 0755) != 0) {
-            LOG_ERROR("Error: Failed to create output directory. ");
+            LOG_ERROR("Error: Failed to create output directory.");
             return -1;
         }
     }
 
-    // Step 2: Generate timestamp for filename
-    time_t now = time(nullptr);
-    struct tm* timeinfo = localtime(&now);
-    char timestamp[32];
-    strftime(timestamp, sizeof(timestamp), "%Y%m%d_%H%M%S", timeinfo);
-
-    // Step 3: Open output file with timestamp
-    std::string filepath = output_path + "/merged_swimlane_" + timestamp + ".json";
-    std::ofstream outfile(filepath);
-    if (!outfile.is_open()) {
-        LOG_ERROR("Error: Failed to open file: %s", filepath.c_str());
-        return -1;
-    }
-
-    // Step 3: Use minimum kernel_ready_time as base time for normalization
-    // kernel_ready_time represents when AICore entered main loop (ready to execute)
-    // Each AICore has different kernel_ready_time, use minimum for proper alignment
+    // Step 3: Calculate base time (minimum kernel_ready_time)
     uint64_t base_time_cycles = UINT64_MAX;
     for (const auto& record : collected_perf_records_) {
         if (record.kernel_ready_time < base_time_cycles) {
@@ -745,196 +731,73 @@ int DeviceRunner::export_swimlane_json(const std::string& output_path) {
         }
     }
 
-    // Convert cycles to microseconds: timestamp_us = (cycles / freq) * 1e6
-    // freq = PLATFORM_PROF_SYS_CNT_FREQ (1850 MHz = 1850000000 Hz)
-    auto cycles_to_us = [base_time_cycles](uint64_t cycles) -> double {
-        uint64_t normalized_cycles = cycles - base_time_cycles;
-        return (static_cast<double>(normalized_cycles) / PLATFORM_PROF_SYS_CNT_FREQ) * 1000000.0;
-    };
+    // Step 4: Prepare metadata
+    uint64_t timestamp = static_cast<uint64_t>(time(nullptr));
+    uint64_t frequency = PLATFORM_PROF_SYS_CNT_FREQ;
+    uint32_t record_count = static_cast<uint32_t>(collected_perf_records_.size());
 
-    // Step 4: Find all unique cores and build core index mapping
-    std::map<uint32_t, int> core_to_tid;  // core_id -> thread_id
-    std::set<uint32_t> unique_cores;
-    for (const auto& record : collected_perf_records_) {
-        unique_cores.insert(record.core_id);
+    // Step 5: Generate filename with human-readable timestamp (YYYYMMDD_HHMMSS)
+    std::time_t now = timestamp;
+    std::tm* timeinfo = std::localtime(&now);
+    char time_buffer[32];
+    std::strftime(time_buffer, sizeof(time_buffer), "%Y%m%d_%H%M%S", timeinfo);
+    std::string filepath = output_path + "/perf_swimlane_"
+                          + std::string(time_buffer) + ".json";
+
+    // Step 6: Open JSON file for writing
+    std::ofstream outfile(filepath);
+    if (!outfile.is_open()) {
+        LOG_ERROR("Error: Failed to open file: %s", filepath.c_str());
+        return -1;
     }
 
-    int tid_counter = 1000;
-    for (uint32_t core_id : unique_cores) {
-        core_to_tid[core_id] = tid_counter++;
-    }
-
-    // Step 5: Write JSON header
+    // Step 7: Write JSON data
     outfile << "{\n";
-    outfile << "  \"traceEvents\": [\n";
+    outfile << "  \"version\": 1,\n";
+    outfile << "  \"frequency\": " << frequency << ",\n";
+    outfile << "  \"base_time\": " << base_time_cycles << ",\n";
+    outfile << "  \"timestamp\": " << timestamp << ",\n";
 
-    bool first_event = true;
-    auto write_comma = [&]() {
-        if (!first_event) {
-            outfile << ",\n";
-        }
-        first_event = false;
-    };
-
-    // Step 6: Write metadata events - Process name
-    write_comma();
-    outfile << "    {\n";
-    outfile << "      \"args\": {\"name\": \"Machine View\"},\n";
-    outfile << "      \"cat\": \"__metadata\",\n";
-    outfile << "      \"name\": \"process_name\",\n";
-    outfile << "      \"ph\": \"M\",\n";
-    outfile << "      \"pid\": 1\n";
-    outfile << "    }";
-
-    // Step 7: Write metadata events - Thread names (one per core)
-    for (const auto& [core_id, tid] : core_to_tid) {
-        write_comma();
-
-        // Determine core type name
-        std::string core_name;
-        // Find first record with this core_id to get core_type
-        CoreType core_type = CoreType::AIV;
-        for (const auto& record : collected_perf_records_) {
-            if (record.core_id == core_id) {
-                core_type = record.core_type;
-                break;
-            }
-        }
-
-        if (core_type == CoreType::AIC) {
-            core_name = "AIC_" + std::to_string(core_id);
-        } else {
-            core_name = "AIV_" + std::to_string(core_id);
-        }
-
+    // Write records
+    outfile << "  \"records\": [\n";
+    for (size_t i = 0; i < collected_perf_records_.size(); ++i) {
+        const auto& record = collected_perf_records_[i];
         outfile << "    {\n";
-        outfile << "      \"args\": {\"name\": \"" << core_name << "\"},\n";
-        outfile << "      \"cat\": \"__metadata\",\n";
-        outfile << "      \"name\": \"thread_name\",\n";
-        outfile << "      \"ph\": \"M\",\n";
-        outfile << "      \"pid\": 1,\n";
-        outfile << "      \"tid\": " << tid << "\n";
-        outfile << "    }";
-    }
-
-    // Step 8: Write duration events (task execution records)
-    // Build task_id -> event_id mapping for flow events
-    std::map<uint32_t, int> task_to_event_id;
-    int event_id = 0;
-    for (const auto& record : collected_perf_records_) {
-        write_comma();
-
-        double start_us = cycles_to_us(record.start_time);
-        double end_us = cycles_to_us(record.end_time);
-        double duration_us = end_us - start_us;
-        int tid = core_to_tid[record.core_id];
-
-        // Build fanout hint string
-        std::ostringstream fanout_str;
-        fanout_str << "[";
-        for (int i = 0; i < record.fanout_count && i < RUNTIME_MAX_FANOUT; i++) {
-            if (i > 0) fanout_str << ", ";
-            fanout_str << record.fanout[i];
-        }
-        fanout_str << "]";
-
-        // Calculate duration_cycles from start_time and end_time
+        outfile << "      \"start_time\": " << record.start_time << ",\n";
+        outfile << "      \"end_time\": " << record.end_time << ",\n";
         uint64_t duration_cycles = record.end_time - record.start_time;
-
-        outfile << "    {\n";
-        outfile << "      \"args\": {\n";
-        outfile << "        \"event-hint\": \"Task:" << record.task_id
-                << ", FuncId:" << record.func_id
-                << ", CoreId:" << record.core_id << "\",\n";
-        outfile << "        \"fanout-hint\": \"" << fanout_str.str() << "\",\n";
-        outfile << "        \"duration-cycles\": " << duration_cycles << ",\n";
-        outfile << "        \"taskId\": " << record.task_id << "\n";
-        outfile << "      },\n";
-        outfile << "      \"cat\": \"event\",\n";
-        outfile << "      \"id\": " << event_id << ",\n";
-        outfile << "      \"name\": \"Task_" << record.task_id << "_Func_" << record.func_id << "\",\n";
-        outfile << "      \"ph\": \"X\",\n";
-        outfile << "      \"pid\": 1,\n";
-        outfile << "      \"tid\": " << tid << ",\n";
-        outfile << "      \"ts\": " << std::fixed << std::setprecision(5) << start_us << ",\n";
-        outfile << "      \"dur\": " << std::fixed << std::setprecision(5) << duration_us << "\n";
-        outfile << "    }";
-
-        // Record mapping for flow events
-        task_to_event_id[record.task_id] = event_id;
-        event_id++;
-    }
-
-    // Step 9: Write flow events (dependencies)
-    // Build task_id -> record mapping for dependency arrows
-    std::map<uint32_t, const PerfRecord*> task_map;
-    for (const auto& record : collected_perf_records_) {
-        task_map[record.task_id] = &record;
-    }
-
-    int flow_id = 0;
-    for (const auto& record : collected_perf_records_) {
-        // For each fanout (successor), draw a flow arrow
-        for (int i = 0; i < record.fanout_count && i < RUNTIME_MAX_FANOUT; i++) {
-            int successor_task_id = record.fanout[i];
-            auto it = task_map.find(successor_task_id);
-            if (it == task_map.end()) {
-                continue;  // Successor not found in records
+        outfile << "      \"duration\": " << duration_cycles << ",\n";
+        outfile << "      \"kernel_ready_time\": " << record.kernel_ready_time << ",\n";
+        outfile << "      \"task_id\": " << record.task_id << ",\n";
+        outfile << "      \"func_id\": " << record.func_id << ",\n";
+        outfile << "      \"core_id\": " << record.core_id << ",\n";
+        outfile << "      \"core_type\": " << static_cast<int>(record.core_type) << ",\n";
+        outfile << "      \"fanout\": [";
+        for (int j = 0; j < record.fanout_count; ++j) {
+            outfile << record.fanout[j];
+            if (j < record.fanout_count - 1) {
+                outfile << ", ";
             }
-            const PerfRecord* succ_record = it->second;
-
-            // Get event IDs for source and destination tasks
-            int src_event_id = task_to_event_id[record.task_id];
-            int dst_event_id = task_to_event_id[succ_record->task_id];
-
-            // Calculate timestamps
-            double src_end_us = cycles_to_us(record.end_time);
-            double dst_start_us = cycles_to_us(succ_record->start_time);
-
-            // Flow start event (at end of source task - half cycle)
-            constexpr double half_cycle_us = (0.5 / PLATFORM_PROF_SYS_CNT_FREQ) * 1000000.0;
-            double flow_start_us = src_end_us - half_cycle_us;
-            int src_tid = core_to_tid[record.core_id];
-
-            write_comma();
-            outfile << "    {\n";
-            outfile << "      \"cat\": \"flow\",\n";
-            outfile << "      \"id\": " << flow_id << ",\n";
-            outfile << "      \"name\": \"dependency\",\n";
-            outfile << "      \"ph\": \"s\",\n";
-            outfile << "      \"pid\": 1,\n";
-            outfile << "      \"tid\": " << src_tid << ",\n";
-            outfile << "      \"ts\": " << std::fixed << std::setprecision(5) << flow_start_us << ",\n";
-            outfile << "      \"bind_id\": " << src_event_id << "\n";
-            outfile << "    }";
-
-            // Flow finish event (at start of destination task)
-            write_comma();
-            int dst_tid = core_to_tid[succ_record->core_id];
-
-            outfile << "    {\n";
-            outfile << "      \"cat\": \"flow\",\n";
-            outfile << "      \"id\": " << flow_id << ",\n";
-            outfile << "      \"name\": \"dependency\",\n";
-            outfile << "      \"ph\": \"f\",\n";
-            outfile << "      \"pid\": 1,\n";
-            outfile << "      \"tid\": " << dst_tid << ",\n";
-            outfile << "      \"ts\": " << std::fixed << std::setprecision(5) << dst_start_us << ",\n";
-            outfile << "      \"bp\": \"e\",\n";
-            outfile << "      \"bind_id\": " << dst_event_id << "\n";
-            outfile << "    }";
-
-            flow_id++;
         }
+        outfile << "],\n";
+        outfile << "      \"fanout_count\": " << record.fanout_count << "\n";
+        outfile << "    }";
+        if (i < collected_perf_records_.size() - 1) {
+            outfile << ",";
+        }
+        outfile << "\n";
     }
-
-    // Step 10: Close JSON
-    outfile << "\n  ]\n";
+    outfile << "  ]\n";
     outfile << "}\n";
 
+    // Step 8: Close file
     outfile.close();
 
-    LOG_INFO("=== Export %s Complete ===", filepath.c_str());
+    LOG_INFO("=== JSON Export Complete ===");
+    LOG_INFO("File: %s", filepath.c_str());
+    LOG_INFO("Records: %u", record_count);
+    LOG_INFO("Frequency: %lu Hz (%.1f MHz)", frequency, frequency / 1e6);
+    LOG_INFO("Base Time: %lu cycles", base_time_cycles);
 
     return 0;
 }

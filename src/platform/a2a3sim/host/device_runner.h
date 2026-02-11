@@ -155,10 +155,11 @@ public:
     void print_performance_data();
 
     /**
-     * Export performance data to merged_swimlane.json
+     * Export performance data to JSON file
      *
-     * Converts collected performance records to Chrome Trace Event Format
-     * and writes to outputs/merged_swimlane_<timestamp>.json for visualization in Perfetto.
+     * Writes collected performance records to a JSON file
+     * (outputs/perf_swimlane_<YYYYMMDD_HHMMSS>.json) for visualization
+     * in Perfetto or other trace viewers.
      * Should be called after execution completes.
      *
      * @param output_path Path to output directory (default: "outputs")

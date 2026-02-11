@@ -19,8 +19,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstring>
-#include <iomanip>
-#include <iostream>
+#include <ctime>
 #include <map>
 #include <string>
 #include <vector>
@@ -247,11 +246,10 @@ public:
     void print_performance_data();
 
     /**
-     * Export performance data to merged_swimlane.json
+     * Export performance data to JSON file
      *
-     * Converts collected performance records to Chrome Trace Event Format
-     * and writes to outputs/merged_swimlane.json for visualization in Perfetto.
-     * Should be called after stream synchronization.
+     * Serializes collected_perf_records_ to a JSON file with metadata.
+     * Filename format: perf_swimlane_<YYYYMMDD_HHMMSS>.json
      *
      * @param output_path Path to output directory (default: "outputs")
      * @return 0 on success, error code on failure
