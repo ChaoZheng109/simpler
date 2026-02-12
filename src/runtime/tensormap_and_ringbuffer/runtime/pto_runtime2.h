@@ -407,9 +407,6 @@ private:
 #define PTO2_ORCHESTRATION_CONFIG_DEFINED
 struct PTO2OrchestrationConfig {
     int         expected_arg_count;
-    int32_t     task_window_size;
-    int32_t     dep_list_pool_size;
-    int32_t     heap_size;
 };
 #endif
 

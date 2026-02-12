@@ -27,12 +27,8 @@
 // Task management
 // NOTE: PTO2_TASK_WINDOW_SIZE is now the DEFAULT value only.
 // Actual window size is passed at runtime to pto2_runtime_create_threaded_custom().
-// Use pto2_task_slot(sched, task_id) instead of PTO2_TASK_SLOT macro.
+// Use pto2_task_slot(sched, task_id) for slot calculation.
 #define PTO2_TASK_WINDOW_SIZE     16384   // Default task window size (power of 2)
-
-// DEPRECATED: Use pto2_task_slot(sched, task_id) instead
-// This macro only works when runtime window == PTO2_TASK_WINDOW_SIZE
-#define PTO2_TASK_SLOT(task_id)   ((task_id) & (PTO2_TASK_WINDOW_SIZE - 1))
 
 // Memory pools
 #define PTO2_HEAP_SIZE            (64 * 1024 * 1024)  // 64MB default heap

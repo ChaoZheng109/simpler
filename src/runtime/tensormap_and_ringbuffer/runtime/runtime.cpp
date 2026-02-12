@@ -26,6 +26,7 @@ Runtime::Runtime() {
     // Initialize device orchestration state
     orch_built_on_host_ = true;
     pto2_gm_sm_ptr_ = nullptr;
+    pto2_gm_heap_ptr_ = nullptr;
     orch_args_ = nullptr;
     orch_arg_count_ = 0;
 
@@ -72,6 +73,7 @@ void Runtime::clear_tensor_pairs() {
 
 bool Runtime::get_orch_built_on_host() const { return orch_built_on_host_; }
 void* Runtime::get_pto2_gm_sm_ptr() const { return pto2_gm_sm_ptr_; }
+void* Runtime::get_pto2_gm_heap_ptr() const { return pto2_gm_heap_ptr_; }
 uint64_t* Runtime::get_orch_args() const {
     // Return embedded storage directly (not the pointer) so device code gets correct device address
     // When Runtime is copied to device memory, computing address relative to 'this' gives valid device address
@@ -80,6 +82,7 @@ uint64_t* Runtime::get_orch_args() const {
 int Runtime::get_orch_arg_count() const { return orch_arg_count_; }
 void Runtime::set_orch_built_on_host(bool v) { orch_built_on_host_ = v; }
 void Runtime::set_pto2_gm_sm_ptr(void* p) { pto2_gm_sm_ptr_ = p; }
+void Runtime::set_pto2_gm_heap(void* p) { pto2_gm_heap_ptr_ = p; }
 void Runtime::set_orch_args(uint64_t* args, int count) {
     orch_arg_count_ = count <= RUNTIME_MAX_ARGS ? count : RUNTIME_MAX_ARGS;
     if (args && orch_arg_count_ > 0) {

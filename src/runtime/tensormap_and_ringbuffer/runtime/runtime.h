@@ -28,25 +28,11 @@
 // Configuration Macros
 // =============================================================================
 
-#ifndef RUNTIME_MAX_ARGS
 #define RUNTIME_MAX_ARGS 16
-#endif
-
-#ifndef RUNTIME_MAX_WORKER
 #define RUNTIME_MAX_WORKER 72  // 24 AIC + 48 AIV cores
-#endif
-
-#ifndef RUNTIME_MAX_TENSOR_PAIRS
 #define RUNTIME_MAX_TENSOR_PAIRS 64
-#endif
-
-#ifndef RUNTIME_MAX_FUNC_ID
 #define RUNTIME_MAX_FUNC_ID 32
-#endif
-
-#ifndef RUNTIME_MAX_ORCH_SO_SIZE
 #define RUNTIME_MAX_ORCH_SO_SIZE (4 * 1024 * 1024)  // 1MB max for orchestration SO
-#endif
 
 // =============================================================================
 // Data Structures
@@ -166,6 +152,7 @@ private:
     // Device orchestration: when false, orchestration runs on device (thread 3)
     bool orch_built_on_host_;
     void* pto2_gm_sm_ptr_;  // GM pointer to PTO2 shared memory (device)
+    void* pto2_gm_heap_ptr_;  // GM heap for orchestrator output buffers (device)
     uint64_t* orch_args_;   // Arguments for device orchestration
     int orch_arg_count_;
     uint64_t orch_args_storage_[RUNTIME_MAX_ARGS];  // Copy of args for device
@@ -211,10 +198,12 @@ public:
 
     bool get_orch_built_on_host() const;
     void* get_pto2_gm_sm_ptr() const;
+    void* get_pto2_gm_heap_ptr() const;
     uint64_t* get_orch_args() const;
     int get_orch_arg_count() const;
     void set_orch_built_on_host(bool v);
     void set_pto2_gm_sm_ptr(void* p);
+    void set_pto2_gm_heap(void* p);
     void set_orch_args(uint64_t* args, int count);
 
     // Device orchestration SO binary (for dlopen on AICPU thread 3)

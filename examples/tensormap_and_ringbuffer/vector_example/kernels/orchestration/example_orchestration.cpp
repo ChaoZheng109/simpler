@@ -73,9 +73,6 @@ PTO2OrchestrationConfig aicpu_orchestration_config(uint64_t* args, int arg_count
     (void)arg_count;
     return PTO2OrchestrationConfig{
         .expected_arg_count = 7,
-        .task_window_size   = 16384,
-        .dep_list_pool_size = 65536,
-        .heap_size          = 256 * 1024,
     };
 }
 

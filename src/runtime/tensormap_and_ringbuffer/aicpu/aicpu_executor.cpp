@@ -694,12 +694,8 @@ int AicpuExecutor::run(Runtime* runtime) {
             int expected_arg_count = 0;
             if (config_func) {
                 PTO2OrchestrationConfig cfg = config_func(args, arg_count);
-                task_window_size = cfg.task_window_size;
-                dep_list_pool_size = cfg.dep_list_pool_size;
-                heap_size = cfg.heap_size;
                 expected_arg_count = cfg.expected_arg_count;
-                DEV_INFO("Thread 3: Config: window=%d, dep_pool=%d, heap=%d, expected_args=%d",
-                         task_window_size, dep_list_pool_size, heap_size, expected_arg_count);
+                DEV_INFO("Thread 3: Config: expected_args=%d", expected_arg_count);
             } else {
                 DEV_INFO("Thread 3: No config function, using defaults");
             }
@@ -711,25 +707,16 @@ int AicpuExecutor::run(Runtime* runtime) {
                 return -1;
             }
 
-            // Extract GM heap from args (always last 2: gm_heap ptr, heap_size)
+            // Get GM heap from runtime (dedicated field)
             void* sm_ptr = runtime->get_pto2_gm_sm_ptr();
             PTO2SharedMemoryHeader* header = static_cast<PTO2SharedMemoryHeader*>(sm_ptr);
-            void* gm_heap = nullptr;
-            int32_t gm_heap_size = heap_size;
-            if (arg_count >= 2) {
-                uint64_t heap_arg = args[arg_count - 2];
-                uint64_t size_arg = args[arg_count - 1];
-                if (heap_arg != 0 && size_arg != 0) {
-                    gm_heap = reinterpret_cast<void*>(static_cast<uintptr_t>(heap_arg));
-                    gm_heap_size = static_cast<int32_t>(size_arg & 0x7FFFFFFF);
-                }
-            }
+            void* gm_heap = runtime->get_pto2_gm_heap_ptr();
 
             // Create shared memory handle and runtime (ops table populated inside)
             int32_t sm_size = pto2_sm_calculate_size(task_window_size, dep_list_pool_size);
             PTO2SharedMemoryHandle* sm_handle =
                 pto2_sm_create_from_buffer(sm_ptr, sm_size, task_window_size,
-                                            gm_heap_size, dep_list_pool_size);
+                                            heap_size, dep_list_pool_size);
             if (!sm_handle) {
                 DEV_ERROR("Thread 3: Failed to create shared memory handle");
                 dlclose(handle);
@@ -738,7 +725,7 @@ int AicpuExecutor::run(Runtime* runtime) {
             }
 
             PTO2Runtime* rt = pto2_runtime_create_from_sm(PTO2_MODE_EXECUTE,
-                                                            sm_handle, gm_heap, gm_heap_size);
+                                                            sm_handle, gm_heap, heap_size);
             if (!rt) {
                 DEV_ERROR("Thread 3: Failed to create PTO2Runtime");
                 pto2_sm_destroy(sm_handle);

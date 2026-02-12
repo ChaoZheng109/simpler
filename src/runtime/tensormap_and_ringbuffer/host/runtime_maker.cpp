@@ -26,14 +26,7 @@
 #include <iostream>
 
 // Max args for device orchestration
-#ifndef RT2_MAX_DEVICE_ARGS
 #define RT2_MAX_DEVICE_ARGS 32
-#endif
-
-// GM heap size for orchestrator output buffers
-#ifndef RT2_GM_HEAP_SIZE
-#define RT2_GM_HEAP_SIZE (512 * 1024)  // 512KB
-#endif
 
 /**
  * Initialize a pre-allocated runtime for device orchestration.
@@ -214,12 +207,13 @@ extern "C" int init_runtime_impl(Runtime *runtime,
     std::cout << "Orchestration SO: " << orch_so_size << " bytes copied to device\n";
 
     // Allocate GM heap for orchestrator output buffers
-    void* gm_heap = runtime->host_api.device_malloc(RT2_GM_HEAP_SIZE);
+    void* gm_heap = runtime->host_api.device_malloc(PTO2_HEAP_SIZE);
     if (gm_heap == nullptr) {
         std::cerr << "Error: Failed to allocate GM heap\n";
         return -1;
     }
-    runtime->record_tensor_pair(nullptr, gm_heap, RT2_GM_HEAP_SIZE);
+    runtime->record_tensor_pair(nullptr, gm_heap, PTO2_HEAP_SIZE);
+    runtime->set_pto2_gm_heap(gm_heap);
 
     // Allocate PTO2 shared memory
     int32_t sm_size = pto2_sm_calculate_size(PTO2_TASK_WINDOW_SIZE, PTO2_DEP_LIST_POOL_SIZE);
@@ -231,22 +225,11 @@ extern "C" int init_runtime_impl(Runtime *runtime,
     runtime->set_pto2_gm_sm_ptr(sm_ptr);
     runtime->record_tensor_pair(nullptr, sm_ptr, static_cast<size_t>(sm_size));
 
-    // Append gm_heap and heap_size to device_args for orchestration
-    // Generic layout: original args + [gm_heap_ptr, gm_heap_size] at the end
-    // Orchestration accesses them via args[arg_count - 2] and args[arg_count - 1]
-    int extended_count = func_args_count + 2;
-    if (extended_count > RT2_MAX_DEVICE_ARGS) {
-        std::cerr << "Error: Too many args with gm_heap extension\n";
-        return -1;
-    }
-    device_args[func_args_count] = reinterpret_cast<uint64_t>(gm_heap);
-    device_args[func_args_count + 1] = static_cast<uint64_t>(RT2_GM_HEAP_SIZE);
-
     // Set up device orchestration state
     runtime->set_orch_built_on_host(false);
-    runtime->set_orch_args(device_args, extended_count);
+    runtime->set_orch_args(device_args, func_args_count);
 
-    std::cout << "Device orchestration ready: " << extended_count << " args\n";
+    std::cout << "Device orchestration ready: " << func_args_count << " args\n";
     return 0;
 }
 
