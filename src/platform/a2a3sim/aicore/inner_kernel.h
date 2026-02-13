@@ -24,6 +24,7 @@
 
 // Cache coherency constants (no-op in simulation)
 #define ENTIRE_DATA_CACHE 0
+#define SINGLE_CACHE_LINE 0
 #define CACHELINE_OUT 0
 
 // =============================================================================

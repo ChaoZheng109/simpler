@@ -100,4 +100,47 @@ constexpr int PLATFORM_PROF_TIMEOUT_SECONDS = 2;
  * Number of empty polling iterations before checking timeout
  */
 constexpr int PLATFORM_PROF_EMPTY_POLLS_CHECK_NUM = 1000;
+
+// =============================================================================
+// Register Communication Configuration
+// =============================================================================
+
+// Register offsets for AICore SPR access
+constexpr uint32_t REG_SPR_DATA_MAIN_BASE_OFFSET = 0xA0;  // Task dispatch (AICPU→AICore)
+constexpr uint32_t REG_SPR_COND_OFFSET = 0x4C8;           // Status (AICore→AICPU): 0=IDLE, 1=BUSY
+constexpr uint32_t REG_SPR_FAST_PATH_ENABLE_OFFSET = 0x18;
+
+// Fast path control values
+constexpr uint32_t REG_SPR_FAST_PATH_OPEN = 0xE;
+constexpr uint32_t REG_SPR_FAST_PATH_CLOSE = 0xF;
+
+// Exit signal for AICore shutdown
+constexpr uint32_t AICORE_EXIT_SIGNAL = 0x7FFFFFF0;
+
+// Physical core ID mask for get_coreid()
+constexpr uint32_t AICORE_COREID_MASK = 0x0FFF;
+
+// =============================================================================
+// Hardware Configuration Constants
+// =============================================================================
+
+/**
+ * AICore register bitmap buffer length
+ * Used for querying valid AICore cores via HAL API
+ */
+constexpr uint8_t PLATFORM_AICORE_BITMAP_LEN = 2;
+
+/**
+ * Number of sub-cores per AICore
+ * Hardware architecture: 1 AICore = 1 AIC + 2 AIV sub-cores
+ */
+constexpr uint32_t PLATFORM_SUB_CORES_PER_AICORE = PLATFORM_CORES_PER_BLOCKDIM;
+
+/**
+ * Maximum physical AICore count for DAV 2201 chip
+ */
+namespace DAV_2201 {
+constexpr uint32_t PLATFORM_MAX_PHYSICAL_CORES = 25;
+}
+
 #endif  // PLATFORM_COMMON_PLATFORM_CONFIG_H_

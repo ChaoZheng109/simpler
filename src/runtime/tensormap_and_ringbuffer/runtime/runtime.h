@@ -136,6 +136,9 @@ public:
     // Execution parameters for AICPU scheduling
     int sche_cpu_num;  // Number of AICPU threads for scheduling
 
+    // Register-based task dispatch (unused in tensormap_and_ringbuffer, but required by platform)
+    uint64_t regs{0};  // Device memory pointer to register address array
+
     // PTO2 integration: kernel_id -> GM function_bin_addr mapping
     // NOTE: Made public for direct access from aicore code
     uint64_t func_id_to_addr_[RUNTIME_MAX_FUNC_ID];

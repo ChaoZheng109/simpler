@@ -245,6 +245,9 @@ public:
     // Execution parameters for AICPU scheduling
     int sche_cpu_num;  // Number of AICPU threads for scheduling
 
+    // Register-based task dispatch (unused in aicpu_build_graph, but required by platform)
+    uint64_t regs{0};  // Device memory pointer to register address array
+
     /**
      * Orchestration payload (auto-populated by init_runtime_impl, consumed by AICPU orchestration).
      *
