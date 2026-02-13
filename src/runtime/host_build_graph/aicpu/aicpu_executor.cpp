@@ -50,6 +50,21 @@ struct AicpuExecutor {
     // Track executing task_id per core (-1 = idle)
     int executing_task_ids_[MAX_CORES];
 
+    // Per-thread local ready queues (to reduce lock contention)
+    // Size is limited to max cores per thread since we only grab tasks equal to inactive cores
+    int cur_ready_queue_aic_[MAX_AICPU_THREADS][MAX_CORES_PER_THREAD];
+    int cur_ready_queue_aiv_[MAX_AICPU_THREADS][MAX_CORES_PER_THREAD];
+    int cur_ready_count_aic_[MAX_AICPU_THREADS];
+    int cur_ready_count_aiv_[MAX_AICPU_THREADS];
+
+    // Per-thread active/inactive core tracking
+    int active_cores_[MAX_AICPU_THREADS][MAX_CORES_PER_THREAD];
+    int inactive_aic_cores_[MAX_AICPU_THREADS][MAX_CORES_PER_THREAD];
+    int inactive_aiv_cores_[MAX_AICPU_THREADS][MAX_CORES_PER_THREAD];
+    int active_core_count_[MAX_AICPU_THREADS];
+    int inactive_aic_count_[MAX_AICPU_THREADS];
+    int inactive_aiv_count_[MAX_AICPU_THREADS];
+
     // ===== Task queue state =====
     std::mutex ready_queue_aic_mutex_;
     int ready_queue_aic_[RUNTIME_MAX_TASKS];
@@ -71,6 +86,7 @@ struct AicpuExecutor {
     // ===== Performance profiling state =====
     std::mutex perf_ready_queue_mutex_;  // Protects enqueue_ready_buffer operations
     uint64_t dispatch_timestamps_[RUNTIME_MAX_WORKER];  // Per-core AICPU dispatch timestamp
+    uint32_t core_dispatch_counts_[RUNTIME_MAX_WORKER];  // Per-core task dispatch counter for buffer management
 
     // ===== Methods =====
     int init(Runtime* runtime);
@@ -137,8 +153,41 @@ int AicpuExecutor::init(Runtime* runtime) {
         executing_task_ids_[i] = -1;
     }
 
+    // Initialize per-thread local queues and core tracking
+    // Initially all cores are inactive, will be populated in run() per thread
+    for (int t = 0; t < MAX_AICPU_THREADS; t++) {
+        cur_ready_count_aic_[t] = 0;
+        cur_ready_count_aiv_[t] = 0;
+        active_core_count_[t] = 0;
+        inactive_aic_count_[t] = 0;
+        inactive_aiv_count_[t] = 0;
+    }
+
     // Assign discovered cores to threads
     assign_cores_to_threads();
+
+    // Initialize inactive core lists for all threads after core assignment
+    // All cores start as inactive
+    Handshake* all_hanks = (Handshake*)runtime->workers;
+    for (int t = 0; t < thread_num_; t++) {
+        inactive_aic_count_[t] = 0;
+        inactive_aiv_count_[t] = 0;
+        active_core_count_[t] = 0;
+
+        const int* thread_cores = core_assignments_[t];
+        for (int i = 0; i < thread_cores_num_; i++) {
+            int core_id = thread_cores[i];
+            Handshake* h = &all_hanks[core_id];
+            if (h->core_type == CoreType::AIC) {
+                inactive_aic_cores_[t][inactive_aic_count_[t]++] = core_id;
+            } else {
+                inactive_aiv_cores_[t][inactive_aiv_count_[t]++] = core_id;
+            }
+        }
+
+        LOG_INFO("Thread %d: Pre-initialized with %d AIC cores, %d AIV cores",
+                 t, inactive_aic_count_[t], inactive_aiv_count_[t]);
+    }
 
     // Initialize runtime execution state
     total_tasks_.store(runtime->get_task_count(), std::memory_order_release);
@@ -155,9 +204,10 @@ int AicpuExecutor::init(Runtime* runtime) {
     ready_queue_aiv_head_ = 0;
     ready_queue_aiv_tail_ = 0;
 
-    // Reset per-core dispatch timestamps
+    // Reset per-core dispatch timestamps and dispatch counts
     for (int i = 0; i < RUNTIME_MAX_WORKER; i++) {
         dispatch_timestamps_[i] = 0;
+        core_dispatch_counts_[i] = 0;
     }
 
     int aic_count = 0;
@@ -384,7 +434,13 @@ int AicpuExecutor::shutdown_aicore(Runtime* runtime, int thread_idx, const int* 
 
 /**
  * Resolve dependencies and dispatch tasks using polling-based dispatch to
- * AICore
+ * AICore with optimized lock contention reduction
+ *
+ * Optimization: Cores are classified into active (executing) and inactive (idle).
+ * - Active/inactive state is maintained incrementally (not recomputed each iteration)
+ * - Dependency resolution only traverses active cores
+ * - Task dispatch only traverses inactive cores
+ * - Tasks are grabbed from shared queues in batches equal to inactive core count
  */
 int AicpuExecutor::resolve_and_dispatch(Runtime& runtime, int thread_idx, const int* cur_thread_cores, int core_num) {
     Handshake* hank = (Handshake*)runtime.workers;
@@ -404,6 +460,16 @@ int AicpuExecutor::resolve_and_dispatch(Runtime& runtime, int thread_idx, const 
     int verification_warning_count = 0;
     const int MAX_VERIFICATION_WARNINGS = 10;
     bool profiling_enabled = runtime.enable_profiling;
+
+    // Use pre-initialized inactive/active core lists from init()
+    int inactive_aic_count = inactive_aic_count_[thread_idx];
+    int inactive_aiv_count = inactive_aiv_count_[thread_idx];
+    int active_count = active_core_count_[thread_idx];
+
+    LOG_INFO("Thread %d: Initial state - %d AIC cores, %d AIV cores, %d active",
+             thread_idx, inactive_aic_count, inactive_aiv_count, active_count);
+
+    uint64_t dispatch_start_time = 0;
 
     // Execute tasks using polling-based dispatch with integrated verification
     while (true) {
@@ -452,15 +518,17 @@ int AicpuExecutor::resolve_and_dispatch(Runtime& runtime, int thread_idx, const 
 
         made_progress = false;
 
-        // Phase 1: Process completed tasks on my managed cores
-        for (int i = 0; i < core_num; i++) {
-            int core_id = cur_thread_cores[i];
+        // Phase 1: Process completed tasks on active cores only
+        for (int i = 0; i < active_count; i++) {
+            int core_id = active_cores_[thread_idx][i];
             uint64_t reg_addr = core_id_to_reg_addr_[core_id];
             AICoreStatus status = read_aicore_status(reg_addr);
+
             if (status == AICoreStatus::IDLE && executing_task_ids_[core_id] >= 0) {
                 int task_id = executing_task_ids_[core_id];
                 int completed_task_id = task_id;
                 Handshake* h = &hank[core_id];
+
                 if (profiling_enabled) {
                     uint64_t finish_ts = get_sys_cnt_aicpu();
                     PerfBuffer* perf_buf = (PerfBuffer*)h->perf_records_addr;
@@ -474,11 +542,6 @@ int AicpuExecutor::resolve_and_dispatch(Runtime& runtime, int thread_idx, const 
                             wmb();
                         }
                     }
-                }
-
-                // Check and switch performance buffer if needed
-                if (profiling_enabled && h->perf_buffer_status == 1) {
-                    switch_perf_buffer(&runtime, core_id, thread_idx);
                 }
 
                 Task* task = runtime.get_task(task_id);
@@ -524,76 +587,153 @@ int AicpuExecutor::resolve_and_dispatch(Runtime& runtime, int thread_idx, const 
                 // Clear task_id
                 executing_task_ids_[core_id] = -1;
                 completed_tasks_.fetch_add(1, std::memory_order_release);
-            }
-        }
 
-        // Load balancing: Skip dispatch if all my cores are busy
-        if (cur_thread_tasks_in_flight < core_num) {
-            // Phase 2: Dispatch new tasks from matching ready queue to idle cores
-            for (int i = 0; i < core_num; i++) {
-                int core_id = cur_thread_cores[i];
-                uint64_t reg_addr = core_id_to_reg_addr_[core_id];
-                AICoreStatus status = read_aicore_status(reg_addr);
+                // Move core from active to inactive list
+                // Remove from active list by replacing with last element
+                active_cores_[thread_idx][i] = active_cores_[thread_idx][active_count - 1];
+                active_count--;
+                i--;  // Re-check this position since we moved a new core here
 
-                if (status == AICoreStatus::IDLE && executing_task_ids_[core_id] == -1) {
-                    Handshake* h = &hank[core_id];
-                    // Dispatch from matching queue based on core type
-                    if (h->core_type == CoreType::AIC) {  // AIC core
-                        if (ready_count_aic_.load(std::memory_order_acquire) > 0) {
-                            std::lock_guard<std::mutex> lock(ready_queue_aic_mutex_);
-                            int count = ready_count_aic_.load(std::memory_order_relaxed);
-                            if (count > 0) {
-                                // Dequeue from head position (circular) - FIFO order
-                                int task_id = ready_queue_aic_[ready_queue_aic_head_];
-                                ready_queue_aic_head_ = (ready_queue_aic_head_ + 1) % RUNTIME_MAX_TASKS;
-                                ready_count_aic_.fetch_sub(1, std::memory_order_release);
-
-                                LOG_INFO("Thread %d: Dispatching AIC task %d to core %d (head=%d)",
-                                         thread_idx, task_id, core_id, ready_queue_aic_head_);
-
-                                uint64_t reg_addr = core_id_to_reg_addr_[core_id];
-
-                                // Write task_id+1 to register
-                                write_task_id_to_aicore(reg_addr, static_cast<uint32_t>(task_id + 1));
-
-                                if (runtime.enable_profiling) {
-                                    dispatch_timestamps_[core_id] = get_sys_cnt_aicpu();
-                                }
-                                executing_task_ids_[core_id] = task_id;
-                                cur_thread_tasks_in_flight++;
-                                made_progress = true;
-                            }
-                        }
-                    } else if (h->core_type == CoreType::AIV) {  // AIV core
-                        if (ready_count_aiv_.load(std::memory_order_acquire) > 0) {
-                            std::lock_guard<std::mutex> lock(ready_queue_aiv_mutex_);
-                            int count = ready_count_aiv_.load(std::memory_order_relaxed);
-                            if (count > 0) {
-                                // Dequeue from head position (circular) - FIFO order
-                                int task_id = ready_queue_aiv_[ready_queue_aiv_head_];
-                                ready_queue_aiv_head_ = (ready_queue_aiv_head_ + 1) % RUNTIME_MAX_TASKS;
-                                ready_count_aiv_.fetch_sub(1, std::memory_order_release);
-
-                                LOG_INFO("Thread %d: Dispatching AIV task %d to core %d (head=%d)",
-                                         thread_idx, task_id, core_id, ready_queue_aiv_head_);
-
-                                uint64_t reg_addr = core_id_to_reg_addr_[core_id];
-
-                                // Write task_id+1 to register
-                                write_task_id_to_aicore(reg_addr, static_cast<uint32_t>(task_id + 1));
-
-                                if (runtime.enable_profiling) {
-                                    dispatch_timestamps_[core_id] = get_sys_cnt_aicpu();
-                                }
-                                executing_task_ids_[core_id] = task_id;
-                                cur_thread_tasks_in_flight++;
-                                made_progress = true;
-                            }
-                        }
-                    }
+                // Add to appropriate inactive list based on core type
+                if (h->core_type == CoreType::AIC) {
+                    inactive_aic_cores_[thread_idx][inactive_aic_count++] = core_id;
+                } else {
+                    inactive_aiv_cores_[thread_idx][inactive_aiv_count++] = core_id;
                 }
             }
         }
+
+        // Phase 2: Dispatch new tasks to inactive cores
+        // Grab tasks from shared queues in batches to reduce lock contention
+        if (profiling_enabled) {
+            dispatch_start_time = get_sys_cnt_aicpu();
+        }
+
+        // Grab AIC tasks if we have inactive AIC cores
+        if (inactive_aic_count > 0 && ready_count_aic_.load(std::memory_order_acquire) > 0) {
+            std::lock_guard<std::mutex> lock(ready_queue_aic_mutex_);
+            int available = ready_count_aic_.load(std::memory_order_relaxed);
+            int to_grab = (available < inactive_aic_count) ? available : inactive_aic_count;
+
+            cur_ready_count_aic_[thread_idx] = 0;
+            for (int i = 0; i < to_grab; i++) {
+                // Dequeue from head position (circular) - FIFO order
+                int task_id = ready_queue_aic_[ready_queue_aic_head_];
+                ready_queue_aic_head_ = (ready_queue_aic_head_ + 1) % RUNTIME_MAX_TASKS;
+                cur_ready_queue_aic_[thread_idx][cur_ready_count_aic_[thread_idx]++] = task_id;
+            }
+            ready_count_aic_.fetch_sub(to_grab, std::memory_order_release);
+
+            LOG_INFO("Thread %d: Grabbed %d AIC tasks from shared queue", thread_idx, to_grab);
+        }
+
+        // Grab AIV tasks if we have inactive AIV cores
+        if (inactive_aiv_count > 0 && ready_count_aiv_.load(std::memory_order_acquire) > 0) {
+            std::lock_guard<std::mutex> lock(ready_queue_aiv_mutex_);
+            int available = ready_count_aiv_.load(std::memory_order_relaxed);
+            int to_grab = (available < inactive_aiv_count) ? available : inactive_aiv_count;
+
+            cur_ready_count_aiv_[thread_idx] = 0;
+            for (int i = 0; i < to_grab; i++) {
+                // Dequeue from head position (circular) - FIFO order
+                int task_id = ready_queue_aiv_[ready_queue_aiv_head_];
+                ready_queue_aiv_head_ = (ready_queue_aiv_head_ + 1) % RUNTIME_MAX_TASKS;
+                cur_ready_queue_aiv_[thread_idx][cur_ready_count_aiv_[thread_idx]++] = task_id;
+            }
+            ready_count_aiv_.fetch_sub(to_grab, std::memory_order_release);
+
+            LOG_INFO("Thread %d: Grabbed %d AIV tasks from shared queue", thread_idx, to_grab);
+        }
+
+        // Dispatch AIC tasks to inactive AIC cores from local queue
+        int aic_dispatched = 0;
+        int new_inactive_aic_count = inactive_aic_count;
+        for (int i = 0; i < inactive_aic_count && aic_dispatched < cur_ready_count_aic_[thread_idx]; i++) {
+            int core_id = inactive_aic_cores_[thread_idx][i];
+            int task_id = cur_ready_queue_aic_[thread_idx][aic_dispatched++];
+
+            if (profiling_enabled) {
+                dispatch_timestamps_[core_id] = dispatch_start_time;
+                core_dispatch_counts_[core_id]++;
+                if (core_dispatch_counts_[core_id] >= PLATFORM_PROF_BUFFER_SIZE - 1) {
+                    // Buffer will be full, switch before dispatch
+                    switch_perf_buffer(&runtime, core_id, thread_idx);
+                    core_dispatch_counts_[core_id] = 0;
+                }
+            }
+
+            LOG_INFO("Thread %d: Dispatching AIC task %d to core %d", thread_idx, task_id, core_id);
+
+            uint64_t reg_addr = core_id_to_reg_addr_[core_id];
+            write_task_id_to_aicore(reg_addr, static_cast<uint32_t>(task_id + 1));
+
+            executing_task_ids_[core_id] = task_id;
+            cur_thread_tasks_in_flight++;
+            made_progress = true;
+
+            // Move core from inactive to active list
+            active_cores_[thread_idx][active_count++] = core_id;
+            // Mark this position for removal (will compact later)
+            inactive_aic_cores_[thread_idx][i] = -1;
+            new_inactive_aic_count--;
+        }
+
+        // Compact inactive AIC list (remove dispatched cores marked as -1)
+        int write_idx = 0;
+        for (int i = 0; i < inactive_aic_count; i++) {
+            if (inactive_aic_cores_[thread_idx][i] != -1) {
+                inactive_aic_cores_[thread_idx][write_idx++] = inactive_aic_cores_[thread_idx][i];
+            }
+        }
+        inactive_aic_count = new_inactive_aic_count;
+
+        // Clear local AIC queue
+        cur_ready_count_aic_[thread_idx] = 0;
+
+        // Dispatch AIV tasks to inactive AIV cores from local queue
+        int aiv_dispatched = 0;
+        int new_inactive_aiv_count = inactive_aiv_count;
+        for (int i = 0; i < inactive_aiv_count && aiv_dispatched < cur_ready_count_aiv_[thread_idx]; i++) {
+            int core_id = inactive_aiv_cores_[thread_idx][i];
+            int task_id = cur_ready_queue_aiv_[thread_idx][aiv_dispatched++];
+
+            if (profiling_enabled) {
+                dispatch_timestamps_[core_id] = dispatch_start_time;
+                core_dispatch_counts_[core_id]++;
+                if (core_dispatch_counts_[core_id] >= PLATFORM_PROF_BUFFER_SIZE - 1) {
+                    // Buffer will be full, switch before dispatch
+                    switch_perf_buffer(&runtime, core_id, thread_idx);
+                    core_dispatch_counts_[core_id] = 0;
+                }
+            }
+
+            LOG_INFO("Thread %d: Dispatching AIV task %d to core %d", thread_idx, task_id, core_id);
+
+            uint64_t reg_addr = core_id_to_reg_addr_[core_id];
+            write_task_id_to_aicore(reg_addr, static_cast<uint32_t>(task_id + 1));
+
+            executing_task_ids_[core_id] = task_id;
+            cur_thread_tasks_in_flight++;
+            made_progress = true;
+
+            // Move core from inactive to active list
+            active_cores_[thread_idx][active_count++] = core_id;
+            // Mark this position for removal (will compact later)
+            inactive_aiv_cores_[thread_idx][i] = -1;
+            new_inactive_aiv_count--;
+        }
+
+        // Compact inactive AIV list (remove dispatched cores marked as -1)
+        write_idx = 0;
+        for (int i = 0; i < inactive_aiv_count; i++) {
+            if (inactive_aiv_cores_[thread_idx][i] != -1) {
+                inactive_aiv_cores_[thread_idx][write_idx++] = inactive_aiv_cores_[thread_idx][i];
+            }
+        }
+        inactive_aiv_count = new_inactive_aiv_count;
+
+        // Clear local AIV queue
+        cur_ready_count_aiv_[thread_idx] = 0;
 
         // Timeout detection: track idle iterations when no progress
         if (!made_progress) {
@@ -623,6 +763,10 @@ int AicpuExecutor::run(Runtime* runtime) {
     LOG_INFO("Thread %d: Start", thread_idx);
 
     const int* cur_thread_cores = core_assignments_[thread_idx];
+
+    // Inactive core lists already initialized in init()
+    LOG_INFO("Thread %d: Starting with %d AIC cores, %d AIV cores (pre-initialized)",
+             thread_idx, inactive_aic_count_[thread_idx], inactive_aiv_count_[thread_idx]);
 
     // Handshaking is already done in init() - no per-thread handshake needed
     LOG_INFO("Thread %d: Runtime has %d tasks", thread_idx, runtime->get_task_count());
@@ -662,9 +806,19 @@ void AicpuExecutor::deinit() {
     ready_queue_aiv_head_ = 0;
     ready_queue_aiv_tail_ = 0;
 
-    // Reset per-core dispatch timestamps
+    // Reset per-core dispatch timestamps and dispatch counts
     for (int i = 0; i < RUNTIME_MAX_WORKER; i++) {
         dispatch_timestamps_[i] = 0;
+        core_dispatch_counts_[i] = 0;
+    }
+
+    // Reset per-thread local queues and core tracking
+    for (int t = 0; t < MAX_AICPU_THREADS; t++) {
+        cur_ready_count_aic_[t] = 0;
+        cur_ready_count_aiv_[t] = 0;
+        active_core_count_[t] = 0;
+        inactive_aic_count_[t] = 0;
+        inactive_aiv_count_[t] = 0;
     }
 
     completed_tasks_.store(0, std::memory_order_release);

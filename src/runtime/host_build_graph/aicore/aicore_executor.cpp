@@ -27,38 +27,21 @@ __aicore__ __attribute__((always_inline)) static void record_task_performance(
     int block_idx,
     CoreType core_type,
     uint64_t kernel_ready_time) {
-
-    // dcci() for handshake visibility during profiling
-    dcci((__gm__ uint32_t*)&my_hank->perf_buffer_status, SINGLE_CACHE_LINE, CACHELINE_OUT);
-
-    if (my_hank->perf_buffer_status != 0) {
-        return;
-    }
-
     __gm__ PerfBuffer* perf_buf = (__gm__ PerfBuffer*)my_hank->perf_records_addr;
     uint32_t idx = perf_buf->count;
+    __gm__ PerfRecord* record = (__gm__ PerfRecord*)&perf_buf->records[idx];
 
-    if (idx < PLATFORM_PROF_BUFFER_SIZE) {
-        __gm__ PerfRecord* record = (__gm__ PerfRecord*)&perf_buf->records[idx];
+    record->start_time = start_time;
+    record->end_time = end_time;
+    record->kernel_ready_time = kernel_ready_time;
+    record->task_id = task_ptr->task_id;
+    record->func_id = task_ptr->func_id;
+    record->core_id = block_idx;
+    record->core_type = core_type;
 
-        record->start_time = start_time;
-        record->end_time = end_time;
-        record->kernel_ready_time = kernel_ready_time;
-        record->task_id = task_ptr->task_id;
-        record->func_id = task_ptr->func_id;
-        record->core_id = block_idx;
-        record->core_type = core_type;
+    perf_buf->count = idx + 1;
+    dcci(record, ENTIRE_DATA_CACHE, CACHELINE_OUT);
 
-        perf_buf->count = idx + 1;
-        dcci(record, ENTIRE_DATA_CACHE, CACHELINE_OUT);
-        if (perf_buf->count >= PLATFORM_PROF_BUFFER_SIZE) {
-            my_hank->perf_buffer_status = 1;
-        }
-    } else {
-        my_hank->perf_buffer_status = 1;
-    }
-    // dcci() for handshake visibility during profiling
-    dcci((__gm__ uint32_t*)&my_hank->perf_buffer_status, SINGLE_CACHE_LINE, CACHELINE_OUT);
 }
 
 __aicore__ __attribute__((always_inline)) static void execute_task(__gm__ Task* task) {

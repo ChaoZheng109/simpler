@@ -76,7 +76,7 @@ constexpr int PLATFORM_MAX_CORES =
  * Performance buffer capacity for each double buffer
  * Number of PerfRecord entries per buffer (ping or pong)
  */
-constexpr int PLATFORM_PROF_BUFFER_SIZE = 20;
+constexpr int PLATFORM_PROF_BUFFER_SIZE = 100;
 
 /**
  * Ready queue capacity for performance data collection
