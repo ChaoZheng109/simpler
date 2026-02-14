@@ -82,6 +82,7 @@ int PerformanceCollector::initialize(Runtime& runtime,
     header->queue_head = 0;
     header->queue_tail = 0;
     header->num_cores = num_aicore;
+    header->total_tasks = 0xFFFFFFFF;  // Special value: uninitialized (AICPU will overwrite with actual count)
 
     LOG_DEBUG("Initialized PerfDataHeader:");
     LOG_DEBUG("  num_cores:        %d", header->num_cores);
@@ -131,29 +132,31 @@ void PerformanceCollector::poll_and_collect(int num_aicore, int expected_tasks) 
 
     // Poll for total_tasks if not provided
     if (expected_tasks <= 0) {
-        LOG_INFO("Waiting for AICPU to write total_tasks to PerfDataHeader...");
+        LOG_INFO("Waiting for AICPU to write total_tasks in PerfDataHeader...");
         idle_start = std::chrono::steady_clock::now();
 
         while (true) {
             rmb();
-            expected_tasks = static_cast<int>(header->total_tasks);
+            uint32_t raw_total_tasks = header->total_tasks;
 
-            if (expected_tasks > 0) {
-                LOG_INFO("Task count read from PerfDataHeader: %d", expected_tasks);
+            // Check if AICPU has written a valid task count (> 0 and != 0xFFFFFFFF)
+            if (raw_total_tasks != 0xFFFFFFFF && raw_total_tasks > 0) {
+                expected_tasks = static_cast<int>(raw_total_tasks);
+                LOG_INFO("AICPU reported task count: %d", expected_tasks);
                 break;
             }
 
             auto elapsed = std::chrono::steady_clock::now() - idle_start.value();
             if (elapsed >= timeout_duration) {
-                LOG_ERROR("Timeout waiting for total_tasks from AICPU after %ld seconds",
+                LOG_ERROR("Timeout waiting for AICPU task count after %ld seconds",
                          std::chrono::duration_cast<std::chrono::seconds>(elapsed).count());
-                LOG_ERROR("AICPU may not have initialized performance profiling");
+                LOG_ERROR("AICPU may not have started orchestration or graph is empty");
                 return;
             }
         }
     }
 
-    LOG_DEBUG("Expected tasks: %d", expected_tasks);
+    LOG_DEBUG("Initial expected tasks: %d", expected_tasks);
 
     uint32_t capacity = PLATFORM_PROF_READYQUEUE_SIZE;
     int total_records_collected = 0;
@@ -162,10 +165,23 @@ void PerformanceCollector::poll_and_collect(int num_aicore, int expected_tasks) 
     collected_perf_records_.clear();
     idle_start.reset();
     int empty_poll_count = 0;
+    int last_logged_expected = -1;  // -1 triggers first update
 
     // Poll the ready queue
     while (total_records_collected < expected_tasks) {
         rmb();
+
+        // Dynamically refresh expected_tasks from header (AICPU updates it continuously)
+        int current_expected = static_cast<int>(header->total_tasks);
+        if (current_expected > expected_tasks) {
+            expected_tasks = current_expected;
+            // Only log first update or when orchestration completes (total_tasks stops changing)
+            if (last_logged_expected < 0) {
+                LOG_INFO("Updated expected_tasks to %d (orchestrator progress)", expected_tasks);
+                last_logged_expected = expected_tasks;
+            }
+        }
+
         uint32_t head = header->queue_head;
         uint32_t tail = header->queue_tail;
 
@@ -225,6 +241,11 @@ void PerformanceCollector::poll_and_collect(int num_aicore, int expected_tasks) 
         wmb();
 
         buffers_processed++;
+    }
+
+    // Log final task count if it changed from initial
+    if (last_logged_expected >= 0 && expected_tasks != last_logged_expected) {
+        LOG_INFO("Final expected_tasks: %d (orchestration complete)", expected_tasks);
     }
 
     LOG_INFO("Total buffers processed: %d", buffers_processed);

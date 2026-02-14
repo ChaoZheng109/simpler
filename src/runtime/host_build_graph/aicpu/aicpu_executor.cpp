@@ -877,7 +877,15 @@ void AicpuExecutor::switch_perf_buffer(Runtime* runtime, int core_id, int thread
         LOG_WARN("Thread %d: Core %d cannot switch, buffer%u status=%u, spinning until Host reads it",
                  thread_idx, core_id, alternate_buffer_id, static_cast<uint32_t>(alternate_status));
 
-        // Spin wait: continuously check alternate buffer status until Host sets it to IDLE
+        // Time-based timeout: use get_sys_cnt_aicpu for accurate timing
+        constexpr uint64_t TIMEOUT_SECONDS = 1;
+        constexpr uint64_t TIMEOUT_CYCLES = TIMEOUT_SECONDS * PLATFORM_PROF_SYS_CNT_FREQ;
+        constexpr uint64_t WARN_INTERVAL_CYCLES = PLATFORM_PROF_SYS_CNT_FREQ;  // 1 second
+
+        uint64_t start_time = get_sys_cnt_aicpu();
+        uint64_t last_warn_time = start_time;
+        bool timeout = false;
+
         while (true) {
             rmb();  // Read barrier: ensure reading latest status modified by Host
             alternate_status = *alternate_status_ptr;
@@ -887,6 +895,41 @@ void AicpuExecutor::switch_perf_buffer(Runtime* runtime, int core_id, int thread
                          thread_idx, core_id, alternate_buffer_id);
                 break;
             }
+
+            uint64_t current_time = get_sys_cnt_aicpu();
+            uint64_t elapsed = current_time - start_time;
+
+            // Check timeout
+            if (elapsed >= TIMEOUT_CYCLES) {
+                LOG_ERROR("Thread %d: Core %d buffer%u timeout after %lu seconds (status=%u)",
+                         thread_idx, core_id, alternate_buffer_id, TIMEOUT_SECONDS,
+                         static_cast<uint32_t>(alternate_status));
+                LOG_ERROR("Host may have stopped collecting performance data");
+                LOG_ERROR("Forcing buffer%u to IDLE and discarding performance data to prevent deadlock",
+                         alternate_buffer_id);
+                timeout = true;
+                break;
+            }
+
+            // Periodic warning every second
+            if (current_time - last_warn_time >= WARN_INTERVAL_CYCLES) {
+                uint64_t elapsed_sec = elapsed / PLATFORM_PROF_SYS_CNT_FREQ;
+                LOG_WARN("Thread %d: Core %d buffer%u still busy after %lu seconds (status=%u)",
+                         thread_idx, core_id, alternate_buffer_id, elapsed_sec,
+                         static_cast<uint32_t>(alternate_status));
+                last_warn_time = current_time;
+            }
+        }
+
+        // Handle timeout: force clear alternate buffer and continue
+        if (timeout) {
+            // Force reset alternate buffer to IDLE state
+            alternate_buf->count = 0;
+            *alternate_status_ptr = BufferStatus::IDLE;
+            wmb();
+
+            LOG_ERROR("Thread %d: Core %d forced buffer%u to IDLE, performance data lost",
+                     thread_idx, core_id, alternate_buffer_id);
         }
     }
 

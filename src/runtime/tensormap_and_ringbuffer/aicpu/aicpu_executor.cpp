@@ -109,7 +109,6 @@ struct AicpuExecutor {
     std::atomic<bool> pto2_init_done_{false};
     std::atomic<bool> pto2_init_complete_{false};  // init block finished; others wait for this
     std::atomic<int> next_scan_index_{0};
-    std::atomic<bool> perf_init_done_{false};
     std::atomic<bool> sm_header_ready_{false};  // Thread 3 sets after SM header init
 
     // Orchestrator ready queue pointers (set by Thread 3, read by scheduler threads)
@@ -443,6 +442,7 @@ int AicpuExecutor::resolve_and_dispatch_pto2(Runtime* runtime, int thread_idx,
     const int MAX_IDLE_ITERATIONS = 50000000;
     const int WARN_INTERVAL = 1000000;
     bool profiling_enabled = runtime->enable_profiling;
+    int32_t last_reported_task_count = -1;  // -1 triggers first update
 
     // Scheduler profiling counters
     uint64_t sched_scan_ns = 0, sched_orch_drain_ns = 0;
@@ -471,22 +471,39 @@ int AicpuExecutor::resolve_and_dispatch_pto2(Runtime* runtime, int thread_idx,
 
         bool made_progress = false;
 
-        // Update perf header total_tasks after orchestrator sets the final count
-        if (profiling_enabled && orch_done && !perf_init_done_.load(std::memory_order_acquire)) {
-            bool expected = false;
-            if (perf_init_done_.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
-                void* perf_base = (void*)runtime->perf_data_base;
-                if (perf_base) {
+        // Continuously update perf header total_tasks as orchestrator makes progress
+        // Read current_task_index which is updated incrementally by orchestrator after each task submission
+        int32_t visible_tasks = 0;
+        if (profiling_enabled) {
+            void* perf_base = (void*)runtime->perf_data_base;
+            if (perf_base) {
+                // Get current visible task count from orchestrator's incremental progress
+                visible_tasks = __atomic_load_n(&header->current_task_index, __ATOMIC_ACQUIRE);
+
+                // Use the maximum of total_tasks_ (final count when orch completes) and visible_tasks (incremental)
+                int32_t current_count = std::max(task_count, visible_tasks);
+
+                if (current_count > 0 && current_count != last_reported_task_count) {
                     PerfDataHeader* perf_hdr = get_perf_header(perf_base);
-                    perf_hdr->total_tasks = static_cast<uint32_t>(task_count);
+                    perf_hdr->total_tasks = static_cast<uint32_t>(current_count);
                     wmb();
+
+                    // Only log on first update or when orchestrator completes
+                    if (last_reported_task_count < 0 || task_count > 0) {
+                        DEV_INFO("Thread %d: Updated perf header total_tasks to %d (visible=%d, final=%d)",
+                                 thread_idx, current_count, visible_tasks, task_count);
+                    }
+
+                    last_reported_task_count = current_count;
                 }
             }
         }
 
         // Incremental scan: discover root tasks (fanin_count == 0)
         {
-            int32_t visible = __atomic_load_n(&header->current_task_index, __ATOMIC_ACQUIRE);
+            int32_t visible = (profiling_enabled && visible_tasks > 0) ?
+                              visible_tasks :
+                              __atomic_load_n(&header->current_task_index, __ATOMIC_ACQUIRE);
             while (true) {
                 int32_t idx = next_scan_index_.load(std::memory_order_acquire);
                 if (idx >= visible) break;
@@ -984,7 +1001,6 @@ void AicpuExecutor::deinit() {
     pto2_init_done_.store(false, std::memory_order_release);
     pto2_init_complete_.store(false, std::memory_order_release);
     next_scan_index_.store(0, std::memory_order_release);
-    perf_init_done_.store(false, std::memory_order_release);
     sm_header_ready_.store(false, std::memory_order_release);
 
     // Reset core discovery state
@@ -1076,16 +1092,11 @@ void AicpuExecutor::init_performance_profiling(Runtime* runtime) {
         return;
     }
 
-    PerfDataHeader* header = get_perf_header(perf_base);
     DoubleBuffer* buffers = get_double_buffers(perf_base);
 
-    // Write total_tasks to shared memory header for Host access
-    // This is necessary because Runtime object is not copied back from Device to Host
-    int32_t task_count = total_tasks_.load(std::memory_order_acquire);
-    header->total_tasks = static_cast<uint32_t>(task_count);
-    wmb();  // Ensure total_tasks is visible to Host
-
-    LOG_INFO("Initializing performance profiling for %d cores, total_tasks=%d", runtime->worker_count, task_count);
+    // Do NOT write total_tasks here - wait until we have actual task count from orchestrator
+    // Writing 0 would cause Host to think it's an empty graph and exit collection
+    LOG_INFO("Initializing performance profiling for %d cores (total_tasks will be written when available)", runtime->worker_count);
 
     // Assign initial buffer (buffer1) to each AICore
     for (int i = 0; i < runtime->worker_count; i++) {
@@ -1240,7 +1251,15 @@ void AicpuExecutor::switch_perf_buffer(Runtime* runtime, int core_id, int thread
         LOG_WARN("Thread %d: Core %d cannot switch, buffer%u status=%u, spinning until Host reads it",
                  thread_idx, core_id, alternate_buffer_id, static_cast<uint32_t>(alternate_status));
 
-        // Spin wait: continuously check alternate buffer status until Host sets it to IDLE
+        // Time-based timeout: use get_sys_cnt_aicpu for accurate timing
+        constexpr uint64_t TIMEOUT_SECONDS = 1;
+        constexpr uint64_t TIMEOUT_CYCLES = TIMEOUT_SECONDS * PLATFORM_PROF_SYS_CNT_FREQ;
+        constexpr uint64_t WARN_INTERVAL_CYCLES = PLATFORM_PROF_SYS_CNT_FREQ;  // 1 second
+
+        uint64_t start_time = get_sys_cnt_aicpu();
+        uint64_t last_warn_time = start_time;
+        bool timeout = false;
+
         while (true) {
             rmb();  // Read barrier: ensure reading latest status modified by Host
             alternate_status = *alternate_status_ptr;
@@ -1250,6 +1269,41 @@ void AicpuExecutor::switch_perf_buffer(Runtime* runtime, int core_id, int thread
                          thread_idx, core_id, alternate_buffer_id);
                 break;
             }
+
+            uint64_t current_time = get_sys_cnt_aicpu();
+            uint64_t elapsed = current_time - start_time;
+
+            // Check timeout
+            if (elapsed >= TIMEOUT_CYCLES) {
+                LOG_ERROR("Thread %d: Core %d buffer%u timeout after %lu seconds (status=%u)",
+                         thread_idx, core_id, alternate_buffer_id, TIMEOUT_SECONDS,
+                         static_cast<uint32_t>(alternate_status));
+                LOG_ERROR("Host may have stopped collecting performance data");
+                LOG_ERROR("Forcing buffer%u to IDLE and discarding performance data to prevent deadlock",
+                         alternate_buffer_id);
+                timeout = true;
+                break;
+            }
+
+            // Periodic warning every second
+            if (current_time - last_warn_time >= WARN_INTERVAL_CYCLES) {
+                uint64_t elapsed_sec = elapsed / PLATFORM_PROF_SYS_CNT_FREQ;
+                LOG_WARN("Thread %d: Core %d buffer%u still busy after %lu seconds (status=%u)",
+                         thread_idx, core_id, alternate_buffer_id, elapsed_sec,
+                         static_cast<uint32_t>(alternate_status));
+                last_warn_time = current_time;
+            }
+        }
+
+        // Handle timeout: force clear alternate buffer and continue
+        if (timeout) {
+            // Force reset alternate buffer to IDLE state
+            alternate_buf->count = 0;
+            *alternate_status_ptr = BufferStatus::IDLE;
+            wmb();
+
+            LOG_ERROR("Thread %d: Core %d forced buffer%u to IDLE, performance data lost",
+                     thread_idx, core_id, alternate_buffer_id);
         }
     }
 
