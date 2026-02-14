@@ -65,6 +65,10 @@ struct AicpuExecutor {
     int inactive_aic_count_[MAX_AICPU_THREADS];
     int inactive_aiv_count_[MAX_AICPU_THREADS];
 
+    // Per-thread total core counts (constant after init, used for local queue capacity)
+    int thread_aic_core_count_[MAX_AICPU_THREADS];
+    int thread_aiv_core_count_[MAX_AICPU_THREADS];
+
     // ===== Task queue state =====
     std::mutex ready_queue_aic_mutex_;
     int ready_queue_aic_[RUNTIME_MAX_TASKS];
@@ -185,6 +189,10 @@ int AicpuExecutor::init(Runtime* runtime) {
             }
         }
 
+        // Record total core counts for this thread (constant, used for local queue capacity)
+        thread_aic_core_count_[t] = inactive_aic_count_[t];
+        thread_aiv_core_count_[t] = inactive_aiv_count_[t];
+
         LOG_INFO("Thread %d: Pre-initialized with %d AIC cores, %d AIV cores",
                  t, inactive_aic_count_[t], inactive_aiv_count_[t]);
     }
@@ -210,26 +218,82 @@ int AicpuExecutor::init(Runtime* runtime) {
         core_dispatch_counts_[i] = 0;
     }
 
-    int aic_count = 0;
-    int aiv_count = 0;
+    // Classify initial ready tasks by type
+    int initial_aic[RUNTIME_MAX_TASKS];
+    int initial_aiv[RUNTIME_MAX_TASKS];
+    int initial_aic_count = 0;
+    int initial_aiv_count = 0;
+
     for (int i = 0; i < initial_count; i++) {
         Task* task = runtime->get_task(initial_ready[i]);
-        if (task->core_type == CoreType::AIC) {  // AIC
-            // Enqueue to tail position (circular)
-            ready_queue_aic_[ready_queue_aic_tail_] = initial_ready[i];
-            ready_queue_aic_tail_ = (ready_queue_aic_tail_ + 1) % RUNTIME_MAX_TASKS;
-            aic_count++;
-        } else {  // AIV
-            // Enqueue to tail position (circular)
-            ready_queue_aiv_[ready_queue_aiv_tail_] = initial_ready[i];
-            ready_queue_aiv_tail_ = (ready_queue_aiv_tail_ + 1) % RUNTIME_MAX_TASKS;
-            aiv_count++;
+        if (task->core_type == CoreType::AIC) {
+            initial_aic[initial_aic_count++] = initial_ready[i];
+        } else {
+            initial_aiv[initial_aiv_count++] = initial_ready[i];
         }
     }
-    ready_count_aic_.store(aic_count, std::memory_order_release);
-    ready_count_aiv_.store(aiv_count, std::memory_order_release);
 
-    LOG_INFO("Init: Initial ready tasks: AIC=%d, AIV=%d", aic_count, aiv_count);
+    LOG_INFO("Init: Initial ready tasks by type: AIC=%d, AIV=%d", initial_aic_count, initial_aiv_count);
+
+    // Distribute AIC tasks: first fill per-thread local queues (up to each thread's AIC core count), then shared queue
+    int aic_shared_count = 0;
+    int thread_idx = 0;
+    for (int i = 0; i < initial_aic_count; i++) {
+        int task_id = initial_aic[i];
+
+        // Try to assign to thread's local queue (round-robin)
+        // Limit: local queue size <= thread's total AIC core count (thread_aic_core_count_[thread_idx])
+        if (cur_ready_count_aic_[thread_idx] < thread_aic_core_count_[thread_idx]) {
+            cur_ready_queue_aic_[thread_idx][cur_ready_count_aic_[thread_idx]++] = task_id;
+            LOG_INFO("Init: AIC task %d -> Thread %d local queue (count=%d)",
+                     task_id, thread_idx, cur_ready_count_aic_[thread_idx]);
+        } else {
+            // Local queue full (reached thread's AIC core count), put in shared queue
+            ready_queue_aic_[ready_queue_aic_tail_] = task_id;
+            ready_queue_aic_tail_ = (ready_queue_aic_tail_ + 1) % RUNTIME_MAX_TASKS;
+            aic_shared_count++;
+        }
+
+        // Round-robin to next thread
+        thread_idx = (thread_idx + 1) % thread_num_;
+    }
+
+    // Distribute AIV tasks: first fill per-thread local queues (up to each thread's AIV core count), then shared queue
+    int aiv_shared_count = 0;
+    thread_idx = 0;
+    for (int i = 0; i < initial_aiv_count; i++) {
+        int task_id = initial_aiv[i];
+
+        // Try to assign to thread's local queue (round-robin)
+        // Limit: local queue size <= thread's total AIV core count (thread_aiv_core_count_[thread_idx])
+        if (cur_ready_count_aiv_[thread_idx] < thread_aiv_core_count_[thread_idx]) {
+            cur_ready_queue_aiv_[thread_idx][cur_ready_count_aiv_[thread_idx]++] = task_id;
+            LOG_INFO("Init: AIV task %d -> Thread %d local queue (count=%d)",
+                     task_id, thread_idx, cur_ready_count_aiv_[thread_idx]);
+        } else {
+            // Local queue full (reached thread's AIV core count), put in shared queue
+            ready_queue_aiv_[ready_queue_aiv_tail_] = task_id;
+            ready_queue_aiv_tail_ = (ready_queue_aiv_tail_ + 1) % RUNTIME_MAX_TASKS;
+            aiv_shared_count++;
+        }
+
+        // Round-robin to next thread
+        thread_idx = (thread_idx + 1) % thread_num_;
+    }
+
+    ready_count_aic_.store(aic_shared_count, std::memory_order_release);
+    ready_count_aiv_.store(aiv_shared_count, std::memory_order_release);
+
+    LOG_INFO("Init: Task distribution complete - AIC: %d in local queues, %d in shared queue",
+             initial_aic_count - aic_shared_count, aic_shared_count);
+    LOG_INFO("Init: Task distribution complete - AIV: %d in local queues, %d in shared queue",
+             initial_aiv_count - aiv_shared_count, aiv_shared_count);
+
+    // Log per-thread local queue status
+    for (int t = 0; t < thread_num_; t++) {
+        LOG_INFO("Init: Thread %d local queues - AIC: %d tasks, AIV: %d tasks",
+                 t, cur_ready_count_aic_[t], cur_ready_count_aiv_[t]);
+    }
 
     finished_count_.store(0, std::memory_order_release);
 
@@ -454,7 +518,7 @@ int AicpuExecutor::resolve_and_dispatch(Runtime& runtime, int thread_idx, const 
     // Timeout detection using idle iteration counting
     int idle_iterations = 0;
     const int MAX_IDLE_ITERATIONS = 50000000;
-    const int WARN_INTERVAL = 1000000;
+    const int WARN_INTERVAL = 30000000;
     bool made_progress = false;
 
     int verification_warning_count = 0;
@@ -469,7 +533,11 @@ int AicpuExecutor::resolve_and_dispatch(Runtime& runtime, int thread_idx, const 
     LOG_INFO("Thread %d: Initial state - %d AIC cores, %d AIV cores, %d active",
              thread_idx, inactive_aic_count, inactive_aiv_count, active_count);
 
-    uint64_t dispatch_start_time = 0;
+    uint64_t dispatch_start_time = get_sys_cnt_aicpu();
+    for (int i = 0; i < inactive_aic_count; i++) {
+        int core_id = inactive_aic_cores_[thread_idx][i];
+        dispatch_timestamps_[core_id] = dispatch_start_time;
+    }
 
     // Execute tasks using polling-based dispatch with integrated verification
     while (true) {
@@ -548,8 +616,7 @@ int AicpuExecutor::resolve_and_dispatch(Runtime& runtime, int thread_idx, const 
 
                 LOG_INFO("Thread %d: Core %d completed task %d", thread_idx, core_id, task_id);
 
-                // Update fanin of successors atomically and add to appropriate
-                // shared ready queue
+                // Update fanin of successors atomically and add to local queue first, then shared queue
                 for (int j = 0; j < task->fanout_count; j++) {
                     int dep_id = task->fanout[j];
                     Task* dep = runtime.get_task(dep_id);
@@ -557,25 +624,40 @@ int AicpuExecutor::resolve_and_dispatch(Runtime& runtime, int thread_idx, const 
                     // Atomic decrement fanin
                     int prev_fanin = dep->fanin.fetch_sub(1, std::memory_order_acq_rel);
 
-                    // Dependency resolved, add to appropriate shared ready
-                    // queue
+                    // Dependency resolved, try to add to local queue first
                     if (prev_fanin == 1) {
                         if (dep->core_type == CoreType::AIC) {  // AIC task
-                            std::lock_guard<std::mutex> lock(ready_queue_aic_mutex_);
-                            // Enqueue to tail position (circular)
-                            ready_queue_aic_[ready_queue_aic_tail_] = dep_id;
-                            ready_queue_aic_tail_ = (ready_queue_aic_tail_ + 1) % RUNTIME_MAX_TASKS;
-                            ready_count_aic_.fetch_add(1, std::memory_order_release);
-                            LOG_INFO("Thread %d: Task %d became ready -> AIC queue (tail=%d)",
-                                     thread_idx, dep_id, ready_queue_aic_tail_);
+                            // Try to add to local queue first (no lock needed)
+                            // Use thread's total AIC core count as capacity limit
+                            if (cur_ready_count_aic_[thread_idx] < thread_aic_core_count_[thread_idx]) {
+                                cur_ready_queue_aic_[thread_idx][cur_ready_count_aic_[thread_idx]++] = dep_id;
+                                LOG_INFO("Thread %d: Task %d became ready -> local AIC queue (count=%d)",
+                                         thread_idx, dep_id, cur_ready_count_aic_[thread_idx]);
+                            } else {
+                                // Local queue full, add to shared queue (requires lock)
+                                std::lock_guard<std::mutex> lock(ready_queue_aic_mutex_);
+                                ready_queue_aic_[ready_queue_aic_tail_] = dep_id;
+                                ready_queue_aic_tail_ = (ready_queue_aic_tail_ + 1) % RUNTIME_MAX_TASKS;
+                                ready_count_aic_.fetch_add(1, std::memory_order_release);
+                                LOG_INFO("Thread %d: Task %d became ready -> shared AIC queue (tail=%d)",
+                                         thread_idx, dep_id, ready_queue_aic_tail_);
+                            }
                         } else {  // AIV task
-                            std::lock_guard<std::mutex> lock(ready_queue_aiv_mutex_);
-                            // Enqueue to tail position (circular)
-                            ready_queue_aiv_[ready_queue_aiv_tail_] = dep_id;
-                            ready_queue_aiv_tail_ = (ready_queue_aiv_tail_ + 1) % RUNTIME_MAX_TASKS;
-                            ready_count_aiv_.fetch_add(1, std::memory_order_release);
-                            LOG_INFO("Thread %d: Task %d became ready -> AIV queue (tail=%d)",
-                                     thread_idx, dep_id, ready_queue_aiv_tail_);
+                            // Try to add to local queue first (no lock needed)
+                            // Use thread's total AIV core count as capacity limit
+                            if (cur_ready_count_aiv_[thread_idx] < thread_aiv_core_count_[thread_idx]) {
+                                cur_ready_queue_aiv_[thread_idx][cur_ready_count_aiv_[thread_idx]++] = dep_id;
+                                LOG_INFO("Thread %d: Task %d became ready -> local AIV queue (count=%d)",
+                                         thread_idx, dep_id, cur_ready_count_aiv_[thread_idx]);
+                            } else {
+                                // Local queue full, add to shared queue (requires lock)
+                                std::lock_guard<std::mutex> lock(ready_queue_aiv_mutex_);
+                                ready_queue_aiv_[ready_queue_aiv_tail_] = dep_id;
+                                ready_queue_aiv_tail_ = (ready_queue_aiv_tail_ + 1) % RUNTIME_MAX_TASKS;
+                                ready_count_aiv_.fetch_add(1, std::memory_order_release);
+                                LOG_INFO("Thread %d: Task %d became ready -> shared AIV queue (tail=%d)",
+                                         thread_idx, dep_id, ready_queue_aiv_tail_);
+                            }
                         }
                     }
                 }
@@ -600,22 +682,22 @@ int AicpuExecutor::resolve_and_dispatch(Runtime& runtime, int thread_idx, const 
                 } else {
                     inactive_aiv_cores_[thread_idx][inactive_aiv_count++] = core_id;
                 }
+                if (profiling_enabled) {
+                    dispatch_timestamps_[core_id] = get_sys_cnt_aicpu();
+                }
             }
         }
 
         // Phase 2: Dispatch new tasks to inactive cores
         // Grab tasks from shared queues in batches to reduce lock contention
-        if (profiling_enabled) {
-            dispatch_start_time = get_sys_cnt_aicpu();
-        }
 
-        // Grab AIC tasks if we have inactive AIC cores
-        if (inactive_aic_count > 0 && ready_count_aic_.load(std::memory_order_acquire) > 0) {
+        // Grab AIC tasks from shared queue only if local queue is empty and we have inactive AIC cores
+        if (cur_ready_count_aic_[thread_idx] == 0 && inactive_aic_count > 0 &&
+            ready_count_aic_.load(std::memory_order_acquire) > 0) {
             std::lock_guard<std::mutex> lock(ready_queue_aic_mutex_);
             int available = ready_count_aic_.load(std::memory_order_relaxed);
             int to_grab = (available < inactive_aic_count) ? available : inactive_aic_count;
 
-            cur_ready_count_aic_[thread_idx] = 0;
             for (int i = 0; i < to_grab; i++) {
                 // Dequeue from head position (circular) - FIFO order
                 int task_id = ready_queue_aic_[ready_queue_aic_head_];
@@ -627,13 +709,13 @@ int AicpuExecutor::resolve_and_dispatch(Runtime& runtime, int thread_idx, const 
             LOG_INFO("Thread %d: Grabbed %d AIC tasks from shared queue", thread_idx, to_grab);
         }
 
-        // Grab AIV tasks if we have inactive AIV cores
-        if (inactive_aiv_count > 0 && ready_count_aiv_.load(std::memory_order_acquire) > 0) {
+        // Grab AIV tasks from shared queue only if local queue is empty and we have inactive AIV cores
+        if (cur_ready_count_aiv_[thread_idx] == 0 && inactive_aiv_count > 0 &&
+            ready_count_aiv_.load(std::memory_order_acquire) > 0) {
             std::lock_guard<std::mutex> lock(ready_queue_aiv_mutex_);
             int available = ready_count_aiv_.load(std::memory_order_relaxed);
             int to_grab = (available < inactive_aiv_count) ? available : inactive_aiv_count;
 
-            cur_ready_count_aiv_[thread_idx] = 0;
             for (int i = 0; i < to_grab; i++) {
                 // Dequeue from head position (circular) - FIFO order
                 int task_id = ready_queue_aiv_[ready_queue_aiv_head_];
@@ -653,7 +735,6 @@ int AicpuExecutor::resolve_and_dispatch(Runtime& runtime, int thread_idx, const 
             int task_id = cur_ready_queue_aic_[thread_idx][aic_dispatched++];
 
             if (profiling_enabled) {
-                dispatch_timestamps_[core_id] = dispatch_start_time;
                 core_dispatch_counts_[core_id]++;
                 if (core_dispatch_counts_[core_id] >= PLATFORM_PROF_BUFFER_SIZE - 1) {
                     // Buffer will be full, switch before dispatch
@@ -687,8 +768,17 @@ int AicpuExecutor::resolve_and_dispatch(Runtime& runtime, int thread_idx, const 
         }
         inactive_aic_count = new_inactive_aic_count;
 
-        // Clear local AIC queue
-        cur_ready_count_aic_[thread_idx] = 0;
+        // Remove dispatched tasks from local AIC queue by shifting remaining tasks forward
+        if (aic_dispatched > 0) {
+            int remaining = cur_ready_count_aic_[thread_idx] - aic_dispatched;
+            if (remaining > 0) {
+                // Shift remaining tasks to the front
+                for (int i = 0; i < remaining; i++) {
+                    cur_ready_queue_aic_[thread_idx][i] = cur_ready_queue_aic_[thread_idx][aic_dispatched + i];
+                }
+            }
+            cur_ready_count_aic_[thread_idx] = remaining;
+        }
 
         // Dispatch AIV tasks to inactive AIV cores from local queue
         int aiv_dispatched = 0;
@@ -698,7 +788,6 @@ int AicpuExecutor::resolve_and_dispatch(Runtime& runtime, int thread_idx, const 
             int task_id = cur_ready_queue_aiv_[thread_idx][aiv_dispatched++];
 
             if (profiling_enabled) {
-                dispatch_timestamps_[core_id] = dispatch_start_time;
                 core_dispatch_counts_[core_id]++;
                 if (core_dispatch_counts_[core_id] >= PLATFORM_PROF_BUFFER_SIZE - 1) {
                     // Buffer will be full, switch before dispatch
@@ -732,8 +821,17 @@ int AicpuExecutor::resolve_and_dispatch(Runtime& runtime, int thread_idx, const 
         }
         inactive_aiv_count = new_inactive_aiv_count;
 
-        // Clear local AIV queue
-        cur_ready_count_aiv_[thread_idx] = 0;
+        // Remove dispatched tasks from local AIV queue by shifting remaining tasks forward
+        if (aiv_dispatched > 0) {
+            int remaining = cur_ready_count_aiv_[thread_idx] - aiv_dispatched;
+            if (remaining > 0) {
+                // Shift remaining tasks to the front
+                for (int i = 0; i < remaining; i++) {
+                    cur_ready_queue_aiv_[thread_idx][i] = cur_ready_queue_aiv_[thread_idx][aiv_dispatched + i];
+                }
+            }
+            cur_ready_count_aiv_[thread_idx] = remaining;
+        }
 
         // Timeout detection: track idle iterations when no progress
         if (!made_progress) {
