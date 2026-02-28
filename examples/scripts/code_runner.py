@@ -818,10 +818,27 @@ class CodeRunner:
                 close_mask = torch.isclose(actual, expected, rtol=self.rtol, atol=self.atol)
                 mismatches = (~close_mask).sum().item()
                 total = actual.numel()
+
+                # Show first 10 mismatched values
+                flat_actual = actual.flatten()
+                flat_expected = expected.flatten()
+                mismatch_indices = (~close_mask).flatten().nonzero(as_tuple=True)[0]
+                n_show = min(10, len(mismatch_indices))
+
+                mismatch_details = []
+                for i in range(n_show):
+                    idx = mismatch_indices[i].item()
+                    mismatch_details.append(
+                        f"  [{idx}] actual={flat_actual[idx].item()}, expected={flat_expected[idx].item()}"
+                    )
+
+                mismatch_str = "\n".join(mismatch_details)
+
                 raise AssertionError(
                     f"Output '{name}' does not match golden.\n"
                     f"Mismatched elements: {mismatches}/{total}\n"
-                    f"rtol={self.rtol}, atol={self.atol}"
+                    f"rtol={self.rtol}, atol={self.atol}\n"
+                    f"First {n_show} mismatches:\n{mismatch_str}"
                 )
 
             matched = torch.isclose(actual, expected, rtol=self.rtol, atol=self.atol).sum().item()
