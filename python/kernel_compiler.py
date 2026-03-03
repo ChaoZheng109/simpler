@@ -41,24 +41,24 @@ class KernelCompiler:
         Initialize KernelCompiler.
 
         Args:
-            platform: Target platform ("a2a3" or "a2a3sim")
+            platform: Target platform ("a2a3", "a2a3sim", "a5", or "a5sim")
 
         Raises:
             ValueError: If platform is unknown
-            EnvironmentError: If ASCEND_HOME_PATH is not set for a2a3 platform
+            EnvironmentError: If ASCEND_HOME_PATH is not set for hardware platforms
             FileNotFoundError: If required compiler not found
         """
         self.platform = platform
         self.project_root = Path(__file__).parent.parent
         self.platform_dir = self.project_root / "src" / "platform" / platform
 
-        if platform not in ("a2a3", "a2a3sim"):
+        if platform not in ("a2a3", "a2a3sim", "a5", "a5sim"):
             raise ValueError(
-                f"Unknown platform: {platform}. Supported: a2a3, a2a3sim"
+                f"Unknown platform: {platform}. Supported: a2a3, a2a3sim, a5, a5sim"
             )
 
         # Create toolchain objects based on platform
-        if platform == "a2a3":
+        if platform in ("a2a3", "a5"):
             env_manager.ensure("ASCEND_HOME_PATH")
             self.ccec = CCECToolchain()
             self.aarch64 = Aarch64GxxToolchain()
@@ -269,7 +269,12 @@ class KernelCompiler:
         # Determine toolchain from C++ (with fallback to platform-based logic)
         incore_toolchain = self._get_toolchain(
             get_incore_compiler,
-            {"a2a3": ToolchainType.CCEC, "a2a3sim": ToolchainType.HOST_GXX_15}
+            {
+                "a2a3": ToolchainType.CCEC,
+                "a2a3sim": ToolchainType.HOST_GXX_15,
+                "a5": ToolchainType.CCEC,
+                "a5sim": ToolchainType.HOST_GXX_15,
+            }
         )
 
         # Dispatch based on toolchain
@@ -352,7 +357,12 @@ class KernelCompiler:
         # Resolve toolchain: HOST_GXX needs no runtime-specific extras
         toolchain_type = self._get_toolchain(
             get_orchestration_compiler,
-            {"a2a3": ToolchainType.AARCH64_GXX, "a2a3sim": ToolchainType.HOST_GXX}
+            {
+                "a2a3": ToolchainType.AARCH64_GXX,
+                "a2a3sim": ToolchainType.HOST_GXX,
+                "a5": ToolchainType.AARCH64_GXX,
+                "a5sim": ToolchainType.HOST_GXX,
+            }
         )
         toolchain = self.aarch64 if toolchain_type == ToolchainType.AARCH64_GXX else self.host_gxx
 

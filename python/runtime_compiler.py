@@ -72,17 +72,21 @@ class RuntimeCompiler:
                 f"Platform '{platform}' not found at {self.platform_dir}"
             )
 
-        if platform == "a2a3":
-            self._init_a2a3()
-        elif platform == "a2a3sim":
-            self._init_a2a3sim()
+        if platform in ("a2a3", "a5"):
+            self._init_hardware()
+        elif platform in ("a2a3sim", "a5sim"):
+            self._init_simulation()
         else:
             raise ValueError(
-                f"Unknown platform: {platform}. Supported: a2a3, a2a3sim"
+                f"Unknown platform: {platform}. Supported: a2a3, a2a3sim, a5, a5sim"
             )
 
-    def _init_a2a3(self):
-        """Initialize toolchains for real a2a3 hardware."""
+    def _init_hardware(self):
+        """Initialize toolchains for hardware platforms (a2a3, a5).
+
+        Uses Ascend hardware toolchain: CCEC for AICore, aarch64-g++ for AICPU,
+        and host g++ for Host runtime.
+        """
         env_manager.ensure("ASCEND_HOME_PATH")
 
         # AICore: Bisheng CCE compiler
@@ -104,8 +108,9 @@ class RuntimeCompiler:
             host_gxx, str(self.platform_dir / "host"), "libhost_runtime.so"
         )
 
-    def _init_a2a3sim(self):
-        """Initialize toolchains for simulation platform.
+    def _init_simulation(self):
+        """Initialize toolchains for simulation platforms (a2a3sim, a5sim).
+
         All targets use host gcc/g++ with platform-specific CMake dirs.
         No Ascend SDK required.
         """
