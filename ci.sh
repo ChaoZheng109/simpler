@@ -41,11 +41,26 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# Discover all runtimes from src/{arch}/runtime/
+ALL_RUNTIMES=()
+for arch_dir in src/*/runtime; do
+    if [[ -d "$arch_dir" ]]; then
+        for rt_dir in "$arch_dir"/*; do
+            if [[ -d "$rt_dir" && -f "$rt_dir/build_config.py" ]]; then
+                rt_name=$(basename "$rt_dir")
+                # Add to list if not already present
+                if [[ ! " ${ALL_RUNTIMES[*]} " =~ " ${rt_name} " ]]; then
+                    ALL_RUNTIMES+=("$rt_name")
+                fi
+            fi
+        done
+    fi
+done
+
 # Validate runtime if specified
 if [[ -n "$RUNTIME" ]]; then
-    VALID_RUNTIMES=("host_build_graph" "aicpu_build_graph" "tensormap_and_ringbuffer")
     RUNTIME_VALID=false
-    for r in "${VALID_RUNTIMES[@]}"; do
+    for r in "${ALL_RUNTIMES[@]}"; do
         if [[ "$RUNTIME" == "$r" ]]; then
             RUNTIME_VALID=true
             break
@@ -53,7 +68,7 @@ if [[ -n "$RUNTIME" ]]; then
     done
     if [[ "$RUNTIME_VALID" == "false" ]]; then
         echo "Unknown runtime: $RUNTIME"
-        echo "Valid runtimes: ${VALID_RUNTIMES[*]}"
+        echo "Valid runtimes: ${ALL_RUNTIMES[*]}"
         exit 1
     fi
 fi
@@ -75,10 +90,38 @@ echo "Running tests on $OS..."
 
 OVERALL_EXIT=0
 
+# Dynamically discover platform-to-runtime mapping from src/ directory structure
+declare -A PLATFORM_RUNTIMES=()
+for arch_dir in src/*/; do
+    [[ -d "$arch_dir" ]] || continue
+    arch=$(basename "$arch_dir")
+
+    # Get runtimes for this architecture
+    runtimes=()
+    rt_dir="${arch_dir}runtime"
+    if [[ -d "$rt_dir" ]]; then
+        for rt in "$rt_dir"/*; do
+            if [[ -d "$rt" && -f "$rt/build_config.py" ]]; then
+                runtimes+=($(basename "$rt"))
+            fi
+        done
+    fi
+
+    # Sort runtimes
+    IFS=$'\n' runtimes=($(sort <<<"${runtimes[*]}"))
+    unset IFS
+    runtime_str="${runtimes[*]}"
+
+    # Add platforms if they exist
+    [[ -d "${arch_dir}platform/onboard" ]] && PLATFORM_RUNTIMES[$arch]="$runtime_str"
+    [[ -d "${arch_dir}platform/sim" ]] && PLATFORM_RUNTIMES[${arch}sim]="$runtime_str"
+done
+
 # Run pytest synchronously first
-if [[ -d "tests" && "$OS" == "Linux" && "$PLATFORM" != "a2a3sim" ]]; then
-    echo "Running pytest tests..."
-    if ! pytest tests -v; then
+# Skip pytest for all simulation platforms (a2a3sim, a5sim, etc.)
+if [[ -d "tests" && "$OS" == "Linux" && ! "$PLATFORM" =~ sim$ ]]; then
+    echo "Running pytest tests for platform: $PLATFORM..."
+    if ! pytest tests -v --platform="$PLATFORM"; then
         echo "PYTEST FAILED"
         OVERALL_EXIT=1
     fi
@@ -146,19 +189,28 @@ while IFS= read -r -d '' example_dir; do
     [[ -f "$kernel_config" && -f "$golden" ]] || continue
 
     example_name="${example_dir#$EXAMPLES_DIR/}"
+    example_runtime="${example_name%%/*}"  # Extract runtime from path
 
     # Filter by runtime if specified
     if [[ -n "$RUNTIME" && "$example_name" != "$RUNTIME"/* ]]; then
         continue
     fi
 
+    # Filter by platform's supported runtimes
     if [[ -n "$PLATFORM" ]]; then
-        if [[ "$PLATFORM" == "a2a3" ]]; then
-            HW_TASK_NAMES+=("example:${example_name}")
-            HW_TASK_DIRS+=("${example_dir}")
-        else
+        platform_runtimes="${PLATFORM_RUNTIMES[$PLATFORM]}"
+        if [[ ! " $platform_runtimes " =~ " $example_runtime " ]]; then
+            continue  # Skip unsupported runtime for this platform
+        fi
+    fi
+
+    if [[ -n "$PLATFORM" ]]; then
+        if [[ "$PLATFORM" =~ sim$ ]]; then
             SIM_TASK_NAMES+=("example:${example_name}")
             SIM_TASK_DIRS+=("${example_dir}")
+        else
+            HW_TASK_NAMES+=("example:${example_name}")
+            HW_TASK_DIRS+=("${example_dir}")
         fi
     elif [[ "$OS" == "Darwin" ]]; then
         SIM_TASK_NAMES+=("example:${example_name}")
@@ -174,7 +226,7 @@ done < <(find "$EXAMPLES_DIR" -mindepth 1 -type d -print0 | sort -z)
 # Discover device tests (hardware only)
 if [[ -d "$DEVICE_TESTS_DIR" ]]; then
     RUN_DEVICE_TESTS=false
-    [[ "$PLATFORM" == "a2a3" ]] && RUN_DEVICE_TESTS=true
+    [[ -n "$PLATFORM" && ! "$PLATFORM" =~ sim$ ]] && RUN_DEVICE_TESTS=true
     [[ -z "$PLATFORM" && "$OS" == "Linux" ]] && RUN_DEVICE_TESTS=true
 
     if [[ "$RUN_DEVICE_TESTS" == "true" ]]; then
@@ -183,19 +235,34 @@ if [[ -d "$DEVICE_TESTS_DIR" ]]; then
             golden="${test_dir}/golden.py"
             [[ -f "$kernel_config" && -f "$golden" ]] || continue
             test_name="${test_dir#$DEVICE_TESTS_DIR/}"
+            test_runtime="${test_name%%/*}"  # Extract runtime from path
+
             # Filter by runtime if specified
             if [[ -n "$RUNTIME" && "$test_name" != "$RUNTIME"/* ]]; then
                 continue
             fi
+
+            # Filter by platform's supported runtimes
+            if [[ -n "$PLATFORM" ]]; then
+                platform_runtimes="${PLATFORM_RUNTIMES[$PLATFORM]}"
+                if [[ ! " $platform_runtimes " =~ " $test_runtime " ]]; then
+                    continue  # Skip unsupported runtime for this platform
+                fi
+            fi
+
             HW_TASK_NAMES+=("device_test:${test_name}")
             HW_TASK_DIRS+=("${test_dir}")
         done < <(find "$DEVICE_TESTS_DIR" -mindepth 1 -type d -print0 | sort -z)
     else
-        echo "Skipping device tests (a2a3 hardware only)"
+        echo "Skipping device tests (hardware platforms only)"
     fi
 fi
 
 echo "Discovered ${#HW_TASK_NAMES[@]} hardware tasks, ${#SIM_TASK_NAMES[@]} simulation tasks"
+
+# Determine platforms for execution
+HW_PLATFORM="${PLATFORM:-a2a3}"
+SIM_PLATFORM="${PLATFORM:-a2a3sim}"
 
 MAX_RETRIES=3
 
@@ -256,7 +323,7 @@ run_sim_tasks() {
         local -a pids=()
         for idx in "${indices[@]}"; do
             (
-                if run_task "${SIM_TASK_NAMES[$idx]}" "${SIM_TASK_DIRS[$idx]}" a2a3sim "$attempt"; then
+                if run_task "${SIM_TASK_NAMES[$idx]}" "${SIM_TASK_DIRS[$idx]}" "$SIM_PLATFORM" "$attempt"; then
                     echo "${idx}|PASS" >> "$sim_marker"
                 else
                     echo "${idx}|FAIL" >> "$sim_marker"
@@ -267,7 +334,7 @@ run_sim_tasks() {
         for pid in "${pids[@]}"; do wait "$pid" 2>/dev/null || true; done
     else
         for idx in "${indices[@]}"; do
-            if run_task "${SIM_TASK_NAMES[$idx]}" "${SIM_TASK_DIRS[$idx]}" a2a3sim "$attempt"; then
+            if run_task "${SIM_TASK_NAMES[$idx]}" "${SIM_TASK_DIRS[$idx]}" "$SIM_PLATFORM" "$attempt"; then
                 echo "${idx}|PASS" >> "$sim_marker"
             else
                 echo "${idx}|FAIL" >> "$sim_marker"
@@ -314,7 +381,7 @@ run_hw_tasks() {
 
                 IFS=':' read -r idx attempt <<< "$entry"
 
-                if run_task "${HW_TASK_NAMES[$idx]}" "${HW_TASK_DIRS[$idx]}" a2a3 "$attempt" "$device_id"; then
+                if run_task "${HW_TASK_NAMES[$idx]}" "${HW_TASK_DIRS[$idx]}" "$HW_PLATFORM" "$attempt" "$device_id"; then
                     echo "${idx}|PASS" >> "$hw_marker"
                 else
                     next=$((attempt + 1))
