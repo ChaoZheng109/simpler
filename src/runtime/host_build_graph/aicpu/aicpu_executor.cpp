@@ -4,7 +4,6 @@
 
 #include "aicpu/device_log.h"
 #include "aicpu/device_time.h"
-#include "spin_hint.h"
 #include "aicpu/performance_collector_aicpu.h"
 #include "aicpu/platform_regs.h"
 #include "common/memory_barrier.h"
@@ -12,6 +11,7 @@
 #include "common/platform_config.h"
 #include "common/unified_log.h"
 #include "runtime.h"
+#include "spin_hint.h"
 
 constexpr int MAX_AICPU_THREADS = PLATFORM_MAX_AICPU_THREADS;
 constexpr int MAX_CORES_PER_THREAD = PLATFORM_MAX_CORES_PER_THREAD;
@@ -23,6 +23,164 @@ struct CoreInfo {
     uint32_t physical_core_id;  // Hardware physical core ID (from AICore)
     uint64_t reg_addr;          // Cached register address for fast access
     CoreType core_type;
+};
+
+// ===== Lock-free MPMC Queue =====
+struct MPMCQueue {
+    int buffer[RUNTIME_MAX_TASKS];
+    alignas(64) std::atomic<uint64_t> head;
+    alignas(64) std::atomic<uint64_t> tail;
+    uint32_t capacity;
+    uint32_t mask;
+
+    void init(uint32_t size) {
+        capacity = size;
+        mask = size - 1;
+        head.store(0, std::memory_order_relaxed);
+        tail.store(0, std::memory_order_relaxed);
+    }
+
+    // Single push - returns false if queue is full
+    bool push(int item) {
+        uint64_t current_tail = tail.load(std::memory_order_relaxed);
+
+        uint32_t tail_idx = static_cast<uint32_t>(current_tail & 0xFFFFFFFF);
+        uint32_t tail_gen = static_cast<uint32_t>(current_tail >> 32);
+
+        uint64_t current_head = head.load(std::memory_order_acquire);
+        uint32_t head_idx = static_cast<uint32_t>(current_head & 0xFFFFFFFF);
+
+        // Check if queue is full
+        uint32_t next_idx = (tail_idx + 1) & mask;
+        if (next_idx == head_idx) {
+            return false;  // Queue full
+        }
+
+        // CAS update tail (with generation to prevent ABA)
+        uint64_t new_tail = (static_cast<uint64_t>(tail_gen + 1) << 32) | next_idx;
+        if (tail.compare_exchange_strong(
+                current_tail, new_tail, std::memory_order_release, std::memory_order_relaxed)) {
+            // Successfully reserved slot, write data
+            buffer[tail_idx] = item;
+            return true;
+        }
+
+        return false;  // CAS failed, another thread won
+    }
+
+    // Try push with retry - loops calling push() until success
+    void try_push(int item) {
+        while (!push(item)) {
+            // Queue full or CAS failed, retry with spin hint
+            SPIN_WAIT_HINT();
+        }
+    }
+
+    // Single pop - returns false if queue is empty
+    bool pop(int& result) {
+        uint64_t current_head = head.load(std::memory_order_relaxed);
+
+        uint32_t head_idx = static_cast<uint32_t>(current_head & 0xFFFFFFFF);
+        uint32_t head_gen = static_cast<uint32_t>(current_head >> 32);
+
+        uint64_t current_tail = tail.load(std::memory_order_acquire);
+        uint32_t tail_idx = static_cast<uint32_t>(current_tail & 0xFFFFFFFF);
+
+        // Queue empty check
+        if (head_idx == tail_idx) {
+            return false;
+        }
+
+        // Read data before CAS
+        result = buffer[head_idx];
+
+        // CAS update head
+        uint32_t new_head_idx = (head_idx + 1) & mask;
+        uint64_t new_head = (static_cast<uint64_t>(head_gen + 1) << 32) | new_head_idx;
+
+        if (head.compare_exchange_strong(
+                current_head, new_head, std::memory_order_release, std::memory_order_relaxed)) {
+            return true;
+        }
+
+        return false;  // CAS failed, another thread won
+    }
+
+    // Try pop with retry - loops calling pop() until success or truly empty
+    bool try_pop(int& result) {
+        while (true) {
+            if (pop(result)) {
+                return true;  // Successfully dequeued
+            }
+            // Queue empty or CAS failed - check if truly empty
+            uint64_t current_tail = tail.load(std::memory_order_acquire);
+            uint64_t current_head = head.load(std::memory_order_relaxed);
+            uint32_t tail_idx = static_cast<uint32_t>(current_tail & 0xFFFFFFFF);
+            uint32_t head_idx = static_cast<uint32_t>(current_head & 0xFFFFFFFF);
+
+            if (head_idx == tail_idx) {
+                return false;  // Truly empty
+            }
+            // Not empty, just CAS conflict - retry
+            SPIN_WAIT_HINT();
+        }
+    }
+
+    // Try pop batch with retry - returns number of items dequeued
+    int32_t try_pop_batch(int* output_buffer, int32_t max_count) {
+        while (true) {
+            uint64_t current_head = head.load(std::memory_order_relaxed);
+
+            uint32_t head_idx = static_cast<uint32_t>(current_head & 0xFFFFFFFF);
+            uint32_t head_gen = static_cast<uint32_t>(current_head >> 32);
+
+            uint64_t current_tail = tail.load(std::memory_order_acquire);
+            uint32_t tail_idx = static_cast<uint32_t>(current_tail & 0xFFFFFFFF);
+
+            // Calculate available items
+            int32_t available;
+            if (tail_idx >= head_idx) {
+                available = static_cast<int32_t>(tail_idx - head_idx);
+            } else {
+                available = static_cast<int32_t>(capacity - head_idx + tail_idx);
+            }
+
+            if (available == 0) {
+                return 0;  // Queue empty
+            }
+
+            // Decide actual grab count
+            int32_t to_grab = (available < max_count) ? available : max_count;
+
+            // CAS to reserve multiple slots at once
+            uint32_t new_head_idx = (head_idx + static_cast<uint32_t>(to_grab)) & mask;
+            uint64_t new_head = (static_cast<uint64_t>(head_gen + static_cast<uint32_t>(to_grab)) << 32) | new_head_idx;
+
+            if (head.compare_exchange_weak(
+                    current_head, new_head, std::memory_order_release, std::memory_order_relaxed)) {
+                // Successfully reserved, batch copy data
+                for (int32_t i = 0; i < to_grab; i++) {
+                    output_buffer[i] = buffer[(head_idx + static_cast<uint32_t>(i)) & mask];
+                }
+                return to_grab;
+            }
+            // CAS failed, retry
+        }
+    }
+
+    // Approximate size (non-blocking, may be stale)
+    int32_t approximate_size() const {
+        uint64_t t = tail.load(std::memory_order_relaxed);
+        uint64_t h = head.load(std::memory_order_relaxed);
+        uint32_t tail_idx = static_cast<uint32_t>(t & 0xFFFFFFFF);
+        uint32_t head_idx = static_cast<uint32_t>(h & 0xFFFFFFFF);
+
+        if (tail_idx >= head_idx) {
+            return static_cast<int32_t>(tail_idx - head_idx);
+        } else {
+            return static_cast<int32_t>(capacity - head_idx + tail_idx);
+        }
+    }
 };
 
 struct AicpuExecutor {
@@ -67,17 +225,9 @@ struct AicpuExecutor {
     int cur_ready_queue_aiv_tail_[MAX_AICPU_THREADS];
 
     // ===== Task queue state =====
-    std::mutex ready_queue_aic_mutex_;
-    int ready_queue_aic_[RUNTIME_MAX_TASKS];
-    std::atomic<int> ready_count_aic_{0};
-    int ready_queue_aic_head_{0};  // Circular queue: read position (front)
-    int ready_queue_aic_tail_{0};  // Circular queue: write position (back)
-
-    std::mutex ready_queue_aiv_mutex_;
-    int ready_queue_aiv_[RUNTIME_MAX_TASKS];
-    std::atomic<int> ready_count_aiv_{0};
-    int ready_queue_aiv_head_{0};  // Circular queue: read position (front)
-    int ready_queue_aiv_tail_{0};  // Circular queue: write position (back)
+    // Lock-free shared ready queues using MPMCQueue
+    MPMCQueue ready_queue_aic_;
+    MPMCQueue ready_queue_aiv_;
 
     // Task execution tracking
     std::atomic<int> completed_tasks_{0};
@@ -85,8 +235,8 @@ struct AicpuExecutor {
     std::atomic<int> finished_count_{0};
 
     // ===== Performance profiling state =====
-    uint64_t dispatch_timestamps_[RUNTIME_MAX_WORKER];  // Per-core AICPU dispatch timestamp
-    uint32_t core_dispatch_counts_[RUNTIME_MAX_WORKER]; // Per-core total dispatched task counter
+    uint64_t dispatch_timestamps_[RUNTIME_MAX_WORKER];   // Per-core AICPU dispatch timestamp
+    uint32_t core_dispatch_counts_[RUNTIME_MAX_WORKER];  // Per-core total dispatched task counter
 
     // ===== Methods =====
     int init(Runtime* runtime);
@@ -147,10 +297,8 @@ inline void AicpuExecutor::resolve_task_dependencies(Task* task,
                     cur_aic_tail = (cur_aic_tail + 1) % MAX_CORES_PER_THREAD;
                     cur_aic_ready_count++;
                 } else {
-                    std::lock_guard<std::mutex> lock(ready_queue_aic_mutex_);
-                    ready_queue_aic_[ready_queue_aic_tail_] = dep_id;
-                    ready_queue_aic_tail_ = (ready_queue_aic_tail_ + 1) % RUNTIME_MAX_TASKS;
-                    ready_count_aic_.fetch_add(1, std::memory_order_release);
+                    // Local queue full, overflow to lock-free shared queue
+                    ready_queue_aic_.try_push(dep_id);
                 }
             } else {
                 if (cur_aiv_ready_count < aiv_per_thread_) {
@@ -158,10 +306,8 @@ inline void AicpuExecutor::resolve_task_dependencies(Task* task,
                     cur_aiv_tail = (cur_aiv_tail + 1) % MAX_CORES_PER_THREAD;
                     cur_aiv_ready_count++;
                 } else {
-                    std::lock_guard<std::mutex> lock(ready_queue_aiv_mutex_);
-                    ready_queue_aiv_[ready_queue_aiv_tail_] = dep_id;
-                    ready_queue_aiv_tail_ = (ready_queue_aiv_tail_ + 1) % RUNTIME_MAX_TASKS;
-                    ready_count_aiv_.fetch_add(1, std::memory_order_release);
+                    // Local queue full, overflow to lock-free shared queue
+                    ready_queue_aiv_.try_push(dep_id);
                 }
             }
         }
@@ -337,7 +483,9 @@ int AicpuExecutor::handshake_all_cores(Runtime* runtime) {
         // Validate physical_core_id before using as array index
         if (physical_core_id >= max_physical_cores_count) {
             LOG_ERROR("Core %d reported invalid physical_core_id=%u (platform max=%u)",
-                      i, physical_core_id, max_physical_cores_count);
+                i,
+                physical_core_id,
+                max_physical_cores_count);
             handshake_failed = true;
             continue;
         }
@@ -449,10 +597,10 @@ void AicpuExecutor::assign_cores_to_threads() {
 
 // Classify and distribute initial ready tasks to thread-local and shared queues
 void AicpuExecutor::classify_and_distribute_initial_tasks(Runtime* runtime) {
-    ready_queue_aic_head_ = 0;
-    ready_queue_aic_tail_ = 0;
-    ready_queue_aiv_head_ = 0;
-    ready_queue_aiv_tail_ = 0;
+    // Initialize MPMCQueue instances
+    ready_queue_aic_.init(RUNTIME_MAX_TASKS);
+    ready_queue_aiv_.init(RUNTIME_MAX_TASKS);
+
     int initial_ready[RUNTIME_MAX_TASKS];
     int initial_count = runtime->get_initial_ready_tasks(initial_ready);
 
@@ -496,14 +644,13 @@ void AicpuExecutor::classify_and_distribute_initial_tasks(Runtime* runtime) {
             cur_ready_queue_aic_tail_[thread_idx] = (tail + 1) % MAX_CORES_PER_THREAD;
             LOG_INFO("Init: AIC task %d -> Thread %d local queue (size=%d)", task_id, thread_idx, cur_size + 1);
         } else {
-            ready_queue_aic_[ready_queue_aic_tail_] = task_id;
-            ready_queue_aic_tail_ = (ready_queue_aic_tail_ + 1) % RUNTIME_MAX_TASKS;
+            // Overflow to lock-free shared queue
+            ready_queue_aic_.try_push(task_id);
             aic_shared_count++;
         }
 
         thread_idx = (thread_idx + 1) % thread_num_;
     }
-    ready_count_aic_.store(aic_shared_count, std::memory_order_release);
 
     int aiv_shared_count = 0;
     thread_idx = 0;
@@ -519,14 +666,13 @@ void AicpuExecutor::classify_and_distribute_initial_tasks(Runtime* runtime) {
             cur_ready_queue_aiv_tail_[thread_idx] = (tail + 1) % MAX_CORES_PER_THREAD;
             LOG_INFO("Init: AIV task %d -> Thread %d local queue (size=%d)", task_id, thread_idx, cur_size + 1);
         } else {
-            ready_queue_aiv_[ready_queue_aiv_tail_] = task_id;
-            ready_queue_aiv_tail_ = (ready_queue_aiv_tail_ + 1) % RUNTIME_MAX_TASKS;
+            // Overflow to lock-free shared queue
+            ready_queue_aiv_.try_push(task_id);
             aiv_shared_count++;
         }
 
         thread_idx = (thread_idx + 1) % thread_num_;
     }
-    ready_count_aiv_.store(aiv_shared_count, std::memory_order_release);
 
     LOG_INFO("Init: Task distribution complete - AIC: %d in local queues, %d in shared queue",
         initial_aic_count - aic_shared_count,
@@ -626,12 +772,12 @@ int AicpuExecutor::resolve_and_dispatch(Runtime& runtime, int thread_idx, const 
             int reg_state = EXTRACT_TASK_STATE(reg_val);
 
             // Case 1: Pending task finished directly
-            if (reg_task_id == pending_task_ids_[core_id] &&
-                reg_state == TASK_FIN_STATE) {
-
+            if (reg_task_id == pending_task_ids_[core_id] && reg_state == TASK_FIN_STATE) {
                 LOG_INFO("Thread %d: Core %d completed task %d (running_id=%d)",
-                         thread_idx, core_id, pending_task_ids_[core_id], running_task_ids_[core_id]);
-                
+                    thread_idx,
+                    core_id,
+                    pending_task_ids_[core_id],
+                    running_task_ids_[core_id]);
 
                 int completed_task_id = pending_task_ids_[core_id];
 
@@ -701,8 +847,7 @@ int AicpuExecutor::resolve_and_dispatch(Runtime& runtime, int thread_idx, const 
                         cur_aiv_tail,
                         cur_aiv_ready_count);
 
-                    LOG_INFO("Thread %d: Core %d resolved old running task %d",
-                             thread_idx, core_id, prev_running_id);
+                    LOG_INFO("Thread %d: Core %d resolved old running task %d", thread_idx, core_id, prev_running_id);
                 }
 
                 Task* task = runtime.get_task(completed_task_id);
@@ -724,11 +869,12 @@ int AicpuExecutor::resolve_and_dispatch(Runtime& runtime, int thread_idx, const 
             }
 
             // Case 2: Pending task received ACK
-            else if (reg_task_id == pending_task_ids_[core_id] &&
-                     reg_state == TASK_ACK_STATE) {
-
+            else if (reg_task_id == pending_task_ids_[core_id] && reg_state == TASK_ACK_STATE) {
                 LOG_INFO("Thread %d: Core %d ACKed task %d (running_id=%d)",
-                         thread_idx, core_id, pending_task_ids_[core_id], running_task_ids_[core_id]);
+                    thread_idx,
+                    core_id,
+                    pending_task_ids_[core_id],
+                    running_task_ids_[core_id]);
 
                 int prev_running_id = running_task_ids_[core_id];
 
@@ -754,8 +900,7 @@ int AicpuExecutor::resolve_and_dispatch(Runtime& runtime, int thread_idx, const 
                         cur_aiv_tail,
                         cur_aiv_ready_count);
 
-                    LOG_INFO("Thread %d: Core %d resolved old running task %d",
-                             thread_idx, core_id, prev_running_id);
+                    LOG_INFO("Thread %d: Core %d resolved old running task %d", thread_idx, core_id, prev_running_id);
                 }
 
                 // Core can accept new task now (pipeline!)
@@ -763,11 +908,12 @@ int AicpuExecutor::resolve_and_dispatch(Runtime& runtime, int thread_idx, const 
             }
 
             // Case 3: Running task finished
-            else if (reg_task_id == running_task_ids_[core_id] &&
-                     reg_state == TASK_FIN_STATE) {
-
+            else if (reg_task_id == running_task_ids_[core_id] && reg_state == TASK_FIN_STATE) {
                 LOG_INFO("Thread %d: Core %d completed task %d (pending_id=%d)",
-                         thread_idx, core_id, running_task_ids_[core_id], pending_task_ids_[core_id]);
+                    thread_idx,
+                    core_id,
+                    running_task_ids_[core_id],
+                    pending_task_ids_[core_id]);
 
                 int completed_task_id = running_task_ids_[core_id];
 
@@ -866,42 +1012,50 @@ int AicpuExecutor::resolve_and_dispatch(Runtime& runtime, int thread_idx, const 
 
         // Refill local queues from shared queues
         if (cur_aic_ready_count == 0) {
-            if (ready_count_aic_.load(std::memory_order_acquire) > 0) {
-                std::lock_guard<std::mutex> lock(ready_queue_aic_mutex_);
-                int available = ready_count_aic_.load(std::memory_order_relaxed);
-                int to_grab = (available < aic_per_thread_) ? available : aic_per_thread_;
+            // Quick check: avoid batch dequeue if shared queue is likely empty
+            if (ready_queue_aic_.approximate_size() > 0) {
+                // Dynamically adjust batch size
+                int32_t max_to_grab = aic_per_thread_;
+                if (max_to_grab > 16) max_to_grab = 16;  // Cap at 16 for batch efficiency
+                if (max_to_grab < 1) max_to_grab = 1;
 
-                for (int i = 0; i < to_grab; i++) {
-                    int task_id = ready_queue_aic_[ready_queue_aic_head_];
-                    ready_queue_aic_head_ = (ready_queue_aic_head_ + 1) % RUNTIME_MAX_TASKS;
-                    cur_ready_queue_aic[cur_aic_tail] = task_id;
-                    cur_aic_tail = (cur_aic_tail + 1) % MAX_CORES_PER_THREAD;
+                int buffer[16];
+                int32_t grabbed = ready_queue_aic_.try_pop_batch(buffer, max_to_grab);
+
+                if (grabbed > 0) {
+                    // Fill into local queue
+                    for (int32_t i = 0; i < grabbed; i++) {
+                        cur_ready_queue_aic[cur_aic_tail] = buffer[i];
+                        cur_aic_tail = (cur_aic_tail + 1) % MAX_CORES_PER_THREAD;
+                    }
+                    cur_aic_ready_count += grabbed;
+
+                    LOG_INFO("Thread %d: Grabbed %d AIC tasks from shared queue", thread_idx, grabbed);
                 }
-                ready_count_aic_.fetch_sub(to_grab, std::memory_order_release);
-                cur_aic_ready_count += to_grab;
-
-                LOG_INFO(
-                    "Thread %d: Grabbed %d AIC tasks from shared queue (available=%d)", thread_idx, to_grab, available);
             }
         }
 
         if (cur_aiv_ready_count == 0) {
-            if (ready_count_aiv_.load(std::memory_order_acquire) > 0) {
-                std::lock_guard<std::mutex> lock(ready_queue_aiv_mutex_);
-                int available = ready_count_aiv_.load(std::memory_order_relaxed);
-                int to_grab = (available < aiv_per_thread_) ? available : aiv_per_thread_;
+            // Quick check: avoid batch dequeue if shared queue is likely empty
+            if (ready_queue_aiv_.approximate_size() > 0) {
+                // Dynamically adjust batch size
+                int32_t max_to_grab = aiv_per_thread_;
+                if (max_to_grab > 16) max_to_grab = 16;
+                if (max_to_grab < 1) max_to_grab = 1;
 
-                for (int i = 0; i < to_grab; i++) {
-                    int task_id = ready_queue_aiv_[ready_queue_aiv_head_];
-                    ready_queue_aiv_head_ = (ready_queue_aiv_head_ + 1) % RUNTIME_MAX_TASKS;
-                    cur_ready_queue_aiv[cur_aiv_tail] = task_id;
-                    cur_aiv_tail = (cur_aiv_tail + 1) % MAX_CORES_PER_THREAD;
+                int buffer[16];
+                int32_t grabbed = ready_queue_aiv_.try_pop_batch(buffer, max_to_grab);
+
+                if (grabbed > 0) {
+                    // Fill into local queue
+                    for (int32_t i = 0; i < grabbed; i++) {
+                        cur_ready_queue_aiv[cur_aiv_tail] = buffer[i];
+                        cur_aiv_tail = (cur_aiv_tail + 1) % MAX_CORES_PER_THREAD;
+                    }
+                    cur_aiv_ready_count += grabbed;
+
+                    LOG_INFO("Thread %d: Grabbed %d AIV tasks from shared queue", thread_idx, grabbed);
                 }
-                ready_count_aiv_.fetch_sub(to_grab, std::memory_order_release);
-                cur_aiv_ready_count += to_grab;
-
-                LOG_INFO(
-                    "Thread %d: Grabbed %d AIV tasks from shared queue (available=%d)", thread_idx, to_grab, available);
             }
         }
 
@@ -911,7 +1065,8 @@ int AicpuExecutor::resolve_and_dispatch(Runtime& runtime, int thread_idx, const 
 
             for (int i = 0; i < core_num; i++) {
                 int core_id = cur_thread_cores[i];
-                if (pending_task_ids_[core_id] != AICPU_TASK_INVALID || running_task_ids_[core_id] != AICPU_TASK_INVALID) {
+                if (pending_task_ids_[core_id] != AICPU_TASK_INVALID ||
+                    running_task_ids_[core_id] != AICPU_TASK_INVALID) {
                     all_cores_idle = false;
 
                     if (verification_warning_count == 0) {
@@ -934,8 +1089,8 @@ int AicpuExecutor::resolve_and_dispatch(Runtime& runtime, int thread_idx, const 
 
             if (all_cores_idle) {
                 // Truly complete: counter reached and all cores idle
-                int aic_remaining = ready_count_aic_.load(std::memory_order_acquire);
-                int aiv_remaining = ready_count_aiv_.load(std::memory_order_acquire);
+                int32_t aic_remaining = ready_queue_aic_.approximate_size();
+                int32_t aiv_remaining = ready_queue_aiv_.approximate_size();
                 if (aic_remaining > 0 || aiv_remaining > 0) {
                     LOG_WARN("Thread %d: Queues not empty after completion! AIC=%d, AIV=%d",
                         thread_idx,
@@ -1016,13 +1171,9 @@ int AicpuExecutor::run(Runtime* runtime) {
 }
 
 void AicpuExecutor::deinit() {
-    ready_count_aic_.store(0, std::memory_order_release);
-    ready_count_aiv_.store(0, std::memory_order_release);
-
-    ready_queue_aic_head_ = 0;
-    ready_queue_aic_tail_ = 0;
-    ready_queue_aiv_head_ = 0;
-    ready_queue_aiv_tail_ = 0;
+    // Reset MPMCQueue instances
+    ready_queue_aic_.init(RUNTIME_MAX_TASKS);
+    ready_queue_aiv_.init(RUNTIME_MAX_TASKS);
 
     for (int i = 0; i < RUNTIME_MAX_WORKER; i++) {
         dispatch_timestamps_[i] = 0;
@@ -1072,8 +1223,8 @@ void AicpuExecutor::diagnose_stuck_state(
     int total = total_tasks_.load(std::memory_order_acquire);
     LOG_ERROR("Progress: %d/%d tasks (%.1f%%)", completed, total, total > 0 ? completed * 100.0 / total : 0.0);
 
-    int aic_ready = ready_count_aic_.load(std::memory_order_acquire);
-    int aiv_ready = ready_count_aiv_.load(std::memory_order_acquire);
+    int32_t aic_ready = ready_queue_aic_.approximate_size();
+    int32_t aiv_ready = ready_queue_aiv_.approximate_size();
     LOG_ERROR("Ready Queues: AIC=%d, AIV=%d", aic_ready, aiv_ready);
 
     int busy_cores = 0;
