@@ -292,7 +292,7 @@ inline void AicpuExecutor::resolve_task_dependencies(Task* task,
 
         if (prev_fanin == 1) {
             if (dep->core_type == CoreType::AIC) {
-                if (cur_aic_ready_count < aic_per_thread_) {
+                if (cur_aic_ready_count < aic_per_thread_ * 4) {
                     cur_ready_queue_aic[cur_aic_tail] = dep_id;
                     cur_aic_tail = (cur_aic_tail + 1) % MAX_CORES_PER_THREAD;
                     cur_aic_ready_count++;
@@ -301,7 +301,7 @@ inline void AicpuExecutor::resolve_task_dependencies(Task* task,
                     ready_queue_aic_.try_push(dep_id);
                 }
             } else {
-                if (cur_aiv_ready_count < aiv_per_thread_) {
+                if (cur_aiv_ready_count < aiv_per_thread_ * 4) {
                     cur_ready_queue_aiv[cur_aiv_tail] = dep_id;
                     cur_aiv_tail = (cur_aiv_tail + 1) % MAX_CORES_PER_THREAD;
                     cur_aiv_ready_count++;
@@ -761,6 +761,9 @@ int AicpuExecutor::resolve_and_dispatch(Runtime& runtime, int thread_idx, const 
     }
 
     // Main execution loop with unified scheduling
+    uint64_t loop_start_time = get_sys_cnt_aicpu();
+    DEV_ALWAYS("Thread %d: Main execution loop starting at %.3fus", thread_idx, cycles_to_us(loop_start_time));
+
     while (true) {
         for (int i = 0; i < core_num; i++) {
             int core_id = cur_thread_cores[i];
@@ -1015,11 +1018,10 @@ int AicpuExecutor::resolve_and_dispatch(Runtime& runtime, int thread_idx, const 
             // Quick check: avoid batch dequeue if shared queue is likely empty
             if (ready_queue_aic_.approximate_size() > 0) {
                 // Dynamically adjust batch size
-                int32_t max_to_grab = aic_per_thread_;
-                if (max_to_grab > 16) max_to_grab = 16;  // Cap at 16 for batch efficiency
-                if (max_to_grab < 1) max_to_grab = 1;
+                int32_t max_to_grab = aic_per_thread_ * 4;
+                if (max_to_grab > 32) max_to_grab = 32;
 
-                int buffer[16];
+                int buffer[32];
                 int32_t grabbed = ready_queue_aic_.try_pop_batch(buffer, max_to_grab);
 
                 if (grabbed > 0) {
@@ -1039,11 +1041,10 @@ int AicpuExecutor::resolve_and_dispatch(Runtime& runtime, int thread_idx, const 
             // Quick check: avoid batch dequeue if shared queue is likely empty
             if (ready_queue_aiv_.approximate_size() > 0) {
                 // Dynamically adjust batch size
-                int32_t max_to_grab = aiv_per_thread_;
-                if (max_to_grab > 16) max_to_grab = 16;
-                if (max_to_grab < 1) max_to_grab = 1;
+                int32_t max_to_grab = aiv_per_thread_ * 4;
+                if (max_to_grab > 32) max_to_grab = 32;
 
-                int buffer[16];
+                int buffer[32];
                 int32_t grabbed = ready_queue_aiv_.try_pop_batch(buffer, max_to_grab);
 
                 if (grabbed > 0) {
@@ -1133,6 +1134,11 @@ int AicpuExecutor::resolve_and_dispatch(Runtime& runtime, int thread_idx, const 
         }
         made_progress = false;
     }
+
+    uint64_t loop_end_time = get_sys_cnt_aicpu();
+    uint64_t loop_duration = loop_end_time - loop_start_time;
+    DEV_ALWAYS("Thread %d: Main execution loop ended at %.3fus, duration %.3fus",
+        thread_idx, cycles_to_us(loop_end_time), cycles_to_us(loop_duration));
 
     LOG_INFO("Thread %d: Execution complete, completed %d tasks", thread_idx, cur_thread_completed);
     return cur_thread_completed;
