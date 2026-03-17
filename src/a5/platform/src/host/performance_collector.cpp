@@ -110,6 +110,12 @@ void* ProfMemoryManager::alloc_and_register(size_t size, void** host_ptr_out) {
             return nullptr;
         }
         *host_ptr_out = host_ptr;
+
+        if (needs_dev_copy_) {
+            // TODO(a5-shmem): shadow is zeroed by register_cb; copy to device so AICPU
+            // sees count=0 (not uninitialized garbage) when it dequeues the buffer.
+            copy_h2d_(dev_ptr, size, host_ptr);
+        }
     } else {
         // Simulation mode: dev_ptr == host_ptr
         *host_ptr_out = dev_ptr;
@@ -161,22 +167,44 @@ void ProfMemoryManager::process_ready_entry(PerfDataHeader* /*header*/, int /*th
         void* host_ptr = nullptr;
         void* new_dev_ptr = alloc_and_register(sizeof(PhaseBuffer), &host_ptr);
         if (new_dev_ptr != nullptr) {
-            // Initialize new buffer
+            // Initialize new buffer in shadow
             PhaseBuffer* new_buf = (PhaseBuffer*)host_ptr;
             new_buf->count = 0;
 
             // Push to free_queue (with overflow guard)
-            rmb();
-            uint32_t head_val = state->free_queue.head;
+            uint32_t head_val;
             uint32_t tail = state->free_queue.tail;
+            if (needs_dev_copy_) {
+                // TODO(a5-shmem): read AICPU-written head from device to check overflow
+                PhaseBufferState* state_dev =
+                    get_phase_buffer_state(shared_mem_dev_, num_cores_, tidx);
+                copy_d2h_(&head_val, sizeof(head_val), &state_dev->free_queue.head);
+                state->free_queue.head = head_val;
+            } else {
+                rmb();
+                head_val = state->free_queue.head;
+            }
+
             if ((tail - head_val) >= PLATFORM_PROF_SLOT_COUNT) {
                 LOG_ERROR("ProfMemoryManager: phase free_queue overflow for thread %u", tidx);
                 free_buffer(new_dev_ptr);
             } else {
-                state->free_queue.buffer_ptrs[tail % PLATFORM_PROF_SLOT_COUNT] = (uint64_t)new_dev_ptr;
-                wmb();
-                state->free_queue.tail = tail + 1;
-                wmb();
+                uint32_t slot = tail % PLATFORM_PROF_SLOT_COUNT;
+                state->free_queue.buffer_ptrs[slot] = (uint64_t)new_dev_ptr;
+                if (needs_dev_copy_) {
+                    // TODO(a5-shmem): write buffer_ptrs first, then tail (ordering requirement)
+                    PhaseBufferState* state_dev =
+                        get_phase_buffer_state(shared_mem_dev_, num_cores_, tidx);
+                    uint64_t buf_val = (uint64_t)new_dev_ptr;
+                    copy_h2d_(&state_dev->free_queue.buffer_ptrs[slot], sizeof(uint64_t), &buf_val);
+                    uint32_t new_tail = tail + 1;
+                    state->free_queue.tail = new_tail;
+                    copy_h2d_(&state_dev->free_queue.tail, sizeof(uint32_t), &new_tail);
+                } else {
+                    wmb();
+                    state->free_queue.tail = tail + 1;
+                    wmb();
+                }
             }
         } else {
             LOG_ERROR("ProfMemoryManager: phase buffer alloc failed, device may lose data");
@@ -187,6 +215,15 @@ void ProfMemoryManager::process_ready_entry(PerfDataHeader* /*header*/, int /*th
         if (old_host_ptr == nullptr) {
             LOG_ERROR("ProfMemoryManager: cannot resolve host ptr for phase buffer dev=%p", (void*)old_dev_ptr);
             return;
+        }
+
+        if (needs_dev_copy_ && old_host_ptr != nullptr) {
+            // TODO(a5-shmem): copy device buffer into shadow before main thread reads it
+            int rc = copy_d2h_(old_host_ptr, sizeof(PhaseBuffer), (void*)old_dev_ptr);
+            if (rc != 0) {
+                LOG_ERROR("ProfMemoryManager: copy_d2h_ for phase buffer failed: %d", rc);
+                return;
+            }
         }
 
         // Push old buffer to ready queue for main thread to copy
@@ -221,17 +258,38 @@ void ProfMemoryManager::process_ready_entry(PerfDataHeader* /*header*/, int /*th
             new_buf->count = 0;
 
             // Push to free_queue (with overflow guard)
-            rmb();
-            uint32_t head_val = state->free_queue.head;
+            uint32_t head_val;
             uint32_t tail = state->free_queue.tail;
+            if (needs_dev_copy_) {
+                // TODO(a5-shmem): read AICPU-written head from device to check overflow
+                PerfBufferState* state_dev = get_perf_buffer_state(shared_mem_dev_, core_index);
+                copy_d2h_(&head_val, sizeof(head_val), &state_dev->free_queue.head);
+                state->free_queue.head = head_val;
+            } else {
+                rmb();
+                head_val = state->free_queue.head;
+            }
+
             if ((tail - head_val) >= PLATFORM_PROF_SLOT_COUNT) {
                 LOG_ERROR("ProfMemoryManager: perf free_queue overflow for core %u", core_index);
                 free_buffer(new_dev_ptr);
             } else {
-                state->free_queue.buffer_ptrs[tail % PLATFORM_PROF_SLOT_COUNT] = (uint64_t)new_dev_ptr;
-                wmb();
-                state->free_queue.tail = tail + 1;
-                wmb();
+                uint32_t slot = tail % PLATFORM_PROF_SLOT_COUNT;
+                state->free_queue.buffer_ptrs[slot] = (uint64_t)new_dev_ptr;
+                if (needs_dev_copy_) {
+                    // TODO(a5-shmem): write buffer_ptrs first, then tail (ordering requirement)
+                    PerfBufferState* state_dev =
+                        get_perf_buffer_state(shared_mem_dev_, core_index);
+                    uint64_t buf_val = (uint64_t)new_dev_ptr;
+                    copy_h2d_(&state_dev->free_queue.buffer_ptrs[slot], sizeof(uint64_t), &buf_val);
+                    uint32_t new_tail = tail + 1;
+                    state->free_queue.tail = new_tail;
+                    copy_h2d_(&state_dev->free_queue.tail, sizeof(uint32_t), &new_tail);
+                } else {
+                    wmb();
+                    state->free_queue.tail = tail + 1;
+                    wmb();
+                }
             }
         } else {
             LOG_ERROR("ProfMemoryManager: perf buffer alloc failed, device may lose data");
@@ -241,6 +299,15 @@ void ProfMemoryManager::process_ready_entry(PerfDataHeader* /*header*/, int /*th
         if (old_host_ptr == nullptr) {
             LOG_ERROR("ProfMemoryManager: cannot resolve host ptr for perf buffer dev=%p", (void*)old_dev_ptr);
             return;
+        }
+
+        if (needs_dev_copy_ && old_host_ptr != nullptr) {
+            // TODO(a5-shmem): copy device buffer into shadow before main thread reads it
+            int rc = copy_d2h_(old_host_ptr, sizeof(PerfBuffer), (void*)old_dev_ptr);
+            if (rc != 0) {
+                LOG_ERROR("ProfMemoryManager: copy_d2h_ for perf buffer failed: %d", rc);
+                return;
+            }
         }
 
         ReadyBufferInfo info;
@@ -260,7 +327,9 @@ void ProfMemoryManager::process_ready_entry(PerfDataHeader* /*header*/, int /*th
 }
 
 void ProfMemoryManager::mgmt_loop() {
-    PerfDataHeader* header = get_perf_header(shared_mem_host_);
+    PerfDataHeader* header_host = get_perf_header(shared_mem_host_);
+    // TODO(a5-shmem): in shadow mode, all AICPU-written fields are read from device via rtMemcpy
+    PerfDataHeader* header_dev = needs_dev_copy_ ? get_perf_header(shared_mem_dev_) : header_host;
 
     while (running_.load()) {
         // 1. Process done queue: free buffers that main thread has finished copying
@@ -276,9 +345,17 @@ void ProfMemoryManager::mgmt_loop() {
         // 2. Poll ReadyQueues from all AICPU threads
         bool found_any = false;
         for (int t = 0; t < PLATFORM_MAX_AICPU_THREADS; t++) {
-            rmb();
-            uint32_t head = header->queue_heads[t];
-            uint32_t tail = header->queue_tails[t];
+            // head is host-maintained: always in shadow, no device read needed
+            uint32_t head = header_host->queue_heads[t];
+            uint32_t tail;
+            if (needs_dev_copy_) {
+                // TODO(a5-shmem): read AICPU-written tail from device HBM
+                copy_d2h_(&tail, sizeof(tail), &header_dev->queue_tails[t]);
+                header_host->queue_tails[t] = tail;
+            } else {
+                rmb();
+                tail = header_host->queue_tails[t];
+            }
 
             // Validate indices to prevent OOB access from corrupted shared memory
             if (head >= PLATFORM_PROF_READYQUEUE_SIZE || tail >= PLATFORM_PROF_READYQUEUE_SIZE) {
@@ -288,19 +365,35 @@ void ProfMemoryManager::mgmt_loop() {
             }
 
             while (head != tail) {
-                ReadyQueueEntry entry = header->queues[t][head];
+                ReadyQueueEntry entry;
+                if (needs_dev_copy_) {
+                    // TODO(a5-shmem): read entry from device HBM
+                    copy_d2h_(&entry, sizeof(entry), &header_dev->queues[t][head]);
+                } else {
+                    entry = header_host->queues[t][head];
+                }
 
-                process_ready_entry(header, t, entry);
+                process_ready_entry(header_host, t, entry);
 
                 head = (head + 1) % PLATFORM_PROF_READYQUEUE_SIZE;
-                header->queue_heads[t] = head;
-                wmb();
+                header_host->queue_heads[t] = head;
+                if (needs_dev_copy_) {
+                    // TODO(a5-shmem): write updated head back to device HBM
+                    copy_h2d_(&header_dev->queue_heads[t], sizeof(head), &head);
+                } else {
+                    wmb();
+                }
 
                 found_any = true;
 
                 // Re-read tail in case more entries arrived
-                rmb();
-                tail = header->queue_tails[t];
+                if (needs_dev_copy_) {
+                    copy_d2h_(&tail, sizeof(tail), &header_dev->queue_tails[t]);
+                    header_host->queue_tails[t] = tail;
+                } else {
+                    rmb();
+                    tail = header_host->queue_tails[t];
+                }
                 if (tail >= PLATFORM_PROF_READYQUEUE_SIZE) {
                     LOG_ERROR("mgmt_loop: invalid tail for thread %d: %u", t, tail);
                     break;
@@ -315,24 +408,40 @@ void ProfMemoryManager::mgmt_loop() {
     }
 
     // Final drain: process any remaining entries
-    PerfDataHeader* hdr = get_perf_header(shared_mem_host_);
     for (int t = 0; t < PLATFORM_MAX_AICPU_THREADS; t++) {
-        rmb();
-        uint32_t head = hdr->queue_heads[t];
-        uint32_t tail = hdr->queue_tails[t];
+        uint32_t head = header_host->queue_heads[t];
+        uint32_t tail;
+        if (needs_dev_copy_) {
+            copy_d2h_(&tail, sizeof(tail), &header_dev->queue_tails[t]);
+            header_host->queue_tails[t] = tail;
+        } else {
+            rmb();
+            tail = header_host->queue_tails[t];
+        }
         if (head >= PLATFORM_PROF_READYQUEUE_SIZE || tail >= PLATFORM_PROF_READYQUEUE_SIZE) {
             LOG_ERROR("mgmt_loop drain: invalid queue indices for thread %d: head=%u tail=%u",
                       t, head, tail);
             continue;
         }
         while (head != tail) {
-            ReadyQueueEntry entry = hdr->queues[t][head];
-            process_ready_entry(hdr, t, entry);
+            ReadyQueueEntry entry;
+            if (needs_dev_copy_) {
+                copy_d2h_(&entry, sizeof(entry), &header_dev->queues[t][head]);
+            } else {
+                entry = header_host->queues[t][head];
+            }
+            process_ready_entry(header_host, t, entry);
             head = (head + 1) % PLATFORM_PROF_READYQUEUE_SIZE;
-            hdr->queue_heads[t] = head;
-            wmb();
-            rmb();
-            tail = hdr->queue_tails[t];
+            header_host->queue_heads[t] = head;
+            if (needs_dev_copy_) {
+                copy_h2d_(&header_dev->queue_heads[t], sizeof(head), &head);
+                copy_d2h_(&tail, sizeof(tail), &header_dev->queue_tails[t]);
+                header_host->queue_tails[t] = tail;
+            } else {
+                wmb();
+                rmb();
+                tail = header_host->queue_tails[t];
+            }
             if (tail >= PLATFORM_PROF_READYQUEUE_SIZE) {
                 LOG_ERROR("mgmt_loop drain: invalid tail for thread %d: %u", t, tail);
                 break;
@@ -535,12 +644,15 @@ int PerformanceCollector::initialize(Runtime& runtime,
 
     wmb();
 
+    perf_shared_mem_dev_ = perf_dev_ptr;
+    perf_shared_mem_host_ = perf_host_ptr;
+
+    // TODO(a5-shmem): expose device pointer to mgmt thread for rtMemcpy-based polling
+    memory_manager_.shared_mem_dev_ = perf_dev_ptr;
+
     // Step 7: Pass base address to Runtime
     runtime.perf_data_base = (uint64_t)perf_dev_ptr;
     LOG_DEBUG("Set runtime.perf_data_base = 0x%lx", runtime.perf_data_base);
-
-    perf_shared_mem_dev_ = perf_dev_ptr;
-    perf_shared_mem_host_ = perf_host_ptr;
 
     LOG_INFO("Performance profiling initialized (dynamic buffer mode)");
     return 0;
@@ -549,6 +661,24 @@ int PerformanceCollector::initialize(Runtime& runtime,
 void PerformanceCollector::start_memory_manager() {
     if (perf_shared_mem_host_ == nullptr) {
         return;
+    }
+
+    // TODO(a5-shmem): configure rtMemcpy mode and seed device memory before starting the
+    // management thread to avoid a race where the thread reads stale flags on first iteration.
+    memory_manager_.needs_dev_copy_ = needs_dev_copy_;
+    if (needs_dev_copy_) {
+        memory_manager_.shared_mem_dev_ = perf_shared_mem_dev_;
+        memory_manager_.copy_d2h_ = copy_d2h_;
+        memory_manager_.copy_h2d_ = copy_h2d_;
+
+        // Seed device memory with the initialized state from the shadow buffer.
+        // This must happen before the AICPU kernel starts reading perf_data_base.
+        size_t total_sz =
+            calc_perf_data_size_with_phases(num_aicore_, PLATFORM_MAX_AICPU_THREADS);
+        int rc = copy_h2d_(perf_shared_mem_dev_, total_sz, perf_shared_mem_host_);
+        if (rc != 0) {
+            LOG_ERROR("start_memory_manager: copy_h2d_ for initial device seed failed: %d", rc);
+        }
     }
 
     memory_manager_.start(perf_shared_mem_host_, num_aicore_,
@@ -580,7 +710,14 @@ void PerformanceCollector::poll_and_collect(int expected_tasks) {
         idle_start = std::chrono::steady_clock::now();
 
         while (true) {
-            rmb();
+            if (needs_dev_copy_) {
+                // TODO(a5-shmem): read AICPU-written total_tasks from device HBM
+                PerfDataHeader* dev_hdr = get_perf_header(perf_shared_mem_dev_);
+                copy_d2h_(&header->total_tasks, sizeof(header->total_tasks),
+                          &dev_hdr->total_tasks);
+            } else {
+                rmb();
+            }
             uint32_t raw_total_tasks = header->total_tasks;
 
             if (raw_total_tasks > 0) {
@@ -630,7 +767,14 @@ void PerformanceCollector::poll_and_collect(int expected_tasks) {
 
     while (total_records_collected < expected_tasks) {
         // Check for updated expected_tasks
-        rmb();
+        if (needs_dev_copy_) {
+            // TODO(a5-shmem): re-read total_tasks from device (AICPU may have updated it)
+            PerfDataHeader* dev_hdr = get_perf_header(perf_shared_mem_dev_);
+            copy_d2h_(&header->total_tasks, sizeof(header->total_tasks),
+                      &dev_hdr->total_tasks);
+        } else {
+            rmb();
+        }
         int current_expected = static_cast<int>(header->total_tasks);
         if (current_expected > expected_tasks) {
             expected_tasks = current_expected;
@@ -777,6 +921,19 @@ void PerformanceCollector::collect_phase_data() {
         return;
     }
 
+    if (needs_dev_copy_) {
+        // TODO(a5-shmem): sync entire shared region from device HBM.
+        // AICPU has finished writing phase data by the time this is called
+        // (after stream sync), so a one-shot copy is sufficient and correct.
+        size_t total_sz =
+            calc_perf_data_size_with_phases(num_aicore_, PLATFORM_MAX_AICPU_THREADS);
+        int rc = copy_d2h_(perf_shared_mem_host_, total_sz, perf_shared_mem_dev_);
+        if (rc != 0) {
+            LOG_ERROR("collect_phase_data: copy_d2h_ for full sync failed: %d", rc);
+            return;
+        }
+    }
+
     rmb();
 
     AicpuPhaseHeader* phase_header = get_phase_header(perf_shared_mem_host_, num_aicore_);
@@ -814,6 +971,14 @@ void PerformanceCollector::collect_phase_data() {
                 LOG_ERROR("collect_phase_data: no host mapping for dev_ptr=%p (thread %d)",
                           (void*)buf_ptr, t);
                 continue;
+            }
+            if (needs_dev_copy_) {
+                // TODO(a5-shmem): current_buf_ptr shadow is stale; sync from device
+                int rc = copy_d2h_(host_ptr, sizeof(PhaseBuffer), (void*)buf_ptr);
+                if (rc != 0) {
+                    LOG_ERROR("collect_phase_data: copy_d2h_ for current buffer failed: %d", rc);
+                    continue;
+                }
             }
             PhaseBuffer* pbuf = (PhaseBuffer*)host_ptr;
             if (pbuf->count > 0) {

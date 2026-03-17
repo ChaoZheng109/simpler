@@ -49,6 +49,10 @@ using PerfAllocCallback = void* (*)(size_t size, void* user_data);
 using PerfRegisterCallback = int (*)(void* dev_ptr, size_t size, int device_id,
                                       void* user_data, void** host_ptr);
 
+// TODO(a5-shmem): remove when a5 supports halHostRegister (SVM mapping)
+using PerfCopyDevToHostFn = int (*)(volatile void* dst, size_t size, const volatile void* src);
+using PerfCopyHostToDevFn = int (*)(volatile void* dst, size_t size, const volatile void* src);
+
 /**
  * Memory unregister callback
  *
@@ -197,6 +201,14 @@ private:
     // Device-to-host pointer mapping (populated during alloc_and_register)
     std::unordered_map<void*, void*> dev_to_host_;
 
+    // TODO(a5-shmem): device-side base pointer for rtMemcpy-based polling (nullptr = SVM/sim mode)
+    void* shared_mem_dev_{nullptr};
+    // TODO(a5-shmem): true = use rtMemcpy instead of direct SVM pointer access
+    bool needs_dev_copy_{false};
+    // TODO(a5-shmem): copy callbacks injected by device_runner to avoid CANN dependency here
+    PerfCopyDevToHostFn copy_d2h_{nullptr};
+    PerfCopyHostToDevFn copy_h2d_{nullptr};
+
     // Management thread main loop
     void mgmt_loop();
 
@@ -334,6 +346,24 @@ public:
     void collect_phase_data();
 
     /**
+     * Enable rtMemcpy-based device access mode for a5 (no SVM mapping available).
+     *
+     * Must be called after initialize() and before start_memory_manager().
+     * When enabled, all reads/writes to device-shared memory use the supplied
+     * copy callbacks instead of direct pointer dereference.
+     *
+     * @param copy_d2h  Device-to-host copy function (wraps rtMemcpy D2H)
+     * @param copy_h2d  Host-to-device copy function (wraps rtMemcpy H2D)
+     *
+     * TODO(a5-shmem): remove when a5 supports halHostRegister (SVM mapping)
+     */
+    void enable_shadow_copy_mode(PerfCopyDevToHostFn copy_d2h, PerfCopyHostToDevFn copy_h2d) {
+        needs_dev_copy_ = true;
+        copy_d2h_ = copy_d2h;
+        copy_h2d_ = copy_h2d;
+    }
+
+    /**
      * Get collected records (for testing)
      */
     const std::vector<std::vector<PerfRecord>>& get_records() const { return collected_perf_records_; }
@@ -370,6 +400,12 @@ private:
 
     // Allocate a single buffer (PerfBuffer or PhaseBuffer) and register it
     void* alloc_single_buffer(size_t size, void** host_ptr_out);
+
+    // TODO(a5-shmem): true = use copy callbacks for all device memory accesses
+    bool needs_dev_copy_{false};
+    // TODO(a5-shmem): copy callbacks injected by device_runner; nullptr in sim mode
+    PerfCopyDevToHostFn copy_d2h_{nullptr};
+    PerfCopyHostToDevFn copy_h2d_{nullptr};
 };
 
 #endif  // PLATFORM_HOST_PERFORMANCE_COLLECTOR_H_

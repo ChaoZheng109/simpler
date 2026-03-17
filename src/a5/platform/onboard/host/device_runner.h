@@ -21,6 +21,7 @@
 #include <iostream>
 #include <map>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "common/kernel_args.h"
@@ -32,6 +33,14 @@
 #include "host/memory_allocator.h"
 #include "host/performance_collector.h"
 #include "runtime.h"
+
+// TODO(a5-shmem): shadow buffer context for profiling workaround; remove when a5 supports
+// halHostRegister (SVM mapping). Each device profiling buffer gets a paired malloc'd host
+// shadow; the shadow_map tracks dev_ptr → host_shadow for alloc/free callbacks.
+struct A5ShadowProfCtx {
+    MemoryAllocator* allocator{nullptr};
+    std::unordered_map<void*, void*> shadow_map;  // dev_ptr → malloc'd host shadow
+};
 
 /**
  * DeviceArgs structure for AICPU device arguments
@@ -355,6 +364,9 @@ private:
 
     // Performance profiling
     PerformanceCollector perf_collector_;
+
+    // TODO(a5-shmem): shadow context for a5 profiling workaround; remove when halHostRegister works
+    A5ShadowProfCtx a5_shadow_ctx_;
 
     /**
      * Ensure device is initialized (lazy initialization)

@@ -558,21 +558,32 @@ int DeviceRunner::finalize() {
 
     // Cleanup performance profiling
     if (perf_collector_.is_initialized()) {
-        auto unregister_cb = [](void* dev_ptr, int device_id, void* user_data) -> int {
-            (void)user_data;
-            HalHostUnregisterFn fn = get_halHostUnregister();
-            if (fn != nullptr) {
-                return fn(dev_ptr, device_id);
+        // TODO(a5-shmem): free shadow buffer for the shared-memory header (no halHostUnregister)
+        // Revert to halHostUnregister when a5 supports SVM mapping:
+        //   HalHostUnregisterFn fn = get_halHostUnregister();
+        //   if (fn != nullptr) fn(dev_ptr, device_id);
+        auto unregister_cb = [](void* dev_ptr, int /*device_id*/, void* user_data) -> int {
+            auto* ctx = static_cast<A5ShadowProfCtx*>(user_data);
+            auto it = ctx->shadow_map.find(dev_ptr);
+            if (it != ctx->shadow_map.end()) {
+                ::free(it->second);
+                ctx->shadow_map.erase(it);
             }
             return 0;
         };
 
+        // TODO(a5-shmem): free shadow buffer alongside device buffer
         auto free_cb = [](void* dev_ptr, void* user_data) -> int {
-            auto* allocator = static_cast<MemoryAllocator*>(user_data);
-            return allocator->free(dev_ptr);
+            auto* ctx = static_cast<A5ShadowProfCtx*>(user_data);
+            auto it = ctx->shadow_map.find(dev_ptr);
+            if (it != ctx->shadow_map.end()) {
+                ::free(it->second);
+                ctx->shadow_map.erase(it);
+            }
+            return ctx->allocator->free(dev_ptr);
         };
 
-        perf_collector_.finalize(unregister_cb, free_cb, &mem_alloc_);
+        perf_collector_.finalize(unregister_cb, free_cb, &a5_shadow_ctx_);
     }
 
     // Free all remaining allocations (including handshake buffer and binGmAddr)
@@ -718,36 +729,58 @@ void DeviceRunner::remove_kernel_binary(int func_id) {
 }
 
 int DeviceRunner::init_performance_profiling(Runtime& runtime, int num_aicore, int device_id) {
-    // Define allocation callback (a5: use MemoryAllocator)
+    a5_shadow_ctx_.allocator = &mem_alloc_;
+
+    // Allocation callback: allocate device HBM memory via MemoryAllocator
     auto alloc_cb = [](size_t size, void* user_data) -> void* {
-        auto* allocator = static_cast<MemoryAllocator*>(user_data);
-        return allocator->alloc(size);
+        auto* ctx = static_cast<A5ShadowProfCtx*>(user_data);
+        return ctx->allocator->alloc(size);
     };
 
-    // Define registration callback (a5: use halHostRegister for shared memory)
-    auto register_cb = [](void* dev_ptr, size_t size, int device_id,
+    // TODO(a5-shmem): allocate a malloc'd host shadow buffer instead of halHostRegister.
+    // Revert to halHostRegister(DEV_SVM_MAP_HOST) when a5 supports SVM mapping:
+    //   HalHostRegisterFn fn = get_halHostRegister();
+    //   return fn(dev_ptr, size, DEV_SVM_MAP_HOST, device_id, host_ptr);
+    auto register_cb = [](void* dev_ptr, size_t size, int /*device_id*/,
                           void* user_data, void** host_ptr) -> int {
-        (void)user_data;  // Not needed for registration
-        if (load_hal_if_needed() != 0) {
-            LOG_ERROR("Failed to load ascend_hal for profiling: %s", dlerror());
-            return -1;
-        }
-        HalHostRegisterFn fn = get_halHostRegister();
-        if (fn == nullptr) {
-            LOG_ERROR("halHostRegister symbol not found: %s", dlerror());
-            return -1;
-        }
-        return fn(dev_ptr, size, DEV_SVM_MAP_HOST, device_id, host_ptr);
+        auto* ctx = static_cast<A5ShadowProfCtx*>(user_data);
+        void* h = malloc(size);
+        if (!h) return -1;
+        memset(h, 0, size);
+        ctx->shadow_map[dev_ptr] = h;
+        *host_ptr = h;
+        return 0;
     };
 
-    // Define free callback (a5: use MemoryAllocator)
+    // TODO(a5-shmem): free the shadow buffer alongside the device buffer
     auto free_cb = [](void* dev_ptr, void* user_data) -> int {
-        auto* allocator = static_cast<MemoryAllocator*>(user_data);
-        return allocator->free(dev_ptr);
+        auto* ctx = static_cast<A5ShadowProfCtx*>(user_data);
+        auto it = ctx->shadow_map.find(dev_ptr);
+        if (it != ctx->shadow_map.end()) {
+            ::free(it->second);
+            ctx->shadow_map.erase(it);
+        }
+        return ctx->allocator->free(dev_ptr);
     };
 
-    return perf_collector_.initialize(runtime, num_aicore, device_id,
-                                       alloc_cb, register_cb, free_cb, &mem_alloc_);
+    int rc = perf_collector_.initialize(runtime, num_aicore, device_id,
+                                        alloc_cb, register_cb, free_cb,
+                                        &a5_shadow_ctx_);
+    if (rc != 0) return rc;
+
+    // TODO(a5-shmem): activate rtMemcpy-based device access path; revert when halHostRegister works.
+    // Lambdas have no captures so they convert to plain function pointers.
+    // const_cast strips volatile before passing to rtMemcpy which takes plain void*.
+    perf_collector_.enable_shadow_copy_mode(
+        [](volatile void* dst, size_t size, const volatile void* src) -> int {
+            return rtMemcpy(const_cast<void*>(dst), size,
+                            const_cast<const void*>(src), size, RT_MEMCPY_DEVICE_TO_HOST);
+        },
+        [](volatile void* dst, size_t size, const volatile void* src) -> int {
+            return rtMemcpy(const_cast<void*>(dst), size,
+                            const_cast<const void*>(src), size, RT_MEMCPY_HOST_TO_DEVICE);
+        });
+    return 0;
 }
 
 void DeviceRunner::poll_and_collect_performance_data(int expected_tasks) {
