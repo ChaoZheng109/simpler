@@ -182,4 +182,21 @@ inline void write_reg(RegId reg, uint64_t value) {
  */
 inline uint32_t get_physical_core_id() { return g_sim_physical_core_id; }
 
+// =============================================================================
+// CPU Simulation Context APIs
+// =============================================================================
+
+// Set block/subblock execution context for the current simulation thread.
+// Called by aicore_executor.cpp before each task dispatch.
+extern "C" void pto_cpu_sim_set_execution_context(uint32_t block_idx, uint32_t subblock_id, uint32_t subblock_dim);
+
+// Set task cookie for the current simulation thread.
+// Called by aicore_executor.cpp before each task dispatch.
+extern "C" void pto_cpu_sim_set_task_cookie(uint64_t task_cookie);
+
+// CPU_SIM_SET_TASK_COOKIE / CPU_SIM_SET_EXECUTION_CONTEXT
+// Simulation: real call; onboard: no-op (see onboard/aicore/inner_kernel.h).
+#define CPU_SIM_SET_TASK_COOKIE(cookie) pto_cpu_sim_set_task_cookie(cookie)
+#define CPU_SIM_SET_EXECUTION_CONTEXT(bidx, sbid, sbdim) pto_cpu_sim_set_execution_context(bidx, sbid, sbdim)
+
 #endif  // PLATFORM_A2A3SIM_AICORE_INNER_KERNEL_H_

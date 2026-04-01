@@ -100,4 +100,8 @@ __aicore__ inline uint32_t get_physical_core_id() { return static_cast<uint32_t>
  */
 __aicore__ __attribute__((always_inline)) inline uint64_t get_sys_cnt_aicore() { return get_sys_cnt(); }
 
+// CPU_SIM_SET_TASK_COOKIE / CPU_SIM_SET_EXECUTION_CONTEXT - no-op on real hardware (simulation only)
+#define CPU_SIM_SET_TASK_COOKIE(cookie) ((void)0)
+#define CPU_SIM_SET_EXECUTION_CONTEXT(bidx, sbid, sbdim) ((void)0)
+
 #endif  // PLATFORM_A2A3_AICORE_INNER_KERNEL_H_
