@@ -64,6 +64,8 @@
 #define CYCLE_COUNT_LAP(acc)
 #endif
 
+#define TTT 500000
+
 // Device orchestration function signature (loaded via dlopen).
 // The executor binds the current thread's PTO2Runtime into orchestration TLS
 // before calling the user entry.
@@ -482,6 +484,8 @@ struct AicpuExecutor {
                     core_id,
                     expected_reg_task_id,
                     mixed_complete ? 1 : 0);
+                uint64_t starttt = get_sys_cnt_aicpu();
+                while (get_sys_cnt_aicpu() - starttt < TTT) {}
                 cur_thread_completed++;
                 if (mixed_complete) {
                     completed_this_turn++;
@@ -1386,6 +1390,8 @@ int32_t AicpuExecutor::resolve_and_dispatch_pto2(Runtime* runtime, int32_t threa
                             slot_state->next_block_idx - 1,
                             slot_state->block_num,
                             current_valid_cluster_offset);
+                        uint64_t starttt = get_sys_cnt_aicpu();
+                        while (get_sys_cnt_aicpu() - starttt < TTT) {}
                     } while (slot_state->next_block_idx < slot_state->block_num && valid_cluster_states.has_value());
 
                     // Re-enqueue only if blocks remain after exhausting local clusters
