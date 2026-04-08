@@ -18,7 +18,7 @@
  *   1. c = a + b           (kernel_add, runtime-created tensor)
  *   2. get_tensor_data(c, {0})   → check[0] = 2.0
  *   3. get_tensor_data(c, {100}) → check[1] = 102.0
- *   4. scalar_tensor = add_output(TensorCreateInfo, 77.0f), submit noop
+ *   4. scalar_tensor = materialize output TensorCreateInfo(77.0f)
  *   5. get_tensor_data(scalar_tensor, {0}) → check[2] = 77.0
  *   6. add_inout(scalar_tensor) (INOUT path), submit noop
  *   7. get_tensor_data(scalar_tensor, {0}) → check[3] = 77.0
@@ -96,6 +96,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
     // =========================================================
     // Step 4: Runtime-created scalar output with initial value
     //   Runtime allocates HeapRing buffer, writes 77.0 to element [0]
+    //   without dispatching a worker kernel.
     // =========================================================
     uint32_t scalar_shapes[1] = {1};
     TensorCreateInfo scalar_ci(scalar_shapes, 1, DataType::FLOAT32);
@@ -103,7 +104,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
 
     Arg params_scalar;
     params_scalar.add_output(scalar_ci);
-    TaskOutputTensors scalar_outs = pto2_rt_submit_aiv_task(FUNC_NOOP, params_scalar);
+    TaskOutputTensors scalar_outs = pto2_rt_materialize_output_tensors(params_scalar);
     const Tensor &scalar_tensor = scalar_outs.get_ref(0);
 
     // =========================================================
@@ -164,12 +165,12 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
 
     // =========================================================
     // Step 10: Orch→AICore RAW (set_tensor_data → kernel reads)
-    //   Orchestration writes d[0]=10.0 via set_tensor_data, then
-    //   kernel_add reads d as input: e[0] = d[0] + a[0] = 12.0
+    //   Orchestration materializes d, writes d[0]=10.0 via set_tensor_data,
+    //   then kernel_add reads d as input: e[0] = d[0] + a[0] = 12.0
     // =========================================================
     Arg params_d;
     params_d.add_output(inter_ci);
-    TaskOutputTensors d_outs = pto2_rt_submit_aiv_task(FUNC_NOOP, params_d);
+    TaskOutputTensors d_outs = pto2_rt_materialize_output_tensors(params_d);
     const Tensor &d = d_outs.get_ref(0);
 
     idx[0] = 0;

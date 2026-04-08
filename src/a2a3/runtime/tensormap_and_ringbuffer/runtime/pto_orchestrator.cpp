@@ -362,6 +362,20 @@ void pto2_scope_end(PTO2OrchestratorState *orch) {
 // =============================================================================
 // Task Submission
 // =============================================================================
+static bool
+pto2_fail_invalid_arg_usage(PTO2OrchestratorState *orch, const Arg &args, const char *header, const char *detail) {
+    LOG_ERROR("========================================");
+    LOG_ERROR("FATAL: %s", header);
+    LOG_ERROR("========================================");
+    LOG_ERROR("Error: %s", detail);
+    LOG_ERROR("  tensor_count: %d, scalar_count: %d", args.tensor_count(), args.scalar_count());
+    LOG_ERROR("This is a bug in the orchestration code.");
+    LOG_ERROR("========================================");
+    orch->sm_handle->header->orch_error_code.store(PTO2_ERROR_INVALID_ARGS, std::memory_order_release);
+    orch->fatal = true;
+    return false;
+}
+
 TaskOutputTensors
 pto2_submit_mixed_task(PTO2OrchestratorState *orch, const MixedKernels &mixed_kernels, const Arg &args) {
     CYCLE_COUNT_START();
@@ -375,15 +389,7 @@ pto2_submit_mixed_task(PTO2OrchestratorState *orch, const MixedKernels &mixed_ke
 
     // Validate Arg construction (errors recorded by add_input/add_output/etc.)
     if (args.has_error) {
-        LOG_ERROR("========================================");
-        LOG_ERROR("FATAL: Invalid Arg Detected!");
-        LOG_ERROR("========================================");
-        LOG_ERROR("Error: %s", args.error_msg ? args.error_msg : "(unknown)");
-        LOG_ERROR("  tensor_count: %d, scalar_count: %d", args.tensor_count(), args.scalar_count());
-        LOG_ERROR("This is a bug in the orchestration code.");
-        LOG_ERROR("========================================");
-        orch->sm_handle->header->orch_error_code.store(PTO2_ERROR_INVALID_ARGS, std::memory_order_release);
-        orch->fatal = true;
+        pto2_fail_invalid_arg_usage(orch, args, "Invalid Arg Detected!", args.error_msg ? args.error_msg : "(unknown)");
         return result;
     }
 
@@ -734,6 +740,163 @@ pto2_submit_mixed_task(PTO2OrchestratorState *orch, const MixedKernels &mixed_ke
 #endif
     g_orch_submit_idx++;
 #endif
+    return result;
+}
+
+TaskOutputTensors pto2_materialize_output_tensors(PTO2OrchestratorState *orch, const Arg &args) {
+    TaskOutputTensors result;
+
+    if (orch->fatal) {
+        return result;
+    }
+
+    if (args.has_error) {
+        pto2_fail_invalid_arg_usage(orch, args, "Invalid Arg Detected!", args.error_msg ? args.error_msg : "(unknown)");
+        return result;
+    }
+
+    if (args.scalar_count() != 0) {
+        pto2_fail_invalid_arg_usage(
+            orch, args, "Invalid materialize_output_tensors Arg!",
+            "pto2_rt_materialize_output_tensors only supports OUTPUT tensors and no scalars"
+        );
+        return result;
+    }
+
+    for (int32_t i = 0; i < args.tensor_count(); i++) {
+        if (args.tag(i) != TensorArgType::OUTPUT) {
+            pto2_fail_invalid_arg_usage(
+                orch, args, "Invalid materialize_output_tensors Arg!",
+                "pto2_rt_materialize_output_tensors only supports add_output(TensorCreateInfo)"
+            );
+            return result;
+        }
+    }
+
+    if (args.tensor_count() == 0) {
+        return result;
+    }
+
+    uint8_t ring_id = orch->current_ring_id();
+    auto &allocator = orch->rings[ring_id].task_allocator;
+    PTO2SchedulerState *sched = orch->scheduler;
+
+    always_assert(orch->scope_stack_top >= 0 && "Cannot materialize outputs outside a scope");
+
+    {
+        int32_t scope_task_count = orch->scope_tasks_size - orch->scope_begins[orch->scope_stack_top];
+        if (scope_task_count >= allocator.window_size() - 1) {
+            int32_t active_count = allocator.active_count();
+
+            LOG_ERROR("========================================");
+            LOG_ERROR("FATAL: Scope Deadlock Detected! (ring %d)", ring_id);
+            LOG_ERROR("========================================");
+            LOG_ERROR(
+                "Tasks in current scope (%d) >= task_window_size (%d).", scope_task_count, allocator.window_size()
+            );
+            LOG_ERROR("  scope_depth:        %d", orch->scope_stack_top + 1);
+            LOG_ERROR("  ring_id:            %d", ring_id);
+            LOG_ERROR("  scope_task_count:   %d", scope_task_count);
+            LOG_ERROR("  active_tasks:       %d / %d", active_count, allocator.window_size());
+            LOG_ERROR("Root Cause:");
+            LOG_ERROR("  Tasks within a scope hold a fanout_count reference that is only");
+            LOG_ERROR("  released at scope_end. When scope task count >= window_size,");
+            LOG_ERROR("  no slots can be reclaimed -> deadlock.");
+            LOG_ERROR("Solution:");
+            LOG_ERROR("  1. Reduce tasks per scope (use batching/unroll)");
+            LOG_ERROR("  2. Increase task window (current: %d)", allocator.window_size());
+            LOG_ERROR("     Compile-time: PTO2_TASK_WINDOW_SIZE in pto_runtime2_types.h");
+            LOG_ERROR("     Runtime env:  PTO2_RING_TASK_WINDOW=<power-of-2>");
+            LOG_ERROR("  3. Split work across multiple scopes");
+            LOG_ERROR("========================================");
+            orch->sm_handle->header->orch_error_code.store(PTO2_ERROR_SCOPE_DEADLOCK, std::memory_order_release);
+            orch->fatal = true;
+            return result;
+        }
+    }
+
+    uint64_t offsets[MAX_TENSOR_ARGS] = {};
+    uint64_t buffer_sizes[MAX_TENSOR_ARGS] = {};
+    int32_t total_output_size = 0;
+    for (int32_t i = 0; i < args.tensor_count(); i++) {
+        offsets[i] = total_output_size;
+        buffer_sizes[i] = PTO2_ALIGN_UP(args.tensor(i).create_info->buffer_size_bytes(), PTO2_PACKED_OUTPUT_ALIGN);
+        total_output_size += buffer_sizes[i];
+    }
+
+    PTO2TaskAllocResult alloc_result = allocator.alloc(total_output_size);
+    if (alloc_result.failed()) {
+        orch->fatal = true;
+        return result;
+    }
+
+    int32_t local_id = alloc_result.task_id;
+    int32_t slot = alloc_result.slot;
+    PTO2TaskId task_id = PTO2TaskId::make(ring_id, static_cast<uint32_t>(local_id));
+
+    PTO2TaskDescriptor &task = allocator.task_by_slot(slot);
+    PTO2TaskPayload *payload = &orch->sm_handle->task_payloads[ring_id][slot];
+
+    for (int32_t i = 0; i < args.tensor_count(); i++) {
+        __builtin_prefetch(&payload->tensors[i], 1, 3);
+        __builtin_prefetch(reinterpret_cast<char *>(&payload->tensors[i]) + 64, 1, 3);
+    }
+    __builtin_prefetch(payload, 1, 3);
+    __builtin_prefetch(reinterpret_cast<char *>(payload) + 64, 1, 3);
+    __builtin_prefetch(reinterpret_cast<char *>(payload) + 128, 1, 3);
+
+    if (sched) {
+        auto &rs = sched->ring_sched_states[ring_id];
+        PTO2TaskSlotState &slot_state = rs.get_slot_state_by_slot(slot);
+        slot_state.fanin_count = 0;
+        slot_state.fanout_head = nullptr;
+        slot_state.fanout_lock.store(0, std::memory_order_relaxed);
+        slot_state.fanout_count = 1;
+        slot_state.fanout_refcount.store(0, std::memory_order_release);
+        slot_state.fanin_refcount.store(0, std::memory_order_release);
+        slot_state.payload = payload;
+        slot_state.task = &task;
+        slot_state.active_mask = 0;
+        slot_state.subtask_done_mask.store(0, std::memory_order_relaxed);
+        slot_state.ring_id = ring_id;
+        scope_tasks_push(orch, &slot_state);
+    } else {
+        scope_tasks_push(orch, nullptr);
+    }
+
+#if PTO2_PROFILING
+    if (total_output_size > 0) {
+        orch->buffers_allocated++;
+        orch->bytes_allocated += total_output_size;
+    }
+#endif
+
+    task.task_id = task_id;
+    task.kernel_id[static_cast<int>(PTO2SubtaskSlot::AIC)] = INVALID_KERNEL_ID;
+    task.kernel_id[static_cast<int>(PTO2SubtaskSlot::AIV0)] = INVALID_KERNEL_ID;
+    task.kernel_id[static_cast<int>(PTO2SubtaskSlot::AIV1)] = INVALID_KERNEL_ID;
+    task.packed_buffer_base = alloc_result.packed_base;
+    task.packed_buffer_end = alloc_result.packed_end;
+
+    payload->init(args, result, alloc_result.packed_base, offsets, buffer_sizes);
+    payload->fanin_actual_count = 0;
+    payload->fanin_spill_start = 0;
+    payload->fanin_spill_pool = nullptr;
+    for (int32_t i = 0; i < args.tensor_count(); i++) {
+        payload->tensors[i].owner_task_id = task_id;
+    }
+
+    if (sched) {
+        auto &rs = sched->ring_sched_states[ring_id];
+        PTO2TaskSlotState &slot_state = rs.get_slot_state_by_slot(slot);
+        slot_state.task_state.store(PTO2_TASK_COMPLETED, std::memory_order_release);
+        slot_state.completed_subtasks.store(0, std::memory_order_relaxed);
+        slot_state.total_required_subtasks = 0;
+        slot_state.block_num = 1;
+        slot_state.next_block_idx = 0;
+        slot_state.dep_pool_mark = orch->rings[ring_id].dep_pool.top;
+    }
+
     return result;
 }
 

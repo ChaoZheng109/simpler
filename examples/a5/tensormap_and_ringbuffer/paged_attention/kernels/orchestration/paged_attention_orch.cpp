@@ -34,8 +34,6 @@
 #define FUNC_SOFTMAX_PREPARE 1
 #define FUNC_PV_MATMUL 2
 #define FUNC_ONLINE_UPDATE 3
-#define FUNC_AIC_HUB 4
-#define FUNC_AIV_HUB 5
 
 extern "C" {
 
@@ -125,10 +123,10 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                 params_inplace.add_output(tile2d_ci);
                 params_inplace.add_output(scalar_ci);
                 params_inplace.add_output(scalar_ci);
-                TaskOutputTensors hub_outs = pto2_rt_submit_aiv_task(FUNC_AIV_HUB, params_inplace);
-                const Tensor &oi = hub_outs.get_ref(0);
-                const Tensor &li_update = hub_outs.get_ref(1);
-                const Tensor &mi_update = hub_outs.get_ref(2);
+                TaskOutputTensors state_outs = pto2_rt_materialize_output_tensors(params_inplace);
+                const Tensor &oi = state_outs.get_ref(0);
+                const Tensor &li_update = state_outs.get_ref(1);
+                const Tensor &mi_update = state_outs.get_ref(2);
 
                 for (uint64_t bn = 0; bn < bn_this_batch; bn++) {
                     uint32_t bt_idx[2] = {static_cast<uint32_t>(b_idx), static_cast<uint32_t>(bn)};

@@ -22,7 +22,7 @@
  *   QK → Softmax → PV → Update
  *              └──────────→ Update
  *   Update(prev block) ──→ Update(this block)
- *   Hub(init) ────────────→ Update(first block)
+ *   Materialize(init) ────→ Update(first block)
  */
 
 #include <algorithm>
@@ -35,8 +35,6 @@
 #define FUNC_SOFTMAX_PREPARE 1
 #define FUNC_PV_MATMUL 2
 #define FUNC_ONLINE_UPDATE 3
-#define FUNC_AIC_HUB 4
-#define FUNC_AIV_HUB 5
 
 extern "C" {
 
@@ -112,17 +110,17 @@ aicpu_orchestration_entry(PTO2Runtime *rt, const ChipStorageTaskArgs &orch_args)
                 uint32_t out_view_offsets[2] = {static_cast<uint32_t>(cur_offset), 0};
                 Tensor out_view = out.view(out_view_shapes, out_view_offsets);
 
-                // Hub task: zero-initialize accumulators
+                // Materialize accumulator tensors with runtime-managed lifetime.
                 Arg args_inplace;
                 args_inplace.add_output(TensorCreateInfo(oi_shapes, 2, DataType::FLOAT32));
                 args_inplace.add_output(TensorCreateInfo(li_shapes, 1, DataType::FLOAT32));
                 args_inplace.add_output(TensorCreateInfo(mi_shapes, 1, DataType::FLOAT32));
-                SubmitResult r_hub = pto2_rt_submit_aiv_task(rt, FUNC_AIV_HUB, args_inplace);
-                const Tensor &oi = r_hub.outputs.get_ref(0);
-                const Tensor &li_update = r_hub.outputs.get_ref(1);
-                const Tensor &mi_update = r_hub.outputs.get_ref(2);
+                SubmitResult r_state = pto2_rt_materialize_output_tensors(rt, args_inplace);
+                const Tensor &oi = r_state.outputs.get_ref(0);
+                const Tensor &li_update = r_state.outputs.get_ref(1);
+                const Tensor &mi_update = r_state.outputs.get_ref(2);
 
-                PTO2TaskId prev_update_task = r_hub.task_id;
+                PTO2TaskId prev_update_task = r_state.task_id;
 
                 for (uint64_t bn = 0; bn < bn_this_batch; bn++) {
                     uint64_t cur_block_idx = host_block_table[b_idx * block_num + bn];

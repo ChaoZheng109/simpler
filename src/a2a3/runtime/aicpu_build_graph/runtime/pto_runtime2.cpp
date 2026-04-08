@@ -33,6 +33,10 @@ static SubmitResult submit_task_impl(PTO2Runtime *rt, const MixedKernels &mixed_
     return pto2_submit_mixed_task(&rt->orchestrator, mixed_kernels, args);
 }
 
+SubmitResult pto2_rt_materialize_output_tensors(PTO2Runtime *rt, const Arg &args) {
+    return pto2_materialize_output_tensors(&rt->orchestrator, args);
+}
+
 static void add_dependency_impl(PTO2Runtime *rt, PTO2TaskId producer, PTO2TaskId consumer) {
     pto2_add_dependency(&rt->orchestrator, producer, consumer);
 }
@@ -47,6 +51,7 @@ static bool is_fatal_impl(PTO2Runtime *rt) { return rt->orchestrator.fatal; }
 
 static const PTO2RuntimeOps s_runtime_ops = {
     .submit_task = submit_task_impl,
+    .materialize_output_tensors = pto2_rt_materialize_output_tensors,
     .add_dependency = add_dependency_impl,
     .scope_begin = pto2_rt_scope_begin,
     .scope_end = pto2_rt_scope_end,

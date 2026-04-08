@@ -31,8 +31,6 @@
 #define FUNC_SOFTMAX_PREPARE 1
 #define FUNC_PV_MATMUL 2
 #define FUNC_ONLINE_UPDATE 3
-#define FUNC_AIC_HUB 4
-#define FUNC_AIV_HUB 5
 
 constexpr uint64_t PLATFORM_PROF_SYS_CNT_FREQ = 50000000;  // 50 MHz
 
@@ -160,10 +158,10 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                 params_inplace.add_output(scalar_ci);
                 params_inplace.add_output(scalar_ci);
                 CYCLE_COUNT_LAP(prof_param_setup);
-                TaskOutputTensors hub_outs = pto2_rt_submit_aiv_task(FUNC_AIV_HUB, params_inplace);
-                const Tensor &oi = hub_outs.get_ref(0);
-                const Tensor &li_update = hub_outs.get_ref(1);
-                const Tensor &mi_update = hub_outs.get_ref(2);
+                TaskOutputTensors state_outs = pto2_rt_materialize_output_tensors(params_inplace);
+                const Tensor &oi = state_outs.get_ref(0);
+                const Tensor &li_update = state_outs.get_ref(1);
+                const Tensor &mi_update = state_outs.get_ref(2);
                 prof_submit_count++;
                 CYCLE_COUNT_LAP(prof_submit_task);
 

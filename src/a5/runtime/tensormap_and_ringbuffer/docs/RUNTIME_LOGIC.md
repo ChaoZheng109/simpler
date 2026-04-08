@@ -636,7 +636,6 @@ KERNELS = [
     {"func_id": 1, "name": "SF",      "source": "aiv/aiv_softmax_prepare.cpp", "core_type": "aiv"},
     {"func_id": 2, "name": "PV",      "source": "aic/aic_pv_matmul.cpp",       "core_type": "aic"},
     {"func_id": 3, "name": "UP",      "source": "aiv/aiv_online_update.cpp",   "core_type": "aiv"},
-    {"func_id": 5, "name": "AIV_HUB", "source": "aiv/aiv_hub.cpp",            "core_type": "aiv"},
 ]
 
 ORCHESTRATION = {
@@ -660,7 +659,7 @@ void aicpu_orchestration_entry(uint64_t* args, int arg_count) {
         for (batch_start = 0; batch_start < batch; batch_start += IN_CORE_BATCH) {
             PTO2_SCOPE() {
                 // Describe accumulator tensors (oi, li, mi) with TensorCreateInfo
-                // Submit AIV_HUB to initialize accumulators
+                // Materialize accumulator tensors without dispatching a kernel
                 for (bn = 0; bn < max_bn; bn++) {
                     // Allocate intermediate tensors (sij, pij, mij, lij, oi_new)
                     // Submit QK (CUBE) → SF (VECTOR) → PV (CUBE) → UP (VECTOR)
