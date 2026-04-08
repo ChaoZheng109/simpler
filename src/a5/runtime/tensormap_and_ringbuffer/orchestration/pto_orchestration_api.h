@@ -113,6 +113,7 @@ void pto2_framework_bind_runtime(PTO2Runtime *rt);
  */
 typedef struct PTO2RuntimeOps {
     TaskOutputTensors (*submit_task)(PTO2Runtime *rt, const MixedKernels &mixed_kernels, const Arg &args);
+    TaskOutputTensors (*materialize_output_tensors)(PTO2Runtime *rt, const Arg &args);
     void (*scope_begin)(PTO2Runtime *rt);
     void (*scope_end)(PTO2Runtime *rt);
     void (*orchestration_done)(PTO2Runtime *rt);
@@ -153,6 +154,21 @@ static inline PTO2Runtime *pto2_current_runtime() { return pto2_framework_curren
 static inline TaskOutputTensors pto2_rt_submit_task(const MixedKernels &mixed_kernels, const Arg &args) {
     PTO2Runtime *rt = pto2_current_runtime();
     return rt->ops->submit_task(rt, mixed_kernels, args);
+}
+
+/**
+ * Materialize runtime-created OUTPUT tensors without dispatching a kernel.
+ *
+ * Use this for orchestration-managed state tensors such as accumulators that
+ * need normal runtime ownership/lifetime semantics but do not require any
+ * InCore computation to initialize.
+ *
+ * Only OUTPUT tensor args are accepted. Inputs, inouts, and scalars are
+ * rejected as orchestration bugs.
+ */
+static inline TaskOutputTensors pto2_rt_materialize_output_tensors(const Arg &args) {
+    PTO2Runtime *rt = pto2_current_runtime();
+    return rt->ops->materialize_output_tensors(rt, args);
 }
 
 /**

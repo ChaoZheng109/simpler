@@ -226,6 +226,9 @@ void pto2_scope_end(PTO2OrchestratorState *orch) {
         for (int32_t i = 0; i < count; i++) {
             PTO2TaskSlotState *slot = tasks[i];
             if (!slot) continue;
+            if (slot->task_state.load(std::memory_order_acquire) >= PTO2_TASK_COMPLETED) {
+                continue;
+            }
 
             // task_state is already PENDING from submit_task (defensive store)
             slot->task_state.store(PTO2_TASK_PENDING, std::memory_order_relaxed);
@@ -431,6 +434,188 @@ SubmitResult pto2_submit_mixed_task(PTO2OrchestratorState *orch, const MixedKern
     if (sched) {
         auto &rs = sched->ring_sched_states[ring_id];
         PTO2TaskSlotState &slot_state = rs.get_slot_state_by_slot(slot);
+        slot_state.dep_pool_mark = orch->rings[ring_id].dep_pool.top;
+    }
+
+#if PTO2_PROFILING
+    orch->tasks_submitted++;
+#if PTO2_ORCH_PROFILING
+    g_orch_submit_count++;
+#endif
+    g_orch_submit_idx++;
+#endif
+
+    result.task_id = task_id;
+    return result;
+}
+
+SubmitResult pto2_materialize_output_tensors(PTO2OrchestratorState *orch, const Arg &args) {
+    CYCLE_COUNT_START();
+
+    SubmitResult result;
+
+    if (orch->fatal) {
+        return result;
+    }
+
+    auto fail_invalid_arg = [&](const char *title, const char *detail) {
+        LOG_ERROR("========================================");
+        LOG_ERROR("FATAL: %s", title);
+        LOG_ERROR("========================================");
+        LOG_ERROR("Error: %s", detail);
+        LOG_ERROR("  tensor_count: %d, scalar_count: %d", args.tensor_count(), args.scalar_count());
+        LOG_ERROR("========================================");
+        orch->sm_handle->header->orch_error_code.store(PTO2_ERROR_INVALID_ARGS, std::memory_order_release);
+        orch->fatal = true;
+    };
+
+    if (args.has_error) {
+        fail_invalid_arg("Invalid Arg Detected!", args.error_msg ? args.error_msg : "(unknown)");
+        return result;
+    }
+
+    if (args.scalar_count() != 0) {
+        fail_invalid_arg(
+            "Invalid materialize_output_tensors Arg!",
+            "pto2_rt_materialize_output_tensors only supports OUTPUT tensors and no scalars"
+        );
+        return result;
+    }
+
+    for (int32_t i = 0; i < args.tensor_count(); i++) {
+        if (args.tag(i) != TensorArgType::OUTPUT) {
+            fail_invalid_arg(
+                "Invalid materialize_output_tensors Arg!",
+                "pto2_rt_materialize_output_tensors only supports add_output(TensorCreateInfo)"
+            );
+            return result;
+        }
+    }
+
+    if (args.tensor_count() == 0) {
+        return result;
+    }
+
+    uint8_t ring_id = orch->current_ring_id();
+    auto &task_ring = orch->rings[ring_id].task_ring;
+    PTO2SchedulerState *sched = orch->scheduler;
+
+    always_assert(orch->scope_stack_top >= 0 && "Cannot materialize output tensors outside a scope");
+
+    {
+        int32_t scope_task_count = orch->scope_tasks_size - orch->scope_begins[orch->scope_stack_top];
+        if (scope_task_count >= task_ring.window_size - 1) {
+            int32_t total_submitted = task_ring.current_index_ptr->load(std::memory_order_acquire);
+            int32_t last_alive = task_ring.last_alive_ptr->load(std::memory_order_acquire);
+            int32_t active_count = total_submitted - last_alive;
+
+            LOG_ERROR("========================================");
+            LOG_ERROR("FATAL: Scope Deadlock Detected! (ring %d)", ring_id);
+            LOG_ERROR("========================================");
+            LOG_ERROR("Tasks in current scope (%d) >= task_window_size (%d).", scope_task_count, task_ring.window_size);
+            LOG_ERROR("  scope_depth:        %d", orch->scope_stack_top + 1);
+            LOG_ERROR("  ring_id:            %d", ring_id);
+            LOG_ERROR("  scope_task_count:   %d", scope_task_count);
+            LOG_ERROR("  total_submitted:    %d", total_submitted);
+            LOG_ERROR("  last_task_alive:    %d", last_alive);
+            LOG_ERROR("  active_tasks:       %d / %d", active_count, task_ring.window_size);
+            LOG_ERROR("========================================");
+            orch->sm_handle->header->orch_error_code.store(PTO2_ERROR_SCOPE_DEADLOCK, std::memory_order_release);
+            orch->fatal = true;
+            return result;
+        }
+    }
+
+    int32_t local_id = task_ring.pto2_task_ring_alloc();
+    if (local_id < 0) {
+        orch->fatal = true;
+        return result;
+    }
+    int32_t slot = task_ring.get_task_slot(local_id);
+    PTO2TaskId task_id = pto2_make_task_id(ring_id, static_cast<uint32_t>(local_id));
+
+    PTO2TaskDescriptor &task = task_ring.get_task_by_slot(slot);
+    PTO2TaskPayload *payload = &orch->sm_handle->task_payloads[ring_id][slot];
+
+    for (int32_t i = 0; i < args.tensor_count(); i++) {
+        __builtin_prefetch(&payload->tensors[i], 1, 3);
+        __builtin_prefetch(reinterpret_cast<char *>(&payload->tensors[i]) + 64, 1, 3);
+    }
+    __builtin_prefetch(payload, 1, 3);
+    __builtin_prefetch(reinterpret_cast<char *>(payload) + 64, 1, 3);
+    __builtin_prefetch(reinterpret_cast<char *>(payload) + 128, 1, 3);
+
+    if (sched) {
+        auto &rs = sched->ring_sched_states[ring_id];
+        PTO2TaskSlotState &slot_state = rs.get_slot_state_by_slot(slot);
+        slot_state.fanin_count = 0;
+        slot_state.fanout_head = nullptr;
+        slot_state.fanout_lock.store(0, std::memory_order_relaxed);
+        slot_state.fanout_count = 1;
+        slot_state.fanout_refcount.store(0, std::memory_order_release);
+        slot_state.fanin_refcount.store(0, std::memory_order_release);
+        slot_state.payload = payload;
+        slot_state.task = &task;
+        slot_state.active_mask = 0;
+        slot_state.subtask_done_mask.store(0, std::memory_order_relaxed);
+        slot_state.ring_id = ring_id;
+        slot_state.task_state.store(PTO2_TASK_PENDING, std::memory_order_relaxed);
+        scope_tasks_push(orch, &slot_state);
+    } else {
+        scope_tasks_push(orch, nullptr);
+    }
+
+    CYCLE_COUNT_LAP_RECORD(g_orch_alloc_cycle, AicpuPhaseId::ORCH_ALLOC, task_id.raw);
+
+    int32_t total_output_size = 0;
+    for (int32_t i = 0; i < args.tensor_count(); i++) {
+        total_output_size += PTO2_ALIGN_UP(args.tensor(i).create_info.buffer_size_bytes(), PTO2_PACKED_OUTPUT_ALIGN);
+    }
+
+    void *local_packed_base = nullptr;
+    void *local_packed_end = nullptr;
+    if (total_output_size > 0) {
+        local_packed_base = orch->pto2_alloc_packed_buffer(total_output_size);
+        if (!local_packed_base) {
+            orch->fatal = true;
+            return result;
+        }
+        local_packed_end = reinterpret_cast<char *>(local_packed_base) + total_output_size;
+    }
+
+    int32_t offset = 0;
+    for (int32_t i = 0; i < args.tensor_count(); i++) {
+        const TensorCreateInfo &ci = args.tensor(i).create_info;
+        uint64_t buffer_size = ci.buffer_size_bytes();
+        uint64_t alloc_addr = reinterpret_cast<uint64_t>(reinterpret_cast<char *>(local_packed_base) + offset);
+        offset += PTO2_ALIGN_UP(buffer_size, PTO2_PACKED_OUTPUT_ALIGN);
+        result.outputs.materialize_output(ci, reinterpret_cast<void *>(alloc_addr), /*version=*/0);
+    }
+
+    CYCLE_COUNT_LAP_RECORD(g_orch_heap_cycle, AicpuPhaseId::ORCH_HEAP, task_id.raw);
+
+    if (sched) {
+        int32_t sm_last_task_alive = task_ring.last_alive_ptr->load(std::memory_order_acquire);
+        orch->rings[ring_id].dep_pool.reclaim(*sched, ring_id, sm_last_task_alive);
+    }
+
+    __builtin_prefetch(&task, 1, 1);
+    task.task_id = task_id;
+    task.kernel_id[static_cast<int>(PTO2SubtaskSlot::AIC)] = INVALID_KERNEL_ID;
+    task.kernel_id[static_cast<int>(PTO2SubtaskSlot::AIV0)] = INVALID_KERNEL_ID;
+    task.kernel_id[static_cast<int>(PTO2SubtaskSlot::AIV1)] = INVALID_KERNEL_ID;
+    task.packed_buffer_base = local_packed_base;
+    task.packed_buffer_end = local_packed_end;
+
+    payload->fanin_actual_count = 0;
+    payload->init(args, result.outputs);
+
+    CYCLE_COUNT_LAP_RECORD(g_orch_args_cycle, AicpuPhaseId::ORCH_PARAMS, task_id.raw);
+
+    if (sched) {
+        auto &rs = sched->ring_sched_states[ring_id];
+        PTO2TaskSlotState &slot_state = rs.get_slot_state_by_slot(slot);
+        slot_state.task_state.store(PTO2_TASK_COMPLETED, std::memory_order_release);
         slot_state.dep_pool_mark = orch->rings[ring_id].dep_pool.top;
     }
 

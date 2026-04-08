@@ -177,6 +177,18 @@ void pto2_scope_end(PTO2OrchestratorState *orch);
 TaskOutputTensors
 pto2_submit_mixed_task(PTO2OrchestratorState *orch, const MixedKernels &mixed_kernels, const Arg &args);
 
+/**
+ * Materialize runtime-created OUTPUT tensors without dispatching a worker
+ * kernel.
+ *
+ * This creates an orchestration-only pseudo task that is already in COMPLETED
+ * state, so returned tensors still participate in scope lifetime management and
+ * creator-dependency tracking.
+ *
+ * Only OUTPUT tensor args are supported.
+ */
+TaskOutputTensors pto2_materialize_output_tensors(PTO2OrchestratorState *orch, const Arg &args);
+
 // =============================================================================
 // Flow Control
 // =============================================================================

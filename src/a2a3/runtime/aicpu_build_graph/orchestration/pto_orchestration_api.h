@@ -65,6 +65,7 @@ typedef struct PTO2Runtime PTO2Runtime;
  */
 typedef struct PTO2RuntimeOps {
     SubmitResult (*submit_task)(PTO2Runtime *rt, const MixedKernels &mixed_kernels, const Arg &args);
+    SubmitResult (*materialize_output_tensors)(PTO2Runtime *rt, const Arg &args);
     void (*add_dependency)(PTO2Runtime *rt, PTO2TaskId producer, PTO2TaskId consumer);
     void (*scope_begin)(PTO2Runtime *rt);
     void (*scope_end)(PTO2Runtime *rt);
@@ -96,6 +97,19 @@ struct PTO2Runtime {
 
 static inline SubmitResult pto2_rt_submit_task(PTO2Runtime *rt, const MixedKernels &mixed_kernels, const Arg &args) {
     return rt->ops->submit_task(rt, mixed_kernels, args);
+}
+
+/**
+ * Materialize runtime-created OUTPUT tensors without dispatching a kernel.
+ *
+ * Returns SubmitResult so the pseudo task can still participate in explicit
+ * dependency wiring through task_id.
+ *
+ * Only OUTPUT tensor args are accepted. Inputs, inouts, and scalars are
+ * rejected as orchestration bugs.
+ */
+static inline SubmitResult pto2_rt_materialize_output_tensors(PTO2Runtime *rt, const Arg &args) {
+    return rt->ops->materialize_output_tensors(rt, args);
 }
 
 /**

@@ -37,8 +37,6 @@
 #define FUNC_SOFTMAX_PREPARE 1
 #define FUNC_PV_MATMUL 2
 #define FUNC_ONLINE_UPDATE 3
-#define FUNC_AIC_HUB 4
-#define FUNC_AIV_HUB 5
 
 constexpr uint64_t PLATFORM_PROF_SYS_CNT_FREQ = 50000000;  // 50 MHz
 
@@ -188,16 +186,16 @@ aicpu_orchestration_entry(PTO2Runtime *rt, const ChipStorageTaskArgs &orch_args)
                 prof_view_count += 2;
                 CYCLE_COUNT_LAP(prof_tensor_view);
 #endif
-                // Hub task: zero-initialize oi, li_update, mi_update
+                // Materialize accumulator tensors with runtime-managed lifetime.
                 Arg args_inplace;
                 args_inplace.add_output(TensorCreateInfo(oi_shapes, 2, DataType::FLOAT32));
                 args_inplace.add_output(TensorCreateInfo(li_shapes, 1, DataType::FLOAT32));
                 args_inplace.add_output(TensorCreateInfo(mi_shapes, 1, DataType::FLOAT32));
                 CYCLE_COUNT_LAP(prof_param_setup);
-                SubmitResult r_hub = pto2_rt_submit_aiv_task(rt, FUNC_AIV_HUB, args_inplace);
-                const Tensor &oi = r_hub.outputs.get_ref(0);
-                const Tensor &li_update = r_hub.outputs.get_ref(1);
-                const Tensor &mi_update = r_hub.outputs.get_ref(2);
+                SubmitResult r_state = pto2_rt_materialize_output_tensors(rt, args_inplace);
+                const Tensor &oi = r_state.outputs.get_ref(0);
+                const Tensor &li_update = r_state.outputs.get_ref(1);
+                const Tensor &mi_update = r_state.outputs.get_ref(2);
 #ifdef ENABLE_PROFILING
                 prof_submit_count++;
                 CYCLE_COUNT_LAP(prof_submit_task);
@@ -207,7 +205,7 @@ aicpu_orchestration_entry(PTO2Runtime *rt, const ChipStorageTaskArgs &orch_args)
                 // repeated stack-frame construction in the inner loop.
                 Arg args_qk, args_sf, args_pv, args_up;
 
-                PTO2TaskId prev_update_task = r_hub.task_id;
+                PTO2TaskId prev_update_task = r_state.task_id;
 
                 for (uint64_t bn = 0; bn < bn_this_batch; bn += N_UNROLL) {
                     uint64_t n_blocks = std::min(static_cast<uint64_t>(N_UNROLL), bn_this_batch - bn);

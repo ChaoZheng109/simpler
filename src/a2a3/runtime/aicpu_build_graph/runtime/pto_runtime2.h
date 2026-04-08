@@ -67,6 +67,7 @@ typedef struct PTO2Runtime PTO2Runtime;  // forward declare for ops signatures
 
 struct PTO2RuntimeOps {
     SubmitResult (*submit_task)(PTO2Runtime *rt, const MixedKernels &mixed_kernels, const Arg &args);
+    SubmitResult (*materialize_output_tensors)(PTO2Runtime *rt, const Arg &args);
     void (*add_dependency)(PTO2Runtime *rt, PTO2TaskId producer, PTO2TaskId consumer);
     void (*scope_begin)(PTO2Runtime *rt);
     void (*scope_end)(PTO2Runtime *rt);
@@ -161,6 +162,18 @@ void pto2_runtime_set_mode(PTO2Runtime *rt, PTO2RuntimeMode mode);
 // =============================================================================
 // Orchestration API (called by orchestration function)
 // =============================================================================
+
+/**
+ * Materialize runtime-managed output tensors without dispatching a kernel.
+ *
+ * Intended for orchestration-side accumulator/state allocation that previously
+ * required submitting an empty hub kernel. The returned SubmitResult preserves
+ * both runtime-managed outputs and a task_id for explicit dependency wiring.
+ *
+ * Only OUTPUT tensor args are supported; inputs, inouts, and scalars are
+ * rejected as orchestration bugs.
+ */
+SubmitResult pto2_rt_materialize_output_tensors(PTO2Runtime *rt, const Arg &args);
 
 /**
  * Begin a new scope

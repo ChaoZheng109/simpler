@@ -41,6 +41,10 @@ static TaskOutputTensors submit_task_impl(PTO2Runtime *rt, const MixedKernels &m
     return pto2_submit_mixed_task(&rt->orchestrator, mixed_kernels, args);
 }
 
+TaskOutputTensors pto2_rt_materialize_output_tensors(PTO2Runtime *rt, const Arg &args) {
+    return pto2_materialize_output_tensors(&rt->orchestrator, args);
+}
+
 void pto2_rt_scope_begin(PTO2Runtime *rt) { pto2_scope_begin(&rt->orchestrator); }
 
 void pto2_rt_scope_end(PTO2Runtime *rt) { pto2_scope_end(&rt->orchestrator); }
@@ -177,6 +181,7 @@ void pto2_set_tensor_data(
 
 static const PTO2RuntimeOps s_runtime_ops = {
     .submit_task = submit_task_impl,
+    .materialize_output_tensors = pto2_rt_materialize_output_tensors,
     .scope_begin = pto2_rt_scope_begin,
     .scope_end = pto2_rt_scope_end,
     .orchestration_done = pto2_rt_orchestration_done,
