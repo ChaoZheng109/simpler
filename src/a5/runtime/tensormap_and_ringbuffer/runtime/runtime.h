@@ -37,6 +37,7 @@
 #include "common/core_type.h"
 #include "common/perf_profiling.h"
 #include "common/platform_config.h"
+#include "dev_log_buffer.h"
 #include "pto2_dispatch_payload.h"
 #include "task_args.h"
 
@@ -200,6 +201,9 @@ private:
     uint8_t device_orch_so_storage_[RUNTIME_MAX_ORCH_SO_SIZE];
     size_t device_orch_so_size_;
 
+    // Diagnostic log buffer (temporary debug patch: device writes, host prints after execution)
+    void *dev_log_buffer_dev_ptr_;  // device address AICPU writes to
+
 public:
     /**
      * Constructor - zero-initialize all arrays
@@ -252,6 +256,10 @@ public:
     void set_device_orch_so(const void *data, size_t size);
     const void *get_device_orch_so_data() const;
     size_t get_device_orch_so_size() const;
+
+    // Diagnostic log buffer accessors (temporary debug patch)
+    void *get_dev_log_buffer_dev_ptr() const;
+    void set_dev_log_buffer_dev_ptr(void *p);
 
     uint64_t get_function_bin_addr(int func_id) const;
     void set_function_bin_addr(int func_id, uint64_t addr);
