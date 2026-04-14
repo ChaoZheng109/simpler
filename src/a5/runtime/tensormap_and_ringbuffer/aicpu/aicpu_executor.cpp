@@ -14,6 +14,7 @@
 #include <atomic>
 #include <cerrno>
 #include <cinttypes>
+#include <cstdarg>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -33,6 +34,7 @@
 #include "pto_runtime2.h"
 #include "pto_runtime2_types.h"
 #include "pto_shared_memory.h"
+#include "dev_log_buffer.h"
 
 // Performance profiling headers
 #include "aicpu/performance_collector_aicpu.h"
@@ -88,6 +90,19 @@ constexpr int32_t STALL_DUMP_WAIT_MAX = 4;
 constexpr int32_t STALL_DUMP_CORE_MAX = 8;
 constexpr int32_t PROGRESS_VERBOSE_THRESHOLD = 10;  // log every completion for the first N tasks
 constexpr int32_t PROGRESS_LOG_INTERVAL = 250;      // log every N completions after threshold
+
+// Diagnostic log helper: write a formatted entry into the device log buffer (temporary debug patch)
+static void dev_buf_log(DevLogBuffer *buf, int32_t thread_idx, const char *fmt, ...) {
+    if (!buf) return;
+    int32_t pos = buf->write_pos.fetch_add(1, std::memory_order_relaxed);
+    if (pos >= buf->capacity) return;
+    DevLogEntry &e = buf->entries[pos];
+    e.thread_idx = thread_idx;
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(e.msg, DEV_LOG_MSG_SIZE, fmt, ap);
+    va_end(ap);
+}
 
 static int32_t read_pto2_runtime_status(Runtime *runtime) {
     if (runtime == nullptr) {
@@ -1477,6 +1492,8 @@ int32_t AicpuExecutor::resolve_and_dispatch_pto2(Runtime *runtime, int32_t threa
         static_cast<uint64_t>(header->rings[0].task_window_size)
     );
 
+    DevLogBuffer *dev_log_buf = static_cast<DevLogBuffer *>(runtime->get_dev_log_buffer_dev_ptr());
+
     // One-time init: assign perf buffers (one thread does it; others wait)
     if (!pto2_init_done_.exchange(true, std::memory_order_acq_rel)) {
         DEV_INFO("Thread %d: doing one-time init", thread_idx);
@@ -1943,9 +1960,10 @@ int32_t AicpuExecutor::resolve_and_dispatch_pto2(Runtime *runtime, int32_t threa
                 }
             }
 
-            if (thread_idx == 0 && task_count > 0 && idle_iterations % STALL_LOG_INTERVAL == 0) {
+            if (task_count > 0 && idle_iterations % STALL_LOG_INTERVAL == 0) {
                 int32_t c = completed_tasks_.load(std::memory_order_relaxed);
-                DEV_ALWAYS(
+                dev_buf_log(
+                    dev_log_buf, thread_idx,
                     "PTO2 stall: no progress for %d iterations, completed=%d total=%d (last progress at %d)",
                     idle_iterations, c, task_count, last_progress_count
                 );
@@ -1972,7 +1990,8 @@ int32_t AicpuExecutor::resolve_and_dispatch_pto2(Runtime *runtime, int32_t threa
                             // Ready (all deps satisfied) but not enqueued — this is the real bug
                             cnt_ready++;
                             if (cnt_ready <= STALL_DUMP_READY_MAX) {
-                                DEV_ALWAYS(
+                                dev_buf_log(
+                                    dev_log_buf, thread_idx,
                                     "  STUCK-READY  ring=%d task_id=%" PRId64
                                     " kernel_id=%d refcount=%d fanin=%d state=%d",
                                     r, static_cast<int64_t>(slot_state.task->task_id.raw), kid, rc, fi,
@@ -1982,7 +2001,8 @@ int32_t AicpuExecutor::resolve_and_dispatch_pto2(Runtime *runtime, int32_t threa
                         } else {
                             cnt_waiting++;
                             if (cnt_waiting <= STALL_DUMP_WAIT_MAX) {
-                                DEV_ALWAYS(
+                                dev_buf_log(
+                                    dev_log_buf, thread_idx,
                                     "  STUCK-WAIT   ring=%d task_id=%" PRId64
                                     " kernel_id=%d refcount=%d fanin=%d state=%d",
                                     r, static_cast<int64_t>(slot_state.task->task_id.raw), kid, rc, fi,
@@ -1992,16 +2012,17 @@ int32_t AicpuExecutor::resolve_and_dispatch_pto2(Runtime *runtime, int32_t threa
                         }
                     }
                 }
-                DEV_ALWAYS(
-                    "  scan result: stuck_ready=%d stuck_waiting=%d in_flight=%d", cnt_ready, cnt_waiting, cnt_inflight
+                dev_buf_log(
+                    dev_log_buf, thread_idx, "  scan result: stuck_ready=%d stuck_waiting=%d in_flight=%d", cnt_ready,
+                    cnt_waiting, cnt_inflight
                 );
                 // Log this thread's dispatch state
                 int32_t aic_running = tracker.get_running_count<CoreType::AIC>();
                 int32_t aiv_running = tracker.get_running_count<CoreType::AIV>();
                 int32_t total_running = aic_running + aiv_running;
-                DEV_ALWAYS(
-                    "  thread=%d running_cores=%d (AIC=%d AIV=%d) core_num=%d", thread_idx, total_running, aic_running,
-                    aiv_running, core_num
+                dev_buf_log(
+                    dev_log_buf, thread_idx, "  thread=%d running_cores=%d (AIC=%d AIV=%d) core_num=%d", thread_idx,
+                    total_running, aic_running, aiv_running, core_num
                 );
                 // Dump running cores
                 auto all_running = tracker.get_all_running_cores();
@@ -2017,8 +2038,8 @@ int32_t AicpuExecutor::resolve_and_dispatch_pto2(Runtime *runtime, int32_t threa
                         hw_kernel = core_exec_states_[cid].running_slot_state->task->kernel_id[diag_slot];
                     }
                     uint64_t cond_reg = read_reg(core_exec_states_[cid].reg_addr, RegId::COND);
-                    DEV_ALWAYS(
-                        "    core=%d cond=0x%x(state=%d,id=%d) exec_id=%d kernel=%d", cid,
+                    dev_buf_log(
+                        dev_log_buf, thread_idx, "    core=%d cond=0x%x(state=%d,id=%d) exec_id=%d kernel=%d", cid,
                         static_cast<unsigned>(cond_reg), EXTRACT_TASK_STATE(cond_reg), EXTRACT_TASK_ID(cond_reg),
                         sw_tid, hw_kernel
                     );
@@ -2026,11 +2047,11 @@ int32_t AicpuExecutor::resolve_and_dispatch_pto2(Runtime *runtime, int32_t threa
                 // Dump cluster state
                 for (int32_t cli = 0; cli < tracker.get_cluster_count() && cli < STALL_DUMP_CORE_MAX; cli++) {
                     int32_t offset = cli * 3;
-                    DEV_ALWAYS(
-                        "    cluster[%d] aic=%d(%s) aiv0=%d(%s) aiv1=%d(%s)", cli, tracker.get_aic_core_id(offset),
-                        tracker.is_aic_core_idle(offset) ? "idle" : "busy", tracker.get_aiv0_core_id(offset),
-                        tracker.is_aiv0_core_idle(offset) ? "idle" : "busy", tracker.get_aiv1_core_id(offset),
-                        tracker.is_aiv1_core_idle(offset) ? "idle" : "busy"
+                    dev_buf_log(
+                        dev_log_buf, thread_idx, "    cluster[%d] aic=%d(%s) aiv0=%d(%s) aiv1=%d(%s)", cli,
+                        tracker.get_aic_core_id(offset), tracker.is_aic_core_idle(offset) ? "idle" : "busy",
+                        tracker.get_aiv0_core_id(offset), tracker.is_aiv0_core_idle(offset) ? "idle" : "busy",
+                        tracker.get_aiv1_core_id(offset), tracker.is_aiv1_core_idle(offset) ? "idle" : "busy"
                     );
                 }
             }

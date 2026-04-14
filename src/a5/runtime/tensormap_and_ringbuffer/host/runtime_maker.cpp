@@ -36,6 +36,7 @@
 #include <cstring>
 
 #include "../common/pto_runtime_status.h"
+#include "../runtime/dev_log_buffer.h"
 #include "../runtime/pto_shared_memory.h"
 #include "../runtime/runtime.h"
 #include "callable.h"
@@ -277,6 +278,22 @@ extern "C" int init_runtime_impl(Runtime *runtime, const ChipCallable *callable,
     runtime->set_pto2_gm_sm_ptr(sm_ptr);
     runtime->record_tensor_pair(nullptr, sm_ptr, static_cast<size_t>(sm_size));
 
+    // Allocate diagnostic log buffer (temporary debug patch: device writes, host prints after execution)
+    {
+        size_t log_buf_size = sizeof(DevLogBuffer);
+        DevLogBuffer *host_log_init = static_cast<DevLogBuffer *>(calloc(1, log_buf_size));
+        if (host_log_init != nullptr) {
+            host_log_init->capacity = DEV_LOG_MAX_ENTRIES;
+            void *dev_log_buf = runtime->host_api.device_malloc(log_buf_size);
+            if (dev_log_buf != nullptr) {
+                runtime->host_api.copy_to_device(dev_log_buf, host_log_init, log_buf_size);
+                runtime->set_dev_log_buffer_dev_ptr(dev_log_buf);
+                runtime->record_tensor_pair(nullptr, dev_log_buf, log_buf_size);
+            }
+            free(host_log_init);
+        }
+    }
+
     // Set up device orchestration state
     runtime->set_orch_built_on_host(false);
     runtime->set_orch_args(device_args);
@@ -381,6 +398,23 @@ extern "C" int validate_runtime_impl(Runtime *runtime) {
                 rc = copy_rc;
             } else {
                 LOG_INFO("Tensor %d: %zu bytes copied to host", i, pair.size);
+            }
+        }
+    }
+
+    // Print diagnostic log entries written by device (temporary debug patch)
+    {
+        void *dev_log_ptr = runtime->get_dev_log_buffer_dev_ptr();
+        if (dev_log_ptr != nullptr) {
+            DevLogBuffer *log_buf = static_cast<DevLogBuffer *>(calloc(1, sizeof(DevLogBuffer)));
+            if (log_buf != nullptr) {
+                runtime->host_api.copy_from_device(log_buf, dev_log_ptr, sizeof(DevLogBuffer));
+                int32_t count = log_buf->write_pos.load(std::memory_order_relaxed);
+                if (count > DEV_LOG_MAX_ENTRIES) count = DEV_LOG_MAX_ENTRIES;
+                for (int32_t i = 0; i < count; i++) {
+                    printf("[DEV Thread %d] %s\n", log_buf->entries[i].thread_idx, log_buf->entries[i].msg);
+                }
+                free(log_buf);
             }
         }
     }

@@ -52,6 +52,9 @@ Runtime::Runtime() {
     // Initialize device orchestration SO binary
     device_orch_so_size_ = 0;
 
+    // Initialize diagnostic log buffer pointer
+    dev_log_buffer_dev_ptr_ = nullptr;
+
     // Initialize kernel binary tracking
     registered_kernel_count_ = 0;
 
@@ -141,3 +144,7 @@ int Runtime::get_registered_kernel_func_id(int index) const {
 }
 
 void Runtime::clear_registered_kernels() { registered_kernel_count_ = 0; }
+
+// Diagnostic log buffer accessors (temporary debug patch)
+void *Runtime::get_dev_log_buffer_dev_ptr() const { return dev_log_buffer_dev_ptr_; }
+void Runtime::set_dev_log_buffer_dev_ptr(void *p) { dev_log_buffer_dev_ptr_ = p; }
