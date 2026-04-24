@@ -321,7 +321,6 @@ int DeviceRunner::run(
         runtime.workers[i].aicore_done = 0;
         runtime.workers[i].control = 0;
         runtime.workers[i].task = 0;
-        runtime.workers[i].task_status = 0;
         // First 1/3 are AIC, remaining 2/3 are AIV
         runtime.workers[i].core_type = (i < num_aic) ? CoreType::AIC : CoreType::AIV;
         runtime.workers[i].enable_profiling_flag = enable_profiling_flag;

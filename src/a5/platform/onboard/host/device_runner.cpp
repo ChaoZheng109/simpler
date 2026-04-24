@@ -373,12 +373,10 @@ int DeviceRunner::run(
         runtime.workers[i].aicore_done = 0;
         runtime.workers[i].control = 0;
         runtime.workers[i].task = 0;
-        runtime.workers[i].task_status = 0;
         // Set core type: first 1/3 are AIC, remaining 2/3 are AIV
         runtime.workers[i].core_type = (i < num_aic) ? CoreType::AIC : CoreType::AIV;
         runtime.workers[i].enable_profiling_flag = enable_profiling_flag;
         runtime.workers[i].l2_perf_records_addr = static_cast<uint64_t>(0);
-        runtime.workers[i].l2_perf_buffer_status = 0;
     }
 
     // Set function_bin_addr for all tasks: func_id_to_addr_[] stores CoreCallable
