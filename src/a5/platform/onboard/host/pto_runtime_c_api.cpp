@@ -26,6 +26,7 @@
 #include "common/unified_log.h"
 #include "device_runner.h"
 #include "host_log.h"
+#include "host/msprof_session.h"
 #include "host/raii_scope_guard.h"
 #include "runtime.h"
 
@@ -212,6 +213,7 @@ int run_runtime(
 
         std::vector<uint8_t> aicpu_vec(aicpu_binary, aicpu_binary + aicpu_size);
         std::vector<uint8_t> aicore_vec(aicore_binary, aicore_binary + aicore_size);
+        msprof::MsprofRunScope prof_scope(device_id);
         rc = runner->run(*r, block_dim, device_id, aicpu_vec, aicore_vec, aicpu_thread_num);
         if (rc != 0) {
             validate_runtime_impl(r);
