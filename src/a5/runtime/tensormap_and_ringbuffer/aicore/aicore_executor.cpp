@@ -11,8 +11,9 @@
 
 #include "aicore/aicore.h"
 #include "aicore/aicore_profiling_state.h"
-#include "aicore/l2_perf_collector_aicore.h"
+#include "aicore/perf_collector_aicore.h"
 #include "aicore/pmu_collector_aicore.h"
+#include "common/l0_perf_profiling.h"
 #include "common/l2_perf_profiling.h"
 #include "common/platform_config.h"  // Register-based communication
 #include "common/pmu_profiling.h"
@@ -97,11 +98,16 @@ __aicore__ __attribute__((weak)) void aicore_execute(__gm__ Runtime *runtime, in
     // they are safe to cache here.
     uint32_t profiling_flag = get_aicore_profiling_flag();
     bool l2_perf_enabled = GET_PROFILING_FLAG(profiling_flag, PROFILING_FLAG_L2_SWIMLANE);
+    bool l0_perf_enabled = GET_PROFILING_FLAG(profiling_flag, PROFILING_FLAG_L0_SWIMLANE);
     bool dump_tensor_enabled = GET_PROFILING_FLAG(profiling_flag, PROFILING_FLAG_DUMP_TENSOR);
     bool pmu_enabled = GET_PROFILING_FLAG(profiling_flag, PROFILING_FLAG_PMU);
     __gm__ L2PerfAicoreRing *l2_perf_ring = l2_perf_enabled ? get_aicore_l2_perf_ring() : nullptr;
+    __gm__ L0PerfAicoreRing *l0_perf_ring = l0_perf_enabled ? get_aicore_l0_perf_ring() : nullptr;
     __gm__ PmuAicoreRing *pmu_ring = pmu_enabled ? get_aicore_pmu_ring() : nullptr;
     uint64_t pmu_reg_base = pmu_enabled ? get_aicore_pmu_reg_base() : 0;
+    // L0 needs the start cycle even when L2 is off — capture it whenever
+    // either swimlane is enabled so we can write both rings at task end.
+    bool need_start_cycle = l2_perf_enabled || l0_perf_enabled;
 
     // Phase 4: Main execution loop - poll register for tasks until exit signal
     // Register encoding: AICPU_IDLE_TASK_ID=idle, task_id=task, AICORE_EXIT_SIGNAL=exit
@@ -134,7 +140,7 @@ __aicore__ __attribute__((weak)) void aicore_execute(__gm__ Runtime *runtime, in
             write_reg(RegId::COND, MAKE_ACK_VALUE(task_id));
 
             // Performance profiling: record start time
-            uint64_t start_time = get_sys_cnt_aicore();
+            uint64_t start_time = need_start_cycle ? get_sys_cnt_aicore() : 0;
 
             if (pmu_enabled) {
                 pmu_aicore_begin();
@@ -152,10 +158,15 @@ __aicore__ __attribute__((weak)) void aicore_execute(__gm__ Runtime *runtime, in
                 pipe_barrier(PIPE_ALL);
             }
 
-            // Performance profiling: record task execution
-            if (l2_perf_enabled) {
+            // Performance profiling: publish task window into per-swimlane rings.
+            if (l2_perf_enabled || l0_perf_enabled) {
                 uint64_t end_time = get_sys_cnt_aicore();
-                l2_perf_aicore_record_task(l2_perf_ring, task_id, start_time, end_time);
+                if (l2_perf_enabled) {
+                    perf_aicore_record_task(l2_perf_ring, task_id, start_time, end_time);
+                }
+                if (l0_perf_enabled) {
+                    perf_aicore_l0_record_task(l0_perf_ring, task_id, start_time, end_time);
+                }
             }
 
             last_reg_val = reg_val;

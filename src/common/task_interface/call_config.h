@@ -52,10 +52,12 @@ struct CallConfig {
     int32_t enable_dump_tensor = 0;
     int32_t enable_pmu = 0;  // 0 = disabled; >0 = enabled, value selects event type
     int32_t enable_dep_gen = 0;
+    int32_t enable_l0_swimlane = 0;  // 0 = disabled; >0 = enabled (a5 onboard only)
     char output_prefix[1024] = {};
 
     bool diagnostics_any() const noexcept {
-        return enable_l2_swimlane != 0 || enable_dump_tensor != 0 || enable_pmu != 0 || enable_dep_gen != 0;
+        return enable_l2_swimlane != 0 || enable_dump_tensor != 0 || enable_pmu != 0 || enable_dep_gen != 0 ||
+               enable_l0_swimlane != 0;
     }
 
     bool output_prefix_set() const noexcept { return output_prefix[0] != '\0'; }
@@ -67,10 +69,11 @@ struct CallConfig {
         if (diagnostics_any() && !output_prefix_set()) {
             throw std::invalid_argument(
                 "CallConfig: output_prefix must be set whenever any of "
-                "enable_l2_swimlane / enable_dump_tensor / enable_pmu / enable_dep_gen is enabled"
+                "enable_l2_swimlane / enable_dump_tensor / enable_pmu / enable_dep_gen / "
+                "enable_l0_swimlane is enabled"
             );
         }
     }
 };
 #pragma pack(pop)
-static_assert(sizeof(CallConfig) == 6 * sizeof(int32_t) + 1024, "CallConfig wire layout drift");
+static_assert(sizeof(CallConfig) == 7 * sizeof(int32_t) + 1024, "CallConfig wire layout drift");

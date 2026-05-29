@@ -177,6 +177,7 @@ inline double cycles_to_us(uint64_t cycles) {
 #define PROFILING_FLAG_DUMP_TENSOR (1u << 0)
 #define PROFILING_FLAG_L2_SWIMLANE (1u << 1)
 #define PROFILING_FLAG_PMU (1u << 2)
+#define PROFILING_FLAG_L0_SWIMLANE (1u << 3)
 #define GET_PROFILING_FLAG(flags, bit) ((((uint32_t)(flags)) & ((uint32_t)(bit))) != 0u)
 #define SET_PROFILING_FLAG(flags, bit) ((flags) |= (uint32_t)(bit))
 #define CLEAR_PROFILING_FLAG(flags, bit) ((flags) &= ~((uint32_t)(bit)))
@@ -243,7 +244,7 @@ constexpr int PLATFORM_PMU_RECORDS_PER_BUFFER = 512;
  * rotating L2PerfBuffer so AICore's write address never changes mid-run.
  *
  * Indexing uses `task_id % PLATFORM_L2_AICORE_RING_SIZE` (see
- * `l2_perf_aicore_record_task`), so non-power-of-two values are correct
+ * `perf_aicore_record_task`), so non-power-of-two values are correct
  * but compile to an integer divide on the AICore hot path. Prefer a power
  * of two so the compiler reduces the modulo to a mask.
  */
@@ -279,6 +280,68 @@ constexpr int PLATFORM_PMU_READYQUEUE_SIZE = PLATFORM_MAX_CORES * PLATFORM_PMU_B
  * Idle timeout duration for PMU collection (seconds).
  */
 constexpr int PLATFORM_PMU_TIMEOUT_SECONDS = 30;
+
+// =============================================================================
+// L0 Core-Swimlane (biu_perf) Profiling Configuration
+// =============================================================================
+//
+// L0 perf streams per-pipe HW stamps from the SoC DFX trace ring. The driver
+// flushes its per-channel buffer in batches, so a single read returns stamps
+// spanning many tasks; host cannot attribute by "the marker that triggered
+// the read". Instead AICore publishes each task's (start, end) cycles into
+// a per-core L0PerfAicoreRing slot, AICPU copies the pair into the
+// L0TaskFinMarker on task FIN, and host matches each decoded pipe-stamp
+// cycle to the task whose window contains it. Channel ids and physical-core
+// constants live in common/l0_perf_profiling.h (kBiuPerf*).
+
+// L0 markers use the same buffer-pool transport as L2/PMU: AICPU appends each
+// task FIN marker into a per-thread L0MarkerBuffer, switches to a fresh buffer
+// from the free queue when full, and enqueues the full buffer's pointer into
+// the per-thread ready queue. Host recycles drained buffers back into the free
+// queue. This amortizes the per-marker rtMemcpy cost and decouples device-side
+// capacity from the host's real-time drain rate (the flat per-marker ring used
+// to drop markers under the dispatch-start burst).
+
+/**
+ * Markers per L0MarkerBuffer. One buffer is one ready-queue entry, so this is
+ * the batch factor that amortizes the host's per-entry rtMemcpy round-trips.
+ */
+constexpr int PLATFORM_L0_MARKERS_PER_BUFFER = 256;
+
+/**
+ * SPSC free-queue slot count per thread (host pushes free buffers, AICPU pops).
+ */
+constexpr int PLATFORM_L0_FREE_SLOT_COUNT = 4;
+
+/**
+ * L0MarkerBuffers pre-allocated per AICPU thread (initial pool size). Device
+ * can hold PLATFORM_L0_BUFFERS_PER_THREAD * PLATFORM_L0_MARKERS_PER_BUFFER
+ * markers in flight before depending on host recycling.
+ */
+constexpr int PLATFORM_L0_BUFFERS_PER_THREAD = 8;
+
+/**
+ * Ready queue capacity (full buffers awaiting host pickup) per AICPU thread.
+ * Each entry is one full L0MarkerBuffer pointer, so this is sized in buffers,
+ * not markers — generous since the host drains buffers continuously.
+ */
+constexpr int PLATFORM_L0_PERF_READYQUEUE_SIZE =
+    PLATFORM_MAX_AICPU_THREADS * PLATFORM_L0_BUFFERS_PER_THREAD;
+
+/**
+ * Per-core L0 staging ring depth (AICore-side dual-issue slots).
+ *
+ * Same constraints as PLATFORM_L2_AICORE_RING_SIZE: ≥ in-flight task depth
+ * on a single core, power-of-two preferred so `task_id % RING_SIZE` reduces
+ * to a mask on the AICore hot path. Decoupled from any rotating buffer so
+ * the AICore write address is stable across the run.
+ */
+constexpr int PLATFORM_L0_AICORE_RING_SIZE = 2;
+
+/**
+ * Idle timeout duration for L0 perf collection (seconds).
+ */
+constexpr int PLATFORM_L0_PERF_TIMEOUT_SECONDS = 30;
 
 // =============================================================================
 // Register Communication Configuration

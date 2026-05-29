@@ -15,6 +15,7 @@
 #include "aicore/aicore_profiling_state.h"
 #include "common/core_type.h"
 #include "common/kernel_args.h"
+#include "common/l0_perf_profiling.h"
 #include "common/l2_perf_profiling.h"
 #include "common/platform_config.h"
 #include "common/pmu_profiling.h"
@@ -48,6 +49,7 @@ class Runtime;
 // compilation units.
 [[block_local]] static uint32_t s_aicore_profiling_flag;
 [[block_local]] static __gm__ L2PerfAicoreRing *s_aicore_l2_perf_ring;
+[[block_local]] static __gm__ L0PerfAicoreRing *s_aicore_l0_perf_ring;
 [[block_local]] static __gm__ PmuAicoreRing *s_aicore_pmu_ring;
 [[block_local]] static uint64_t s_aicore_pmu_reg_base;
 
@@ -58,6 +60,11 @@ __attribute__((weak)) __aicore__ void set_aicore_l2_perf_ring(__gm__ L2PerfAicor
     s_aicore_l2_perf_ring = ring;
 }
 __attribute__((weak)) __aicore__ __gm__ L2PerfAicoreRing *get_aicore_l2_perf_ring() { return s_aicore_l2_perf_ring; }
+
+__attribute__((weak)) __aicore__ void set_aicore_l0_perf_ring(__gm__ L0PerfAicoreRing *ring) {
+    s_aicore_l0_perf_ring = ring;
+}
+__attribute__((weak)) __aicore__ __gm__ L0PerfAicoreRing *get_aicore_l0_perf_ring() { return s_aicore_l0_perf_ring; }
 
 __attribute__((weak)) __aicore__ void set_aicore_pmu_ring(__gm__ PmuAicoreRing *ring) { s_aicore_pmu_ring = ring; }
 __attribute__((weak)) __aicore__ __gm__ PmuAicoreRing *get_aicore_pmu_ring() { return s_aicore_pmu_ring; }
@@ -113,6 +120,16 @@ extern "C" __global__ __aicore__ void KERNEL_ENTRY(aicore_kernel)(__gm__ KernelA
         }
     } else {
         set_aicore_l2_perf_ring(nullptr);
+    }
+    if (GET_PROFILING_FLAG(k_args->enable_profiling_flag, PROFILING_FLAG_L0_SWIMLANE)) {
+        __gm__ uint64_t *l0_ring_table = reinterpret_cast<__gm__ uint64_t *>(k_args->aicore_l0_perf_ring_addrs);
+        if (l0_ring_table != nullptr) {
+            set_aicore_l0_perf_ring(reinterpret_cast<__gm__ L0PerfAicoreRing *>(l0_ring_table[block_idx]));
+        } else {
+            set_aicore_l0_perf_ring(nullptr);
+        }
+    } else {
+        set_aicore_l0_perf_ring(nullptr);
     }
     if (GET_PROFILING_FLAG(k_args->enable_profiling_flag, PROFILING_FLAG_PMU)) {
         __gm__ uint64_t *pmu_ring_table = reinterpret_cast<__gm__ uint64_t *>(k_args->aicore_pmu_ring_addrs);

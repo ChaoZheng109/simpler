@@ -47,7 +47,8 @@
 typedef int (*aicpu_execute_func_t)(Runtime *runtime);
 typedef void (*aicore_execute_func_t)(
     Runtime *runtime, int block_idx, CoreType core_type, uint32_t physical_core_id, uint64_t regs,
-    uint32_t enable_profiling_flag, uint64_t aicore_l2_perf_ring_addrs, uint64_t aicore_pmu_ring_addrs
+    uint32_t enable_profiling_flag, uint64_t aicore_l2_perf_ring_addrs, uint64_t aicore_pmu_ring_addrs,
+    uint64_t aicore_l0_perf_ring_addrs
 );
 typedef void (*set_platform_regs_func_t)(uint64_t regs);
 
@@ -609,7 +610,8 @@ int DeviceRunner::run(Runtime &runtime, int block_dim, int launch_aicpu_num) {
         aicore_threads.push_back(create_thread([this, &runtime, i, core_type, physical_core_id]() {
             aicore_execute_func_(
                 &runtime, i, core_type, physical_core_id, kernel_args_.regs, kernel_args_.enable_profiling_flag,
-                kernel_args_.aicore_l2_perf_ring_addrs, kernel_args_.aicore_pmu_ring_addrs
+                kernel_args_.aicore_l2_perf_ring_addrs, kernel_args_.aicore_pmu_ring_addrs,
+                kernel_args_.aicore_l0_perf_ring_addrs
             );
         }));
     }

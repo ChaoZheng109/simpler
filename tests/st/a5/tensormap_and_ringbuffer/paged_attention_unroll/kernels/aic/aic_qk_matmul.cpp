@@ -80,11 +80,17 @@ static __aicore__ void qk_matmul_n_impl(
 
     // Hoist qi TLOAD before the loop (qi is constant across all blocks)
     GlobalA qiGlobal(qi_base);
+    asm volatile("bar.MTE2");
+    bisheng::cce::mark_stamp<PIPE_MTE2, 200>();
     TLOAD(aMatTile, qiGlobal);
+    asm volatile("bar.MTE2");
+    bisheng::cce::mark_stamp<PIPE_MTE2, 201>();
 
     // Pre-load first kj into buffer A
     GlobalB kjGlobal_0(key_base + bt[bt_offset + 0] * N * K);
     TLOAD(bMatTile_A, kjGlobal_0);
+    asm volatile("bar.MTE2");
+    bisheng::cce::mark_stamp<PIPE_MTE2, 202>();
 
     for (uint64_t i = 0; i < n_blocks; i++) {
         GlobalOut sijGlobal(sij_base + i * M * N);
@@ -93,6 +99,8 @@ static __aicore__ void qk_matmul_n_impl(
         set_flag(PIPE_MTE2, PIPE_MTE1, EVENT_ID0);
         wait_flag(PIPE_MTE2, PIPE_MTE1, EVENT_ID0);
 
+        asm volatile("bar.MTE1");
+        bisheng::cce::mark_stamp<PIPE_MTE1, 203>();
         // TMOV qi L1→L0A and kj L1→L0B from current buffer
         TMOV(aTile, aMatTile);
         if (i % 2 == 0) {
@@ -100,6 +108,8 @@ static __aicore__ void qk_matmul_n_impl(
         } else {
             TMOV(bTile, bMatTile_B);
         }
+        asm volatile("bar.MTE1");
+        bisheng::cce::mark_stamp<PIPE_MTE1, 204>();
 
         // Prefetch next kj into alternate L1 buffer (overlaps with MTE1→M→FIX)
         if (i + 1 < n_blocks) {
@@ -114,12 +124,20 @@ static __aicore__ void qk_matmul_n_impl(
         set_flag(PIPE_MTE1, PIPE_M, EVENT_ID0);
         wait_flag(PIPE_MTE1, PIPE_M, EVENT_ID0);
 
+        asm volatile("bar.M");
+        bisheng::cce::mark_stamp<PIPE_M, 205>();
         TMATMUL(cTile, aTile, bTile);
+        asm volatile("bar.M");
+        bisheng::cce::mark_stamp<PIPE_M, 206>();
 
         set_flag(PIPE_M, PIPE_FIX, EVENT_ID0);
         wait_flag(PIPE_M, PIPE_FIX, EVENT_ID0);
 
+        pipe_barrier(PIPE_FIX);
+        bisheng::cce::mark_stamp<PIPE_FIX, 207>();
         TSTORE(sijGlobal, cTile);
+        pipe_barrier(PIPE_FIX);
+        bisheng::cce::mark_stamp<PIPE_FIX, 208>();
 
         if (i + 1 < n_blocks) {
             // Drain all pipes before next iteration:
@@ -130,6 +148,25 @@ static __aicore__ void qk_matmul_n_impl(
         }
     }
     pipe_sync();
+
+    // Trailing flush — NOP burst + sentinel stamps mirror vector_example pattern
+    // to keep HW active long enough for biu_perf trace ring to surface data.
+    asm volatile("bar.all");
+    asm volatile("nop"); asm volatile("nop"); asm volatile("nop"); asm volatile("nop");
+    asm volatile("nop"); asm volatile("nop"); asm volatile("nop"); asm volatile("nop");
+    bisheng::cce::mark_stamp<PIPE_MTE3, 210>();
+    asm volatile("nop");
+    bisheng::cce::mark_stamp<PIPE_MTE3, 211>();
+    asm volatile("nop");
+    bisheng::cce::mark_stamp<PIPE_MTE3, 212>();
+    asm volatile("nop");
+    bisheng::cce::mark_stamp<PIPE_MTE3, 213>();
+    asm volatile("nop");
+    bisheng::cce::mark_stamp<PIPE_MTE3, 214>();
+    asm volatile("nop");
+    bisheng::cce::mark_stamp<PIPE_MTE3, 215>();
+    asm volatile(".rept 3500\n\tNOP \n\t.endr");
+    bisheng::cce::mark_stamp<PIPE_MTE3, 219>();
 }
 
 extern "C" __aicore__ void kernel_entry(__gm__ int64_t *args) {

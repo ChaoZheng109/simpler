@@ -162,6 +162,126 @@ def load_deps_json(deps_path):
     return dict(by_pred)
 
 
+# biu_perf ctrl_type → pipe name. Mirrors msprof's biu_perf_chip6_parser.py.
+_L0_PIPE_NAMES = {0: "SU", 1: "VEC", 2: "CUBE", 3: "MTE1", 4: "MTE2", 5: "MTE3", 6: "FIXP"}
+
+
+def load_l0_perf_records(perf_records_path):
+    """Load l0_perf_records.json (core-swimlane HW stamps) co-located with
+    ``l2_perf_records.json``.
+
+    Schema (see L0PerfCollector::export_swimlane_json):
+        {
+          "version": 1,
+          "markers_received": <int>,
+          "total_records": <int>,
+          "tasks": [
+            {
+              "task_id": <int>,
+              "record_count": <int>,
+              "records": [
+                {"cycle": <int>, "sub_core_id": <int>, "group": <int>,
+                 "sub_type": "aic"|"aiv0"|"aiv1",
+                 "pipe": <int>, "pipe_name": "MTE2"|...,
+                 "region_id": <int>},
+                ...
+              ]
+            },
+            ...
+          ]
+        }
+
+    Returns a flat list of record dicts with ``task_id`` injected from each
+    task's outer wrapper (records under ``tasks[].records`` don't carry it
+    inline), or ``None`` if no l0_perf_records.json is present.
+    """
+    l0_path = Path(perf_records_path).parent / "l0_perf_records.json"
+    if not l0_path.exists():
+        return None
+    try:
+        with l0_path.open() as f:
+            data = json.load(f)
+    except (OSError, ValueError) as e:
+        print(f"Warning: failed to read {l0_path}: {e}", file=sys.stderr)
+        return None
+    tasks = data.get("tasks")
+    if not isinstance(tasks, list):
+        return None
+    flat = []
+    for t in tasks:
+        task_id = t.get("task_id", 0)
+        for r in t.get("records", []):
+            r_with_task = dict(r)
+            r_with_task["task_id"] = task_id
+            flat.append(r_with_task)
+    return flat
+
+
+def _emit_l0_swimlane_events(events, l0_records):
+    """Append the L0 per-pipe swimlane to ``events`` as a dedicated process
+    (pid=5), one track per (sub_core, pipe). Each stamp becomes an instant
+    event ('ph':'i') labelled with its region id.
+
+    Timestamps are raw AICore cycles, not the L2 µs timeline — the L0
+    process is self-consistent but its events do not line up cycle-for-cycle
+    with the AICore/AICPU swimlanes.
+    """
+    if not l0_records:
+        return
+
+    events.append(
+        {"args": {"name": "AICore L0 (per-pipe stamps)"}, "cat": "__metadata", "name": "process_name", "ph": "M", "pid": 5}
+    )
+    events.append({"args": {"sort_index": 5}, "cat": "__metadata", "name": "process_sort_index", "ph": "M", "pid": 5})
+
+    # One tid per (sub_core, pipe). sub_core 0..17, pipe 0..6.
+    def _l0_tid(sub_core, pipe):
+        return 50000 + sub_core * 10 + pipe
+
+    seen_tracks = set()
+    for rec in l0_records:
+        sub_core = int(rec.get("sub_core_id", 0))
+        pipe = int(rec.get("pipe", 0))
+        tid = _l0_tid(sub_core, pipe)
+        if tid not in seen_tracks:
+            seen_tracks.add(tid)
+            pipe_name = _L0_PIPE_NAMES.get(pipe, f"pipe{pipe}")
+            events.append(
+                {
+                    "args": {"name": f"sub{sub_core}.{pipe_name}"},
+                    "cat": "__metadata",
+                    "name": "thread_name",
+                    "ph": "M",
+                    "pid": 5,
+                    "tid": tid,
+                }
+            )
+
+    for rec in l0_records:
+        sub_core = int(rec.get("sub_core_id", 0))
+        pipe = int(rec.get("pipe", 0))
+        cycle = int(rec.get("cycle", 0))
+        region_id = int(rec.get("region_id", 0))
+        task_id = rec.get("task_id", 0)
+        events.append(
+            {
+                "args": {
+                    "region_id": region_id,
+                    "task_id": task_id,
+                    "cycle": cycle,
+                    "pipe": _L0_PIPE_NAMES.get(pipe, f"pipe{pipe}"),
+                },
+                "cat": "l0_stamp",
+                "name": f"r{region_id}",
+                "ph": "i",
+                "s": "t",
+                "pid": 5,
+                "tid": _l0_tid(sub_core, pipe),
+                "ts": cycle,
+            }
+        )
+
+
 def load_kernel_config(config_path):
     """Load kernel configuration from kernel_config.py file.
 
@@ -381,6 +501,7 @@ def generate_chrome_trace_json(  # noqa: PLR0912, PLR0915
     core_to_thread=None,
     orchestrator_name=None,
     deps_edges=None,
+    l0_records=None,
 ):
     """Generate Chrome Trace Event Format JSON from task data.
 
@@ -1076,9 +1197,14 @@ def generate_chrome_trace_json(  # noqa: PLR0912, PLR0915
                 )
                 flow_id += 1
 
+    # L0 core swimlane (per-pipe HW stamps) — dedicated pid=5 process.
+    _emit_l0_swimlane_events(events, l0_records)
+
     if verbose:
         print(f"  Total events: {len(events)}")
         print(f"  Flow events: {flow_id}")
+        if l0_records:
+            print(f"  L0 stamps: {len(l0_records)}")
 
     # Step 3: Write JSON file (with traceEvents wrapper to match C++ output)
     with open(output_path, "w") as f:
@@ -1256,6 +1382,10 @@ def main():
                 file=sys.stderr,
             )
 
+        l0_records = load_l0_perf_records(input_path)
+        if args.verbose and l0_records is not None:
+            print(f"  Using l0_perf_records.json ({len(l0_records)} stamps)")
+
         generate_chrome_trace_json(
             data["tasks"],
             str(output_path),
@@ -1266,6 +1396,7 @@ def main():
             orchestrator_phases=data.get("aicpu_orchestrator_phases"),
             core_to_thread=data.get("core_to_thread"),
             deps_edges=deps_edges,
+            l0_records=l0_records,
         )
 
         print("\n✓ Conversion complete")

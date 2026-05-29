@@ -352,6 +352,7 @@ add_a2a3_runtime_test(test_wiring           a2a3/test_wiring.cpp)
 # A5 tests (src/a5/runtime/tensormap_and_ringbuffer/)
 # ---------------------------------------------------------------------------
 add_a5_test(test_a5_fatal a5/test_a5_fatal.cpp)
+add_a5_test(test_l0_decode a5/test_l0_decode.cpp)
 
 # A5 trb runtime UTs — mirror of a2a3 trb runtime UTs, link against a5_rt_objs.
 # Target names carry the a5_ prefix because hierarchical/test_tensormap (and

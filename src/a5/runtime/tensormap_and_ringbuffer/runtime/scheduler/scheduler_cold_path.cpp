@@ -15,6 +15,7 @@
 
 #include "common/unified_log.h"
 #include "aicpu/device_time.h"
+#include "aicpu/l0_perf_collector_aicpu.h"
 #include "aicpu/l2_perf_collector_aicpu.h"
 #include "aicpu/platform_regs.h"
 #include "aicpu/pmu_collector_aicpu.h"
@@ -635,6 +636,57 @@ int32_t SchedulerContext::handshake_all_cores(Runtime *runtime) {
 }
 
 // =============================================================================
+// L0 swimlane: retire workers outside biu_perf coverage so dispatch is
+// effectively locked to the monitored clusters. See header for rationale.
+// =============================================================================
+void SchedulerContext::retire_uncovered_cores_for_l0(Runtime *runtime) {
+    int32_t kept_aic = 0;
+    int32_t retired_aic = 0;
+    for (int32_t i = 0; i < aic_count_; ++i) {
+        int32_t wid = aic_worker_ids_[i];
+        uint32_t phys = physical_core_ids_[wid];
+        if (l0_perf_cluster_is_covered(phys, /*is_aic=*/true)) {
+            aic_worker_ids_[kept_aic++] = wid;
+            continue;
+        }
+        // Send exit signal so the worker doesn't hang waiting for dispatch.
+        // Existing emergency_shutdown writes via platform_deinit_aicore_regs;
+        // we do the same here per-core to keep the survivors live.
+        if (core_exec_states_[wid].reg_addr != 0) {
+            platform_deinit_aicore_regs(core_exec_states_[wid].reg_addr);
+            core_exec_states_[wid].reg_addr = 0;
+        }
+        ++retired_aic;
+        LOG_INFO_V1("L0 swimlane: retired AIC worker %d (phys %u, uncovered cluster)", wid, phys);
+    }
+
+    int32_t kept_aiv = 0;
+    int32_t retired_aiv = 0;
+    for (int32_t i = 0; i < aiv_count_; ++i) {
+        int32_t wid = aiv_worker_ids_[i];
+        uint32_t phys = physical_core_ids_[wid];
+        if (l0_perf_cluster_is_covered(phys, /*is_aic=*/false)) {
+            aiv_worker_ids_[kept_aiv++] = wid;
+            continue;
+        }
+        if (core_exec_states_[wid].reg_addr != 0) {
+            platform_deinit_aicore_regs(core_exec_states_[wid].reg_addr);
+            core_exec_states_[wid].reg_addr = 0;
+        }
+        ++retired_aiv;
+        LOG_INFO_V1("L0 swimlane: retired AIV worker %d (phys %u, uncovered cluster)", wid, phys);
+    }
+
+    aic_count_ = kept_aic;
+    aiv_count_ = kept_aiv;
+    (void)runtime;  // reserved for future use
+    LOG_INFO_V0(
+        "L0 swimlane: retired %d AIC, %d AIV; surviving %d AIC, %d AIV (biu_perf-monitored only)",
+        retired_aic, retired_aiv, kept_aic, kept_aiv
+    );
+}
+
+// =============================================================================
 // Assign discovered cores to scheduler threads (cluster-aligned round-robin).
 // =============================================================================
 bool SchedulerContext::assign_cores_to_threads() {
@@ -832,6 +884,11 @@ int32_t SchedulerContext::init(
         LOG_ERROR("handshake_all_cores failed");
         return rc;
     }
+#if PTO2_PROFILING
+    if (is_l0_swimlane_enabled()) {
+        retire_uncovered_cores_for_l0(runtime);
+    }
+#endif
     if (!assign_cores_to_threads()) {
         return -1;
     }

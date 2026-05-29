@@ -298,6 +298,16 @@ struct ProfilerAlgorithms {
         if (!site_opt.has_value()) return;
         auto &site = *site_opt;
 
+        // Marker-only modules (L0): entire payload is inline in the ReadyEntry,
+        // no separate buffer pool. Skip the buffer-resolve / refill / copy
+        // logic and deliver the ReadyBufferInfo directly. Module::resolve_entry
+        // signals this by returning buffer_size == 0 (and may leave free_queue
+        // nullptr — neither obtain_buffer nor copy_buffer_from_device runs).
+        if (site.buffer_size == 0) {
+            mgr.push_to_ready(site.info);
+            return;
+        }
+
         void *new_dev = obtain_buffer(mgr, site.kind, site.buffer_size);
         if (new_dev != nullptr) {
             push_to_free_queue(mgr, *site.free_queue, new_dev);

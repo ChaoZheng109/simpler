@@ -7,7 +7,15 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
-"""Tensormap-and-ringbuffer vector example: f = (a+b+1)*(a+b+2) + (a+b)."""
+"""L0 clock-probe variant of vector_example.
+
+Same DAG as vector_example (f = (a+b+1)*(a+b+2) + (a+b)), but only kernel_mul
+carries mark_stamp instrumentation and kernel_mul runs exactly once (t3).
+That makes every biu_perf pipe stamp attributable to a single task, so the
+run can be used to (a) measure the offset between the mark_stamp DFX clock and
+the AICore get_sys_cnt_aicore() task window, and (b) check what — if any —
+non-mark_stamp activity also lands on the channels.
+"""
 
 import torch
 from simpler.task_interface import ArgDirection as D
@@ -16,8 +24,11 @@ from simpler_setup import SceneTestCase, TaskArgsBuilder, Tensor, scene_test
 
 
 @scene_test(level=2, runtime="tensormap_and_ringbuffer")
-class TestVectorExample(SceneTestCase):
-    """f = (a+b+1)*(a+b+2) + (a+b), where a=2.0, b=3.0 -> f=47.0."""
+class TestVectorMulStamp(SceneTestCase):
+    """f = (a+b+1)*(a+b+2) + (a+b), where a=2.0, b=3.0 -> f=47.0.
+
+    Only kernel_mul is instrumented with mark_stamp (runs once at t3).
+    """
 
     CALLABLE = {
         "orchestration": {

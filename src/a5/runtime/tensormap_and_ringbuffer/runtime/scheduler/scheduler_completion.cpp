@@ -21,6 +21,7 @@
 #include "spin_hint.h"
 
 // Performance profiling headers
+#include "aicpu/l0_perf_collector_aicpu.h"
 #include "aicpu/l2_perf_collector_aicpu.h"
 #include "aicpu/pmu_collector_aicpu.h"
 #include "aicpu/tensor_dump_aicpu.h"
@@ -196,6 +197,25 @@ void SchedulerContext::complete_slot_task(
             core_id, thread_idx, static_cast<uint32_t>(expected_reg_task_id), slot_state.task->task_id.raw,
             slot_state.task->kernel_id[static_cast<int32_t>(subslot)], hank[core_id].core_type
         );
+    }
+#endif
+#if PTO2_PROFILING
+    if (is_l0_swimlane_enabled()) {
+        // FIN → enriches L0TaskFinMarker with the AICore-published cycle
+        // window (read from the per-core L0PerfAicoreRing slot keyed by
+        // the register dispatch token) and pushes it to the per-thread GM
+        // ready queue. Host L0PerfCollector pops the marker (via mgmt +
+        // collector thread), drains the matching biu_perf channels, and
+        // attributes each decoded pipe stamp by cycle window.
+        if (l0_perf_aicpu_complete_record(
+                core_id, thread_idx, static_cast<uint32_t>(expected_reg_task_id), slot_state.task->task_id.raw,
+                hank[core_id].core_type
+            ) != 0) {
+            LOG_ERROR(
+                "Core %d: l0_perf_aicpu_complete_record failed for task 0x%" PRIx64, core_id,
+                static_cast<uint64_t>(slot_state.task->task_id.raw)
+            );
+        }
     }
 #endif
 }
