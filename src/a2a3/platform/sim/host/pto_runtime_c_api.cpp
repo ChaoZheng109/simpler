@@ -305,7 +305,7 @@ int prepare_callable(DeviceContextHandle ctx, int32_t callable_id, const void *c
 int run_prepared(
     DeviceContextHandle ctx, RuntimeHandle runtime, int32_t callable_id, const void *args, int block_dim,
     int aicpu_thread_num, int enable_l2_swimlane, int enable_dump_tensor, int enable_pmu, int enable_dep_gen,
-    const char *output_prefix, PtoRunTiming *out_timing
+    int enable_l0_swimlane, const char *output_prefix, PtoRunTiming *out_timing
 ) {
     if (out_timing != NULL) {
         out_timing->host_wall_ns = 0;
@@ -316,6 +316,17 @@ int run_prepared(
 
     if (!runner->has_prepared_callable(callable_id)) {
         LOG_ERROR("run_prepared: callable_id=%d not prepared", callable_id);
+        return -1;
+    }
+
+    // L0 swimlane (biu_perf) is dav-c310 (a5) hardware; a2a3 sim does not
+    // implement this path. Fail-fast so users see the unsupported flag
+    // immediately rather than silently getting no l0_perf_records.json.
+    if (enable_l0_swimlane != 0) {
+        LOG_ERROR(
+            "run_prepared: --enable-l0-swimlane is not supported on a2a3 sim "
+            "(biu_perf is dav-c310/a5-only)"
+        );
         return -1;
     }
 

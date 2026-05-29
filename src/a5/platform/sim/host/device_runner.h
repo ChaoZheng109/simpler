@@ -353,7 +353,8 @@ private:
     bool aicpu_so_loaded_{false};  // true after AICPU SO is dlopen'd; load-once across runs.
     void *aicore_so_handle_{nullptr};
     int (*aicpu_execute_func_)(Runtime *){nullptr};
-    void (*aicore_execute_func_)(Runtime *, int, CoreType, uint32_t, uint64_t, uint32_t, uint64_t, uint64_t){nullptr};
+    void (*aicore_execute_func_)(Runtime *, int, CoreType, uint32_t, uint64_t, uint32_t, uint64_t, uint64_t, uint64_t
+    ){nullptr};
     void (*set_platform_regs_func_)(uint64_t){nullptr};
     void (*set_platform_dump_base_func_)(uint64_t){nullptr};
     void (*set_platform_pmu_base_func_)(uint64_t){nullptr};

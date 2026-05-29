@@ -44,6 +44,7 @@
 #include <cstdint>
 
 #include "aicore/aicore.h"
+#include "common/l0_perf_profiling.h"
 #include "common/l2_perf_profiling.h"
 #include "common/pmu_profiling.h"
 
@@ -62,6 +63,16 @@ __aicore__ uint32_t get_aicore_profiling_flag();
  */
 __aicore__ void set_aicore_l2_perf_ring(__gm__ L2PerfAicoreRing *ring);
 __aicore__ __gm__ L2PerfAicoreRing *get_aicore_l2_perf_ring();
+
+/**
+ * Per-core L0 staging ring. Set once at kernel entry from
+ * `((__gm__ uint64_t*)k_args->aicore_l0_perf_ring_addrs)[block_idx]`;
+ * nullptr when the L0 swimlane bit is off or the address table is null.
+ * AICore writes (start, end) here on each task end so AICPU can lift the
+ * window into the L0 marker.
+ */
+__aicore__ void set_aicore_l0_perf_ring(__gm__ L0PerfAicoreRing *ring);
+__aicore__ __gm__ L0PerfAicoreRing *get_aicore_l0_perf_ring();
 
 /**
  * Per-core PMU staging ring (a5-only — AICore writes the snapshot).

@@ -9,15 +9,15 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 /**
- * @file l2_perf_collector_aicore.h
+ * @file perf_collector_aicore.h
  * @brief AICore performance data collection interface
  *
  * Provides lightweight performance recording interface for AICore kernels.
  * Uses dcci for efficient cache management instead of memory barriers.
  */
 
-#ifndef PLATFORM_AICORE_L2_PERF_COLLECTOR_AICORE_H_
-#define PLATFORM_AICORE_L2_PERF_COLLECTOR_AICORE_H_
+#ifndef PLATFORM_AICORE_PERF_COLLECTOR_AICORE_H_
+#define PLATFORM_AICORE_PERF_COLLECTOR_AICORE_H_
 
 #include "common/l2_perf_profiling.h"
 #include "aicore/aicore.h"
@@ -51,7 +51,7 @@
  * @param end_time End timestamp
  */
 __aicore__ __attribute__((always_inline)) static inline void
-l2_perf_aicore_record_task(__gm__ L2PerfAicoreRing *ring, uint32_t task_id, uint64_t start_time, uint64_t end_time) {
+perf_aicore_record_task(__gm__ L2PerfAicoreRing *ring, uint32_t task_id, uint64_t start_time, uint64_t end_time) {
     __gm__ L2PerfRecord *record = &ring->dual_issue_slots[task_id % PLATFORM_L2_AICORE_RING_SIZE];
 
     record->start_time = start_time;
@@ -63,4 +63,4 @@ l2_perf_aicore_record_task(__gm__ L2PerfAicoreRing *ring, uint32_t task_id, uint
     dsb((mem_dsb_t)0);
 }
 
-#endif  // PLATFORM_AICORE_L2_PERF_COLLECTOR_AICORE_H_
+#endif  // PLATFORM_AICORE_PERF_COLLECTOR_AICORE_H_

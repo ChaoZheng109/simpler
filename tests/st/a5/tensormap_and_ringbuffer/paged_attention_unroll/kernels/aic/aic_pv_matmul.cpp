@@ -106,29 +106,41 @@ static __aicore__ void pv_matmul_n_impl(
         // Stage 1: TLOAD (MTE2: GM → L1[cur])
         // Wait for MTE1 to release L1[cur] (reverse dep from previous iteration)
         wait_flag(PIPE_MTE1, PIPE_MTE2, static_cast<::event_t>(cur));
+        asm volatile("bar.MTE2");
+        bisheng::cce::mark_stamp<PIPE_MTE2, 220>();
         TLOAD(aMatTile[cur], pijGlobal);
         set_flag(PIPE_MTE2, PIPE_MTE1, EVENT_ID0);  // forward: A in L1 ready
         TLOAD(bMatTile[cur], vjGlobal);
         set_flag(PIPE_MTE2, PIPE_MTE1, EVENT_ID1);  // forward: B in L1 ready
+        asm volatile("bar.MTE2");
+        bisheng::cce::mark_stamp<PIPE_MTE2, 221>();
 
         // Stage 2: TMOV (MTE1: L1[cur] → L0[cur])
         // Wait for M-pipe to release L0[cur] (reverse dep from previous iteration)
         wait_flag(PIPE_M, PIPE_MTE1, static_cast<::event_t>(cur));
         wait_flag(PIPE_MTE2, PIPE_MTE1, EVENT_ID0);  // forward: wait A loaded
+        asm volatile("bar.MTE1");
+        bisheng::cce::mark_stamp<PIPE_MTE1, 222>();
         TMOV(aTile[cur], aMatTile[cur]);
         wait_flag(PIPE_MTE2, PIPE_MTE1, EVENT_ID1);  // forward: wait B loaded
         TMOV(bTile[cur], bMatTile[cur]);
         set_flag(PIPE_MTE1, PIPE_MTE2, static_cast<::event_t>(cur));  // reverse: release L1[cur]
+        asm volatile("bar.MTE1");
+        bisheng::cce::mark_stamp<PIPE_MTE1, 223>();
 
         // Stage 3: TMATMUL (M-pipe: L0A[cur] × L0B[cur] → L0C)
         set_flag(PIPE_MTE1, PIPE_M, static_cast<::event_t>(cur));  // forward: L0[cur] ready
         wait_flag(PIPE_MTE1, PIPE_M, static_cast<::event_t>(cur));
+        asm volatile("bar.M");
+        bisheng::cce::mark_stamp<PIPE_M, 224>();
         if (i == 0) {
             TMATMUL(cTile, aTile[cur], bTile[cur]);
         } else {
             TMATMUL_ACC(cTile, cTile, aTile[cur], bTile[cur]);
         }
         set_flag(PIPE_M, PIPE_MTE1, static_cast<::event_t>(cur));  // reverse: release L0[cur]
+        asm volatile("bar.M");
+        bisheng::cce::mark_stamp<PIPE_M, 225>();
     }
 
     // Drain outstanding reverse-dependency flags
@@ -139,9 +151,31 @@ static __aicore__ void pv_matmul_n_impl(
 
     set_flag(PIPE_M, PIPE_FIX, EVENT_ID0);
     wait_flag(PIPE_M, PIPE_FIX, EVENT_ID0);
+    pipe_barrier(PIPE_FIX);
+    bisheng::cce::mark_stamp<PIPE_FIX, 226>();
     TSTORE(oiGlobal, cTile);
+    pipe_barrier(PIPE_FIX);
+    bisheng::cce::mark_stamp<PIPE_FIX, 227>();
 
     pipe_sync();
+
+    // Trailing flush — keep HW active long enough for biu_perf trace ring drain.
+    asm volatile("bar.all");
+    asm volatile("nop"); asm volatile("nop"); asm volatile("nop"); asm volatile("nop");
+    asm volatile("nop"); asm volatile("nop"); asm volatile("nop"); asm volatile("nop");
+    bisheng::cce::mark_stamp<PIPE_MTE3, 230>();
+    asm volatile("nop");
+    bisheng::cce::mark_stamp<PIPE_MTE3, 231>();
+    asm volatile("nop");
+    bisheng::cce::mark_stamp<PIPE_MTE3, 232>();
+    asm volatile("nop");
+    bisheng::cce::mark_stamp<PIPE_MTE3, 233>();
+    asm volatile("nop");
+    bisheng::cce::mark_stamp<PIPE_MTE3, 234>();
+    asm volatile("nop");
+    bisheng::cce::mark_stamp<PIPE_MTE3, 235>();
+    asm volatile(".rept 3500\n\tNOP \n\t.endr");
+    bisheng::cce::mark_stamp<PIPE_MTE3, 239>();
 }
 
 extern "C" __aicore__ void kernel_entry(__gm__ int64_t *args) {

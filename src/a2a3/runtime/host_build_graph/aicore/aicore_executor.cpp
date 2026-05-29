@@ -11,7 +11,7 @@
 
 #include "aicore/aicore.h"
 #include "aicore/aicore_profiling_state.h"
-#include "aicore/l2_perf_collector_aicore.h"
+#include "aicore/perf_collector_aicore.h"
 #include "aicore/pmu_collector_aicore.h"
 #include "common/l2_perf_profiling.h"
 #include "common/platform_config.h"  // Platform configuration (C/C++ compatible)
@@ -103,7 +103,7 @@ __aicore__ __attribute__((weak)) void aicore_execute(__gm__ Runtime *runtime, in
 
             if (l2_perf_enabled) {
                 uint64_t end_time = get_sys_cnt_aicore();
-                l2_perf_aicore_record_task(l2_perf_ring, actual_task_id, start_time, end_time);
+                perf_aicore_record_task(l2_perf_ring, actual_task_id, start_time, end_time);
             }
 
             last_task_id = task_id;

@@ -312,6 +312,7 @@ add_a2a3_runtime_test(test_wiring           a2a3/test_wiring.cpp)
 # A5 tests (src/a5/runtime/tensormap_and_ringbuffer/)
 # ---------------------------------------------------------------------------
 add_a5_test(test_a5_fatal a5/test_a5_fatal.cpp)
+add_a5_test(test_l0_decode a5/test_l0_decode.cpp)
 
 # Host logger silent/off behavior — no runtime deps, just compile host_log.cpp
 # alongside the test (faster than dlopen'ing libsimpler_log.so for a unit test).

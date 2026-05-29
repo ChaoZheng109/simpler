@@ -163,6 +163,12 @@ def pytest_addoption(parser):
         help="Enable PMU collection. Bare flag = PIPE_UTILIZATION(2). "
         "Pass event type to override (e.g. --enable-pmu 4)",
     )
+    parser.addoption(
+        "--enable-l0-swimlane",
+        action="store_true",
+        default=False,
+        help="Enable L0 core swimlane (per-pipe biu_perf HW stamps; a5 onboard only)",
+    )
     parser.addoption("--build", action="store_true", default=False, help="Compile runtime from source")
     parser.addoption(
         "--pto-isa-commit",

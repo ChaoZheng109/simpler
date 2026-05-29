@@ -542,6 +542,9 @@ int DeviceRunner::run(Runtime &runtime, int block_dim, int launch_aicpu_num) {
     if (enable_pmu_) {
         SET_PROFILING_FLAG(enable_profiling_flag, PROFILING_FLAG_PMU);
     }
+    if (enable_l0_swimlane_) {
+        SET_PROFILING_FLAG(enable_profiling_flag, PROFILING_FLAG_L0_SWIMLANE);
+    }
 
     for (int i = 0; i < num_aicore; i++) {
         runtime.workers[i].aicpu_ready = 0;
@@ -606,6 +609,27 @@ int DeviceRunner::run(Runtime &runtime, int block_dim, int launch_aicpu_num) {
         }
     }
 
+    if (enable_l0_swimlane_) {
+        // biu_perf is HW-fixed to the 6 AICores listed in kBiuPerfPhysAicore[]
+        // (phys {0, 9, 17, 18, 27, 35}; AICore = cluster = 1 cube + 2 vec).
+        // With L0 enabled the AICPU scheduler retires every other AICore
+        // after handshake, so effective device throughput is capped to those
+        // 6 regardless of requested block_dim. Warn when block_dim > 6 so
+        // users understand why the run can't scale further.
+        if (num_aic > static_cast<int>(kBiuPerfNumGroups)) {
+            LOG_WARN(
+                "L0 perf: biu_perf monitors only %u AICores (phys {0,9,17,18,27,35}); scheduler "
+                "will retire the other %d AICore(s) so effective block_dim is capped to 6.",
+                kBiuPerfNumGroups, num_aic - static_cast<int>(kBiuPerfNumGroups)
+            );
+        }
+        rc = init_l0_perf(num_aicore, launch_aicpu_num, device_id_);
+        if (rc != 0) {
+            LOG_ERROR("L0 perf: init_l0_perf failed: %d", rc);
+            return rc;
+        }
+    }
+
     // Cleanup guard for early returns: stops all started collectors so
     // their mgmt + poll threads exit cleanly. stop() is idempotent and a
     // no-op on collectors that never started.
@@ -646,6 +670,9 @@ int DeviceRunner::run(Runtime &runtime, int block_dim, int launch_aicpu_num) {
     }
     if (enable_pmu_) {
         pmu_collector_.start(thread_factory);
+    }
+    if (enable_l0_swimlane_) {
+        l0_perf_collector_.start(thread_factory);
     }
 
     LOG_INFO_V0("=== launch_aicpu_kernel %s ===", host::KernelNames::InitName);
@@ -739,6 +766,11 @@ int DeviceRunner::run(Runtime &runtime, int block_dim, int launch_aicpu_num) {
     if (enable_pmu_) {
         pmu_collector_.stop();
         pmu_collector_.reconcile_counters();
+    }
+
+    if (enable_l0_swimlane_) {
+        l0_perf_collector_.stop();
+        l0_perf_collector_.export_swimlane_json();
     }
 
     // Print handshake results (reads from device memory, must be before free)
@@ -1033,6 +1065,9 @@ int DeviceRunner::finalize() {
     if (pmu_collector_.is_initialized()) {
         pmu_collector_.finalize(/*unregister_cb=*/nullptr, prof_free_cb);
     }
+    if (l0_perf_collector_.is_initialized()) {
+        l0_perf_collector_.finalize(/*unregister_cb=*/nullptr, prof_free_cb);
+    }
 
     // Release per-Worker static arena (GM heap + PTO2 SM in a single backing
     // device allocation). Must precede mem_alloc_.finalize() so the arena
@@ -1194,6 +1229,9 @@ void DeviceRunner::finalize_collectors() {
     if (pmu_collector_.is_initialized()) {
         pmu_collector_.stop();
     }
+    if (l0_perf_collector_.is_initialized()) {
+        l0_perf_collector_.stop();
+    }
 }
 
 int DeviceRunner::init_l2_perf(int num_aicore, int device_id) {
@@ -1233,6 +1271,34 @@ int DeviceRunner::init_pmu(
         kernel_args_.args.pmu_data_base = reinterpret_cast<uint64_t>(pmu_collector_.get_pmu_shm_device_ptr());
         kernel_args_.args.aicore_pmu_ring_addrs =
             reinterpret_cast<uint64_t>(pmu_collector_.get_aicore_ring_addrs_device_ptr());
+    }
+    return rc;
+}
+
+int DeviceRunner::init_l0_perf(int num_aicore, int num_threads, int device_id) {
+    // Note: we deliberately do NOT call aclrtSetDeviceResLimit here. That ACL
+    // call would cap AICore (= cluster, = 1 cube + 2 vec) concurrency without
+    // letting us pick *which* AICores the driver allocates, and on a5 the ACL
+    // group-affinity APIs that could pick are unsupported (return
+    // ACL_ERROR_RT_FEATURE_NOT_SUPPORT). Instead the AICPU scheduler runs
+    // retire_uncovered_cores_for_l0() after handshake: it enables every
+    // AICore so it can see which physical clusters it actually got, then
+    // sends an exit signal to all AICores whose cluster is outside
+    // kBiuPerfPhysAicore[]. The surviving AICores are exactly the
+    // biu_perf-monitored set, so every dispatched task lands on a covered
+    // cluster.
+    int rc = l0_perf_collector_.initialize(
+        num_aicore, num_threads, device_id, prof_alloc_cb, /*register_cb=*/nullptr, prof_free_cb, output_prefix_
+    );
+    if (rc == 0) {
+        kernel_args_.args.l0_perf_data_base =
+            reinterpret_cast<uint64_t>(l0_perf_collector_.get_l0_perf_setup_device_ptr());
+        kernel_args_.args.aicore_l0_perf_ring_addrs =
+            reinterpret_cast<uint64_t>(l0_perf_collector_.get_aicore_ring_addrs_device_ptr());
+        // One-shot affinity diagnostic: confirm whether aclrtSetDeviceResLimit
+        // actually got us the biu_perf-monitored cluster set, or if dispatch
+        // can still spread to unmonitored clusters.
+        l0_perf_collector_.diagnose_group_affinity();
     }
     return rc;
 }

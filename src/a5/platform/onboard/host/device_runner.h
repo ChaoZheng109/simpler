@@ -48,6 +48,7 @@
 #include "host/function_cache.h"
 #include "host/memory_allocator.h"
 #include "host/l2_perf_collector.h"
+#include "host/l0_perf_collector.h"
 #include "host/pmu_collector.h"
 #include "host/tensor_dump_collector.h"
 #include "load_aicpu_op.h"
@@ -300,6 +301,7 @@ public:
         enable_pmu_ = (enable_pmu > 0);
         pmu_event_type_ = resolve_pmu_event_type(enable_pmu);
     }
+    void set_l0_swimlane_enabled(bool enable) { enable_l0_swimlane_ = enable; }
     // Directory under which all diagnostic artifacts (l2_perf_records.json /
     // tensor_dump/ / pmu.csv) land. Required (non-empty) when any diagnostic
     // is enabled; CallConfig::validate() enforces this contract upstream.
@@ -588,6 +590,9 @@ private:
     // PMU profiling (per-task AICore hardware counters)
     PmuCollector pmu_collector_;
 
+    // L0 core swimlane (per-pipe biu_perf HW stamps)
+    L0PerfCollector l0_perf_collector_;
+
     /**
      * Ensure device is initialized (lazy initialization)
      *
@@ -689,11 +694,13 @@ private:
     bool enable_l2_swimlane_{false};
     bool enable_dump_tensor_{false};
     bool enable_pmu_{false};
+    bool enable_l0_swimlane_{false};
     L2PerfLevel l2_perf_level_{L2PerfLevel::DISABLED};             // resolved from set_l2_swimlane_enabled()
     PmuEventType pmu_event_type_{PmuEventType::PIPE_UTILIZATION};  // resolved from set_pmu_enabled()
     std::string output_prefix_{};                                  // diagnostic artifact root directory
 
     int init_pmu(int num_cores, int num_threads, const std::string &csv_path, PmuEventType event_type, int device_id);
+    int init_l0_perf(int num_aicore, int num_threads, int device_id);
 
     // Per-run collector teardown: stops mgmt + poll threads on every collector
     // whose init succeeded, in the only safe order (stop() joins mgmt before

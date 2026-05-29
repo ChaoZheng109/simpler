@@ -26,6 +26,7 @@
 #include "spin_hint.h"
 
 // Performance profiling headers
+#include "aicpu/l0_perf_collector_aicpu.h"
 #include "aicpu/l2_perf_collector_aicpu.h"
 #include "aicpu/pmu_collector_aicpu.h"
 #include "aicpu/tensor_dump_aicpu.h"
@@ -511,6 +512,26 @@ int32_t SchedulerContext::resolve_and_dispatch(Runtime *runtime, int32_t thread_
     l2_perf.l2_perf_enabled = (l2_perf_level_ != L2PerfLevel::DISABLED);
 #endif
 
+#if PTO2_PROFILING
+    // L0 swimlane init is per-thread: each thread builds its own
+    // cores_owned → biu_perf group lookup table (used in scheduler_completion
+    // to choose the correct marker.group on task FIN). Pure in-memory; never
+    // fails. driver consumer (prof_drv_start / prof_channel_read / prof_stop)
+    // lives on host L0PerfCollector.
+    if (is_l0_swimlane_enabled() && tracker.core_num() > 0) {
+        const int32_t *l0_cores = tracker.core_ids();
+        int32_t l0_core_num = tracker.core_num();
+        uint32_t l0_phys_ids[PLATFORM_MAX_CORES_PER_THREAD];
+        if (l0_core_num > PLATFORM_MAX_CORES_PER_THREAD) {
+            l0_core_num = PLATFORM_MAX_CORES_PER_THREAD;
+        }
+        for (int32_t k = 0; k < l0_core_num; k++) {
+            l0_phys_ids[k] = physical_core_ids_[l0_cores[k]];
+        }
+        l0_perf_aicpu_init(thread_idx, l0_cores, l0_phys_ids, l0_core_num);
+    }
+#endif
+
     constexpr int LOCAL_READY_CAP_PER_TYPE = 64;
     PTO2TaskSlotState *local_ptrs[PTO2_NUM_RESOURCE_SHAPES][LOCAL_READY_CAP_PER_TYPE];
     PTO2LocalReadyBuffer local_bufs[PTO2_NUM_RESOURCE_SHAPES];
@@ -826,6 +847,13 @@ int32_t SchedulerContext::resolve_and_dispatch(Runtime *runtime, int32_t thread_
         pmu_aicpu_flush_buffers(
             thread_idx, core_trackers_[thread_idx].core_ids(), core_trackers_[thread_idx].core_num()
         );
+    }
+#endif
+#if PTO2_PROFILING
+    // L0 swimlane: flush this thread's partial marker buffer so the tail
+    // markers that didn't fill a buffer still reach the host.
+    if (is_l0_swimlane_enabled()) {
+        l0_perf_aicpu_flush(thread_idx);
     }
 #endif
 

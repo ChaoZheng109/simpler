@@ -190,6 +190,14 @@ private:
     // Handshake with all AICore workers; populates core_exec_states_, worker id lists.
     int32_t handshake_all_cores(Runtime *runtime);
 
+    // When L0 swimlane is enabled, compact aic_worker_ids_/aiv_worker_ids_ to
+    // keep only workers whose cluster is in kBiuPerfPhysAicore[]. Retired
+    // workers receive an exit signal so they release immediately. This is
+    // the only way to lock dispatch to monitored clusters on a5: ACL group
+    // affinity APIs are not supported and aclrtSetDeviceResLimit only caps
+    // concurrency, not placement.
+    void retire_uncovered_cores_for_l0(Runtime *runtime);
+
     // Assign discovered cores (cluster = 1 AIC + 2 AIV) round-robin across scheduler threads.
     bool assign_cores_to_threads();
 

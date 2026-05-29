@@ -9,17 +9,25 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 /**
- * @file l2_perf_collector_aicore.h
- * @brief AICore performance data collection interface
+ * @file perf_collector_aicore.h
+ * @brief AICore performance data recording (shared by L2 and L0).
  *
- * Provides lightweight performance recording interface for AICore kernels.
- * Uses dcci for efficient cache management instead of memory barriers.
+ * Lightweight per-task helpers that publish AICore-side (start, end) cycles
+ * to GM rings for AICPU to consume:
+ *   - perf_aicore_record_task     -> L2PerfAicoreRing (consumed by AICPU's
+ *                                    l2_perf_aicpu_complete_record)
+ *   - perf_aicore_l0_record_task  -> L0PerfAicoreRing (consumed by AICPU's
+ *                                    l0_perf_aicpu_complete_record, which then
+ *                                    carries the window in the L0 marker so
+ *                                    host can attribute biu_perf pipe stamps
+ *                                    to tasks by cycle range)
  */
 
-#ifndef PLATFORM_AICORE_L2_PERF_COLLECTOR_AICORE_H_
-#define PLATFORM_AICORE_L2_PERF_COLLECTOR_AICORE_H_
+#ifndef PLATFORM_AICORE_PERF_COLLECTOR_AICORE_H_
+#define PLATFORM_AICORE_PERF_COLLECTOR_AICORE_H_
 
 #include "aicore/aicore.h"
+#include "common/l0_perf_profiling.h"
 #include "common/l2_perf_profiling.h"
 #include "common/platform_config.h"
 
@@ -52,7 +60,7 @@
  * @param end_time    End timestamp
  */
 __aicore__ __attribute__((always_inline)) static inline void
-l2_perf_aicore_record_task(__gm__ L2PerfAicoreRing *ring, uint32_t task_id, uint64_t start_time, uint64_t end_time) {
+perf_aicore_record_task(__gm__ L2PerfAicoreRing *ring, uint32_t task_id, uint64_t start_time, uint64_t end_time) {
     // Modulo-indexed slot. PLATFORM_L2_AICORE_RING_SIZE is conventionally a
     // power of two so the compiler reduces this to a mask, but using `%`
     // keeps the index correct if the ring size is ever retuned to a
@@ -71,4 +79,29 @@ l2_perf_aicore_record_task(__gm__ L2PerfAicoreRing *ring, uint32_t task_id, uint
     dsb((mem_dsb_t)0);
 }
 
-#endif  // PLATFORM_AICORE_L2_PERF_COLLECTOR_AICORE_H_
+/**
+ * L0 cycle-window publish for the just-finished task.
+ *
+ * Same staging-ring shape as the L2 helper but writes only what L0 needs:
+ * the (start, end) AICore cycle pair plus the reg dispatch id used by AICPU
+ * to validate the slot. AICPU reads this slot in l0_perf_aicpu_complete_record
+ * and copies (start, end) into the L0TaskFinMarker so host attribution can
+ * match biu_perf pipe-stamp cycles to the owning task.
+ */
+__aicore__ __attribute__((always_inline)) static inline void perf_aicore_l0_record_task(
+    __gm__ L0PerfAicoreRing *ring, uint32_t task_id, uint64_t start_time, uint64_t end_time
+) {
+    __gm__ L0PerfRecordRaw *slot = &ring->slots[task_id % PLATFORM_L0_AICORE_RING_SIZE];
+
+    slot->start_cycle = start_time;
+    slot->end_cycle = end_time;
+
+    // Publish task_id last so AICPU can validate the slot is ready.
+    OUT_OF_ORDER_STORE_BARRIER();
+    slot->task_id = static_cast<uint64_t>(task_id);
+
+    dcci(slot, SINGLE_CACHE_LINE, CACHELINE_OUT);
+    dsb((mem_dsb_t)0);
+}
+
+#endif  // PLATFORM_AICORE_PERF_COLLECTOR_AICORE_H_

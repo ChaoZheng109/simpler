@@ -121,11 +121,17 @@ static __aicore__ void softmax_prepare_n_impl(
     // ======== Pass 1: Find global row max (unscaled) with double-buffered sij ========
     // rowmax(S*scale) = scale * rowmax(S) since scale > 0, so defer scale to after loop.
     GlobalDataMxN sijGlobal_p1_0(sij_base);
+    asm volatile("bar.MTE2");
+    bisheng::cce::mark_stamp<PIPE_MTE2, 240>();
     TLOAD(sijTile_A, sijGlobal_p1_0);
+    asm volatile("bar.MTE2");
+    bisheng::cce::mark_stamp<PIPE_MTE2, 241>();
 
     for (uint64_t i = 0; i < n_blocks; i++) {
         set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
         wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
+        pipe_barrier(PIPE_ALL);
+        bisheng::cce::mark_stamp<PIPE_V, 242>();
 
         if (i == n_blocks - 1 && valid_len_last < static_cast<uint64_t>(N)) {
             TileSijDyn sijDynTile(static_cast<size_t>(valid_len_last));
@@ -162,10 +168,14 @@ static __aicore__ void softmax_prepare_n_impl(
         } else {
             TMAX(globalMaxRow, globalMaxRow, localMaxRow);
         }
+        pipe_barrier(PIPE_ALL);
+        bisheng::cce::mark_stamp<PIPE_V, 243>();
     }
 
     // Apply scale once to the global max vector (M elements, not n_blocks × M × N)
     TMULS(globalMaxRow, globalMaxRow, scale_value);
+    pipe_barrier(PIPE_ALL);
+    bisheng::cce::mark_stamp<PIPE_V, 244>();
 
     // TRESHAPE back: RowMajor(1,M) → ColMajor(M,1) for Pass 2's TROWEXPANDSUB
     TRESHAPE(globalMaxDN, globalMaxRow);
@@ -191,6 +201,8 @@ static __aicore__ void softmax_prepare_n_impl(
         // Wait for current tile's TLOAD to complete
         set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
         wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
+        pipe_barrier(PIPE_ALL);
+        bisheng::cce::mark_stamp<PIPE_V, 245>();
 
         // TFILLPAD on current buffer if last block with partial valid length
         if (i == n_blocks - 1 && valid_len_last < static_cast<uint64_t>(N)) {
@@ -225,7 +237,11 @@ static __aicore__ void softmax_prepare_n_impl(
         // Store pij (must complete before next iteration's TCVT overwrites pijBf16Tile)
         set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
         wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
+        asm volatile("bar.MTE3");
+        bisheng::cce::mark_stamp<PIPE_MTE3, 246>();
         TSTORE(pijGlobal, pijBf16Tile);
+        asm volatile("bar.MTE3");
+        bisheng::cce::mark_stamp<PIPE_MTE3, 247>();
 
         // Prefetch next sij into alternate buffer (after TSTORE to avoid UB race)
         if (i + 1 < n_blocks) {
@@ -246,9 +262,29 @@ static __aicore__ void softmax_prepare_n_impl(
     // Store lij (total sum). mij already stored after Pass 1.
     set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
     wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
+    asm volatile("bar.MTE3");
+    bisheng::cce::mark_stamp<PIPE_MTE3, 248>();
     TSTORE(lijGlobalDN, sumDN);
 
     pipe_sync();
+
+    // Trailing flush — keep HW active long enough for biu_perf trace ring drain.
+    asm volatile("bar.all");
+    asm volatile("nop"); asm volatile("nop"); asm volatile("nop"); asm volatile("nop");
+    asm volatile("nop"); asm volatile("nop"); asm volatile("nop"); asm volatile("nop");
+    bisheng::cce::mark_stamp<PIPE_MTE3, 250>();
+    asm volatile("nop");
+    bisheng::cce::mark_stamp<PIPE_MTE3, 251>();
+    asm volatile("nop");
+    bisheng::cce::mark_stamp<PIPE_MTE3, 252>();
+    asm volatile("nop");
+    bisheng::cce::mark_stamp<PIPE_MTE3, 253>();
+    asm volatile("nop");
+    bisheng::cce::mark_stamp<PIPE_MTE3, 254>();
+    asm volatile("nop");
+    bisheng::cce::mark_stamp<PIPE_MTE3, 255>();
+    asm volatile(".rept 3500\n\tNOP \n\t.endr");
+    bisheng::cce::mark_stamp<PIPE_MTE3, 259>();
 }
 
 extern "C" __aicore__ void kernel_entry(__gm__ int64_t *args) {

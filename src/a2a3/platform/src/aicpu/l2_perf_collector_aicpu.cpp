@@ -260,7 +260,7 @@ int l2_perf_aicpu_complete_record(
 
     // Read AICore-published timing from the per-core staging ring.
     L2PerfRecord *slot = &ring->dual_issue_slots[expected_reg_task_id % PLATFORM_L2_AICORE_RING_SIZE];
-    // One PoC cache line: matches AICore l2_perf_aicore_record_task() dcci(..., SINGLE_CACHE_LINE, ...)
+    // One PoC cache line: matches AICore perf_aicore_record_task() dcci(..., SINGLE_CACHE_LINE, ...)
     // and aicpu/cache_ops.cpp step size; timing fields live in the first line.
     cache_invalidate_range(slot, 64);
     if (static_cast<uint32_t>(slot->task_id) != expected_reg_task_id) {

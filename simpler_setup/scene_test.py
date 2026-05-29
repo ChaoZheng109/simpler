@@ -652,6 +652,7 @@ def run_class_cases(  # noqa: PLR0913 -- shared layer-5 entry; kwargs mirror CLI
     enable_dump_tensor,
     enable_pmu,
     enable_dep_gen,
+    enable_l0_swimlane,
 ):
     """Execute a pre-filtered list of cases for one class (layers 5-6).
 
@@ -661,7 +662,9 @@ def run_class_cases(  # noqa: PLR0913 -- shared layer-5 entry; kwargs mirror CLI
     """
     cls_name = type(cls_inst).__name__
     callable_spec = getattr(type(cls_inst), "CALLABLE", None)
-    diagnostics_on = enable_l2_swimlane or enable_dump_tensor or enable_pmu or enable_dep_gen
+    diagnostics_on = (
+        enable_l2_swimlane or enable_dump_tensor or enable_pmu or enable_dep_gen or enable_l0_swimlane
+    )
     for case in cases:
         case_label = f"{cls_name}_{case['name']}"
         # Per-case directory the runtime writes into. Required (non-empty) when
@@ -679,9 +682,14 @@ def run_class_cases(  # noqa: PLR0913 -- shared layer-5 entry; kwargs mirror CLI
                 enable_dump_tensor=enable_dump_tensor,
                 enable_pmu=enable_pmu,
                 enable_dep_gen=enable_dep_gen,
+                enable_l0_swimlane=enable_l0_swimlane,
                 output_prefix=str(prefix) if diagnostics_on else "",
             )
         finally:
+            # merged_swimlane.json needs L2 task bars to anchor against. L0-only
+            # leaves l0_perf_records.json on disk without invoking the converter —
+            # the sub_core × pipe layout would interleave stamps from different
+            # tasks on the same lane and read as noise.
             if enable_l2_swimlane:
                 _convert_case_swimlane(case_label, prefix, callable_spec=callable_spec)
 
@@ -851,6 +859,7 @@ class SceneTestCase:
         enable_dump_tensor=False,
         enable_pmu=0,
         enable_dep_gen=False,
+        enable_l0_swimlane=False,
         *,
         output_prefix="",
     ):
@@ -867,6 +876,7 @@ class SceneTestCase:
         config.enable_dump_tensor = enable_dump_tensor
         config.enable_pmu = enable_pmu  # 0=disabled, >0=enabled with event type
         config.enable_dep_gen = enable_dep_gen
+        config.enable_l0_swimlane = enable_l0_swimlane
         # `output_prefix` is required by CallConfig::validate() whenever any
         # diagnostic flag is enabled. Caller threads it down from the per-case
         # directory built by _build_output_prefix().
@@ -903,6 +913,7 @@ class SceneTestCase:
         enable_dump_tensor=False,
         enable_pmu=0,
         enable_dep_gen=False,
+        enable_l0_swimlane=False,
         output_prefix="",
     ):
         if self._st_level == 2:
@@ -916,6 +927,7 @@ class SceneTestCase:
                 enable_dump_tensor=enable_dump_tensor,
                 enable_pmu=enable_pmu,
                 enable_dep_gen=enable_dep_gen,
+                enable_l0_swimlane=enable_l0_swimlane,
                 output_prefix=output_prefix,
             )
         elif self._st_level == 3:
@@ -930,6 +942,7 @@ class SceneTestCase:
                 enable_dump_tensor=enable_dump_tensor,
                 enable_pmu=enable_pmu,
                 enable_dep_gen=enable_dep_gen,
+                enable_l0_swimlane=enable_l0_swimlane,
                 output_prefix=output_prefix,
             )
 
@@ -944,6 +957,7 @@ class SceneTestCase:
         enable_dump_tensor=False,
         enable_pmu=0,
         enable_dep_gen=False,
+        enable_l0_swimlane=False,
         output_prefix="",
     ):
         params = case.get("params", {})
@@ -993,6 +1007,7 @@ class SceneTestCase:
                 enable_dump_tensor=enable_dump_tensor,
                 enable_pmu=enable_pmu,
                 enable_dep_gen=enable_dep_gen,
+                enable_l0_swimlane=enable_l0_swimlane,
                 output_prefix=output_prefix,
             )
 
@@ -1019,6 +1034,7 @@ class SceneTestCase:
         enable_dump_tensor=False,
         enable_pmu=0,
         enable_dep_gen=False,
+        enable_l0_swimlane=False,
         output_prefix="",
     ):
         # Defensive belt-and-braces: the pytest dispatcher and run_module both
@@ -1073,6 +1089,7 @@ class SceneTestCase:
                 enable_dump_tensor=enable_dump_tensor,
                 enable_pmu=enable_pmu,
                 enable_dep_gen=enable_dep_gen,
+                enable_l0_swimlane=enable_l0_swimlane,
                 output_prefix=output_prefix,
             )
 
@@ -1125,6 +1142,7 @@ class SceneTestCase:
         enable_l2_swimlane = request.config.getoption("--enable-l2-swimlane", default=0)
         enable_dump_tensor = request.config.getoption("--dump-tensor", default=False)
         enable_pmu = request.config.getoption("--enable-pmu", default=0)
+        enable_l0_swimlane = request.config.getoption("--enable-l0-swimlane", default=False)
         enable_dep_gen = self._effective_enable_dep_gen(request, warn=True)
         if rounds > 1:
             if enable_l2_swimlane:
@@ -1136,6 +1154,9 @@ class SceneTestCase:
             if enable_pmu:
                 logger.warning("PMU disabled: --rounds > 1")
                 enable_pmu = 0
+            if enable_l0_swimlane:
+                logger.warning("L0 swimlane disabled: --rounds > 1")
+                enable_l0_swimlane = False
 
         cls_name = type(self).__name__
         callable_obj = self.build_callable(st_platform)
@@ -1176,6 +1197,7 @@ class SceneTestCase:
             enable_dump_tensor=enable_dump_tensor,
             enable_pmu=enable_pmu,
             enable_dep_gen=enable_dep_gen,
+            enable_l0_swimlane=enable_l0_swimlane,
         )
 
     # ------------------------------------------------------------------
@@ -1242,6 +1264,11 @@ class SceneTestCase:
             metavar="EVENT_TYPE",
             help="Enable PMU collection. Bare flag = PIPE_UTILIZATION(2). "
             "Pass event type to override (e.g. --enable-pmu 4)",
+        )
+        parser.add_argument(
+            "--enable-l0-swimlane",
+            action="store_true",
+            help="Enable L0 core swimlane (per-pipe biu_perf HW stamps; a5 onboard only)",
         )
         parser.add_argument("--build", action="store_true", help="Compile runtime from source")
         parser.add_argument(
@@ -1433,6 +1460,7 @@ class SceneTestCase:
                                 enable_dump_tensor=args.dump_tensor,
                                 enable_pmu=args.enable_pmu,
                                 enable_dep_gen=args.enable_dep_gen,
+                                enable_l0_swimlane=args.enable_l0_swimlane,
                             )
                             print("PASSED")
                         except Exception as e:  # noqa: BLE001

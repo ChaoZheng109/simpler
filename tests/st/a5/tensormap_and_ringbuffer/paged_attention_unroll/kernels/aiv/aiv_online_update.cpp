@@ -124,11 +124,15 @@ static __aicore__ void online_update_impl(
 
     if (is_first) {
         // --- First block: copy inputs to accumulators ---
+        asm volatile("bar.MTE2");
+        bisheng::cce::mark_stamp<PIPE_MTE2, 260>();
         TLOAD(oiNewTile, oiNewGlobal);
         TLOAD(mijDN, mijGlobalDN);
         TLOAD(lijDN, lijGlobalDN);
         set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
         wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
+        pipe_barrier(PIPE_ALL);
+        bisheng::cce::mark_stamp<PIPE_V, 261>();
 
         // Store mi = mij, li = lij, oi = oi_new
         // Alias ND tiles to same UB as DN tiles for ND-format store
@@ -138,9 +142,13 @@ static __aicore__ void online_update_impl(
 
         set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
         wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
+        asm volatile("bar.MTE3");
+        bisheng::cce::mark_stamp<PIPE_MTE3, 262>();
         TSTORE(miGlobalND, mijND);    // mi = mij
         TSTORE(liGlobalND, lijND);    // li = lij
         TSTORE(oiGlobal, oiNewTile);  // oi = oi_new
+        asm volatile("bar.MTE3");
+        bisheng::cce::mark_stamp<PIPE_MTE3, 263>();
 
         if (is_last) {
             // Single block: normalize dst = oi_new / lij
@@ -156,6 +164,8 @@ static __aicore__ void online_update_impl(
         // --- Subsequent blocks: accumulate ---
 
         // Load all inputs as DN (ColMajor)
+        asm volatile("bar.MTE2");
+        bisheng::cce::mark_stamp<PIPE_MTE2, 264>();
         TLOAD(oiNewTile, oiNewGlobal);
         TLOAD(oiTile, oiGlobal);
         TLOAD(mijDN, mijGlobalDN);
@@ -164,6 +174,8 @@ static __aicore__ void online_update_impl(
         TLOAD(liDN, liGlobalDN);
         set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
         wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
+        pipe_barrier(PIPE_ALL);
+        bisheng::cce::mark_stamp<PIPE_V, 265>();
 
         // TRESHAPE: ColMajor(M,1) → RowMajor(1,M) for element-wise arithmetic
         TileScalarRow miRow, mijRow, liRow, lijRow;
@@ -196,10 +208,14 @@ static __aicore__ void online_update_impl(
         TRESHAPE(alphaDN, alphaRow);
         TRESHAPE(betaDN, betaRow);
 
+        pipe_barrier(PIPE_ALL);
+        bisheng::cce::mark_stamp<PIPE_V, 266>();
         // Scale data tiles using row-broadcast multiply
         TROWEXPANDMUL(oiTile, oiTile, alphaDN);       // oi *= alpha
         TROWEXPANDMUL(oiNewTile, oiNewTile, betaDN);  // oi_new *= beta
         TADD(oiTile, oiTile, oiNewTile);              // oi = alpha*oi + beta*oi_new
+        pipe_barrier(PIPE_ALL);
+        bisheng::cce::mark_stamp<PIPE_V, 267>();
 
         // Store mi_new and li_new to GM (ND format)
         // Alias ND tiles to the same UB locations as miNewRow and liNewRow
@@ -213,6 +229,8 @@ static __aicore__ void online_update_impl(
             TROWEXPANDDIV(oiTile, oiTile, liNewDN);
             set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
             wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
+            asm volatile("bar.MTE3");
+            bisheng::cce::mark_stamp<PIPE_MTE3, 268>();
             TSTORE(miGlobalND, miNewND);  // persist mi_new
             TSTORE(liGlobalND, liNewND);  // persist li_new
             TSTORE(dstGlobal, oiTile);
@@ -220,6 +238,8 @@ static __aicore__ void online_update_impl(
             // Store updated accumulators
             set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
             wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
+            asm volatile("bar.MTE3");
+            bisheng::cce::mark_stamp<PIPE_MTE3, 269>();
             TSTORE(miGlobalND, miNewND);  // persist mi_new
             TSTORE(liGlobalND, liNewND);  // persist li_new
             TSTORE(oiGlobal, oiTile);
@@ -227,6 +247,24 @@ static __aicore__ void online_update_impl(
     }
 
     pipe_sync();
+
+    // Trailing flush — keep HW active long enough for biu_perf trace ring drain.
+    asm volatile("bar.all");
+    asm volatile("nop"); asm volatile("nop"); asm volatile("nop"); asm volatile("nop");
+    asm volatile("nop"); asm volatile("nop"); asm volatile("nop"); asm volatile("nop");
+    bisheng::cce::mark_stamp<PIPE_MTE3, 270>();
+    asm volatile("nop");
+    bisheng::cce::mark_stamp<PIPE_MTE3, 271>();
+    asm volatile("nop");
+    bisheng::cce::mark_stamp<PIPE_MTE3, 272>();
+    asm volatile("nop");
+    bisheng::cce::mark_stamp<PIPE_MTE3, 273>();
+    asm volatile("nop");
+    bisheng::cce::mark_stamp<PIPE_MTE3, 274>();
+    asm volatile("nop");
+    bisheng::cce::mark_stamp<PIPE_MTE3, 275>();
+    asm volatile(".rept 3500\n\tNOP \n\t.endr");
+    bisheng::cce::mark_stamp<PIPE_MTE3, 279>();
 }
 
 extern "C" __aicore__ void kernel_entry(__gm__ int64_t *args) {
