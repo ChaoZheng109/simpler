@@ -130,4 +130,25 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     // stamps before this final one, so region 95 (END) brackets the kernel end.
     asm volatile("bar.all");
     bisheng::cce::mark_stamp<PIPE_MTE3, 95>();
+
+    // Trailing flush — NOP burst interleaved with mark_stamps keeps the AICore
+    // busy after the last functional stamp, both giving the perfmon HW
+    // wall-clock time to drain/write its trace before the task ends (and
+    // perf_mon_en is cleared) and actively emitting trace events for it to
+    // capture. Mirrors the paged_attention_unroll aic_qk_matmul trailing flush.
+    asm volatile("nop"); asm volatile("nop"); asm volatile("nop"); asm volatile("nop");
+    asm volatile("nop"); asm volatile("nop"); asm volatile("nop"); asm volatile("nop");
+    bisheng::cce::mark_stamp<PIPE_MTE3, 96>();
+    asm volatile("nop");
+    bisheng::cce::mark_stamp<PIPE_MTE3, 97>();
+    asm volatile("nop");
+    bisheng::cce::mark_stamp<PIPE_MTE3, 98>();
+    asm volatile("nop");
+    bisheng::cce::mark_stamp<PIPE_MTE3, 99>();
+    asm volatile("nop");
+    bisheng::cce::mark_stamp<PIPE_MTE3, 100>();
+    asm volatile("nop");
+    bisheng::cce::mark_stamp<PIPE_MTE3, 101>();
+    asm volatile(".rept 3500\n\tNOP \n\t.endr");
+    bisheng::cce::mark_stamp<PIPE_MTE3, 102>();
 }

@@ -178,6 +178,7 @@ inline double cycles_to_us(uint64_t cycles) {
 #define PROFILING_FLAG_L2_SWIMLANE (1u << 1)
 #define PROFILING_FLAG_PMU (1u << 2)
 #define PROFILING_FLAG_L0_SWIMLANE (1u << 3)
+#define PROFILING_FLAG_PERFMON_PROBE (1u << 4)
 #define GET_PROFILING_FLAG(flags, bit) ((((uint32_t)(flags)) & ((uint32_t)(bit))) != 0u)
 #define SET_PROFILING_FLAG(flags, bit) ((flags) |= (uint32_t)(bit))
 #define CLEAR_PROFILING_FLAG(flags, bit) ((flags) &= ~((uint32_t)(bit)))
@@ -397,6 +398,42 @@ constexpr uint32_t REG_MMIO_PMU_CTRL_0_ENABLE_VAL = 0x7;
 // PMU_CTRL_1 enable value: GLB_PMU_EN (a5 only; second control register)
 constexpr uint32_t REG_MMIO_PMU_CTRL_1_ENABLE_VAL = 0x1;
 
+// perf_mon writeback hardware (a5; AICPU-only programs these).
+// Offsets within the same 3MB per-core AICore MMIO window halResMap(RES_AICORE)
+// gives us (the same window PMU at 0x4200 uses). HW autonomously DMAs trace
+// chunks into the buffer at PERF_MON_BASE_ADDR; on reaching buf_len the HW
+// wraps. AICPU programs base + enables, then on teardown disables + reads
+// the wptr/samp counters for diagnostics. SW policy is to size the buffer
+// large enough to avoid wrap (one drain cycle's worth of data); a wrap
+// (samp_wrt > buf_len) is treated as a hard error and logged but not
+// recovered — host gets whatever bytes were written, the rest are lost.
+// See GitHub issue #905 for the broader design rationale.
+constexpr uint32_t REG_MMIO_PERF_MON_EN_OFFSET = 0x00C4;            // bit 0 = per-instance enable (kickstart reg)
+constexpr uint32_t REG_MMIO_PERF_MON_GLOBAL_EN_OFFSET = 0xB000;     // bit 0 = per-core global enable
+constexpr uint32_t REG_MMIO_PERF_MON_BUF_LEN_OFFSET = 0xB004;       // 31:0, buffer length in bytes
+constexpr uint32_t REG_MMIO_PERF_MON_GLITCH_FILTER_OFFSET = 0xB008; // 3:0, busy/idle width filter
+constexpr uint32_t REG_MMIO_PERF_MON_BASE_ADDR_L_OFFSET = 0xB00C;   // low 32 bits of 48-bit VA base
+constexpr uint32_t REG_MMIO_PERF_MON_BASE_ADDR_H_OFFSET = 0xB010;   // high 16 bits of 48-bit VA base
+constexpr uint32_t REG_MMIO_PERF_MON_WPTR_O_OFFSET = 0xB01C;        // 31:0 RW write pointer (bytes); reset to 0 at setup
+constexpr uint32_t REG_MMIO_PERF_MON_SAMP_CRT_OFFSET = 0xB020;      // 31:0 RW samples produced
+constexpr uint32_t REG_MMIO_PERF_MON_SAMP_CRT_CLR_OFFSET = 0xB024;  // bit 0 = clear samp_crt counter
+constexpr uint32_t REG_MMIO_PERF_MON_SAMP_WRT_OFFSET = 0xB028;      // 31:0 RW samples written; write 0 to clear
+// DEBUG regdump: AICore reads these N perfmon regs at kernel entry. STRIDE is
+// per-core uint32 slots (16 = 64B, one cache line, so each core's slot is
+// dcci-aligned). Order must match host's print in finalize_perfmon_probe.
+constexpr uint32_t PERFMON_REGDUMP_N = 9;
+constexpr uint32_t PERFMON_REGDUMP_STRIDE = 16;
+// HW traces iff BOTH perf_mon_en (0x00C4) AND perf_mon_global_en (0xB000) are 1.
+// Per spec, perf_mon_en is a "kickstart" register normally set by the hardware
+// scheduler at task kickstart and auto-cleared at task end; base_addr / buf_len
+// / wptr / sample counters may only be written while perf_mon_en = 0.
+// glitch_filter: a signal with busy/idle width below this value has its trace
+// output cancelled — set to 0 to disable filtering.
+// NOTE: REG_MMIO_PERF_MON_BUF_LEN_OFFSET — offset not supplied in the
+// initial register set. Probe relies on the HW-default buf_len until the
+// offset is confirmed; on confirmation, add the constant + RegId entry +
+// reg_offset() case here and program it from perfmon_aicpu_init.
+
 /**
  * Register identifier for unified read_reg/write_reg interface.
  *
@@ -447,6 +484,18 @@ enum class RegId : uint8_t {
     PMU_CNT7_IDX = 28,
     PMU_CNT8_IDX = 29,
     PMU_CNT9_IDX = 30,
+
+    // perf_mon writeback hardware (AICPU-only). See REG_MMIO_PERF_MON_* above.
+    PERF_MON_EN = 31,
+    PERF_MON_GLOBAL_EN = 32,
+    PERF_MON_BASE_ADDR_L = 33,
+    PERF_MON_BASE_ADDR_H = 34,
+    PERF_MON_WPTR_O = 35,
+    PERF_MON_SAMP_CRT = 36,
+    PERF_MON_SAMP_CRT_CLR = 37,
+    PERF_MON_SAMP_WRT = 38,
+    PERF_MON_BUF_LEN = 39,
+    PERF_MON_GLITCH_FILTER = 40,
 };
 
 static_assert(
@@ -525,6 +574,26 @@ constexpr uint32_t reg_offset(RegId reg) {
         return REG_MMIO_PMU_CNT8_IDX_OFFSET;
     case RegId::PMU_CNT9_IDX:
         return REG_MMIO_PMU_CNT9_IDX_OFFSET;
+    case RegId::PERF_MON_EN:
+        return REG_MMIO_PERF_MON_EN_OFFSET;
+    case RegId::PERF_MON_GLOBAL_EN:
+        return REG_MMIO_PERF_MON_GLOBAL_EN_OFFSET;
+    case RegId::PERF_MON_BASE_ADDR_L:
+        return REG_MMIO_PERF_MON_BASE_ADDR_L_OFFSET;
+    case RegId::PERF_MON_BASE_ADDR_H:
+        return REG_MMIO_PERF_MON_BASE_ADDR_H_OFFSET;
+    case RegId::PERF_MON_WPTR_O:
+        return REG_MMIO_PERF_MON_WPTR_O_OFFSET;
+    case RegId::PERF_MON_SAMP_CRT:
+        return REG_MMIO_PERF_MON_SAMP_CRT_OFFSET;
+    case RegId::PERF_MON_SAMP_CRT_CLR:
+        return REG_MMIO_PERF_MON_SAMP_CRT_CLR_OFFSET;
+    case RegId::PERF_MON_SAMP_WRT:
+        return REG_MMIO_PERF_MON_SAMP_WRT_OFFSET;
+    case RegId::PERF_MON_BUF_LEN:
+        return REG_MMIO_PERF_MON_BUF_LEN_OFFSET;
+    case RegId::PERF_MON_GLITCH_FILTER:
+        return REG_MMIO_PERF_MON_GLITCH_FILTER_OFFSET;
     }
     return 0;  // unreachable: all RegId cases handled above
 }

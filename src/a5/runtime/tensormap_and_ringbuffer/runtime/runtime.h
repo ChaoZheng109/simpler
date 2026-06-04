@@ -106,6 +106,10 @@ struct Handshake {
     volatile uint32_t physical_core_id;   // Physical core ID
     volatile uint32_t aicpu_regs_ready;   // AICPU register init done: 0=pending, 1=done
     volatile uint32_t aicore_regs_ready;  // AICore ID reported: 0=pending, 1=done
+    // DEBUG (perfmon probe): AICore reads its own perf_mon_en (0xC4) at kernel
+    // entry — i.e. right after kickstart — and writes it here so AICPU can log
+    // the run-time en value (between AICPU's pre-launch 0x1 and finalize's 0x4).
+    volatile uint32_t aicore_perfmon_en;
 } __attribute__((aligned(64)));
 
 /**

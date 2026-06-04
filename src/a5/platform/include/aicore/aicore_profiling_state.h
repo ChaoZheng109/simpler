@@ -91,4 +91,13 @@ __aicore__ __gm__ PmuAicoreRing *get_aicore_pmu_ring();
 __aicore__ void set_aicore_pmu_reg_base(uint64_t reg_base);
 __aicore__ uint64_t get_aicore_pmu_reg_base();
 
+/**
+ * DEBUG (perfmon probe): AICore reads its own perf_mon_en (0xC4) at kernel
+ * entry — right after kickstart — and stashes it via the setter; aicore_execute
+ * forwards it into Handshake so AICPU can log the run-time en value. 0xFFFFFFFF
+ * = probe off / not read.
+ */
+__aicore__ void set_aicore_perfmon_en_at_entry(uint32_t en);
+__aicore__ uint32_t get_aicore_perfmon_en_at_entry();
+
 #endif  // PLATFORM_AICORE_AICORE_PROFILING_STATE_H_

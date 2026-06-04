@@ -44,3 +44,7 @@ python/_task_interface*.dylib
 # Log files
 *.log
 profiling_logs_*/
+perfmon_probe_core_*.bin
+PROF_*
+host_log*.txt
+trace.json

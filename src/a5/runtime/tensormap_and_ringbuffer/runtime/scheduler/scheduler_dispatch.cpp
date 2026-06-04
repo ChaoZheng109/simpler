@@ -28,6 +28,7 @@
 // Performance profiling headers
 #include "aicpu/l0_perf_collector_aicpu.h"
 #include "aicpu/l2_perf_collector_aicpu.h"
+#include "aicpu/perfmon_collector_aicpu.h"
 #include "aicpu/pmu_collector_aicpu.h"
 #include "aicpu/tensor_dump_aicpu.h"
 
@@ -498,6 +499,8 @@ int32_t SchedulerContext::resolve_and_dispatch(Runtime *runtime, int32_t thread_
             pmu_aicpu_init(physical_core_ids_, cores_total_num_);
             LOG_INFO_V0("PMU profiling started on %d cores", cores_total_num_);
         }
+        // Perfmon probe is blind-configured in simpler_aicpu_init (before AICore
+        // launch), not here — see perfmon_collector_aicpu.h / perfmon_sync_plan.md.
 #endif
 
         LOG_INFO_V0("Thread %d: one-time init done", thread_idx);

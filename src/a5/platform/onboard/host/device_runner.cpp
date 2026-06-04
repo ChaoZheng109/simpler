@@ -26,6 +26,8 @@
 
 #include <cassert>
 #include <cstddef>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <string>
@@ -53,6 +55,52 @@ static void *prof_alloc_cb(size_t size) {
 }
 
 static int prof_free_cb(void *dev_ptr) { return rtFree(dev_ptr); }
+
+// --- Attempt 1 (simplified): flip the global biuperf-prof flag ---
+// runtime (open source) shows rtProfSetProSwitch(profSwitch & PROF_INSTR) calls
+// Runtime::SetBiuperfProfFlag(true) (api_c.cc:1488); then every AICore kernel
+// SQE built while that flag is set AND the stream is not bind gets
+// SQE_BIZ_FLAG_BIUPERF (davinci_kernel_task.cc:682), which makes HWTS set
+// perf_mon_en at kickstart. So we ONLY need this one switch (no aclprof session,
+// no driver channels). MsprofCommandHandle ABI mirror (from aprof_pub.h).
+namespace {
+constexpr uint64_t kProfInstrBit = 0x00800000ULL;  // PROF_INSTR
+constexpr uint32_t kProfCmdStart = 1;
+constexpr uint32_t kProfCmdStop = 2;
+constexpr uint32_t kMsprofMaxDev = 64;
+constexpr uint32_t kProfPathMax = 1024;
+constexpr uint32_t kProfParamMax = 4096;
+
+struct MsprofCommandHandleParamsMirror {
+    uint32_t pathLen;
+    uint32_t storageLimit;
+    uint32_t profDataLen;
+    char path[kProfPathMax];
+    char profData[kProfParamMax];
+};
+struct MsprofCommandHandleMirror {
+    uint64_t profSwitch;
+    uint64_t profSwitchHi;
+    uint32_t devNums;
+    uint32_t devIdList[kMsprofMaxDev];
+    uint32_t modelId;
+    uint32_t type;
+    uint32_t cacheFlag;
+    MsprofCommandHandleParamsMirror params;
+};
+}  // namespace
+
+extern "C" rtError_t rtProfSetProSwitch(void *data, uint32_t len);
+
+static int perfmon_call_prof_switch(int device_id, uint32_t cmd_type) {
+    MsprofCommandHandleMirror cmd{};
+    cmd.profSwitch = kProfInstrBit;
+    cmd.devNums = 1;
+    cmd.devIdList[0] = static_cast<uint32_t>(device_id);
+    cmd.modelId = 0xFFFFFFFFUL;
+    cmd.type = cmd_type;
+    return static_cast<int>(rtProfSetProSwitch(&cmd, static_cast<uint32_t>(sizeof(cmd))));
+}
 
 DeviceRunner::~DeviceRunner() { finalize(); }
 
@@ -426,6 +474,13 @@ int DeviceRunner::run(Runtime &runtime, int block_dim, int launch_aicpu_num) {
     if (enable_l0_swimlane_) {
         SET_PROFILING_FLAG(enable_profiling_flag, PROFILING_FLAG_L0_SWIMLANE);
     }
+    // Perfmon writeback probe (issue #905), env-var gated, opt-in only —
+    // does not touch any existing path. AICPU programs the 0xB000 register
+    // block per core and HW DMAs trace into per-core GM buffers we own.
+    enable_perfmon_probe_ = (std::getenv("PYPTO_L0_PERFMON_PROBE") != nullptr);
+    if (enable_perfmon_probe_) {
+        SET_PROFILING_FLAG(enable_profiling_flag, PROFILING_FLAG_PERFMON_PROBE);
+    }
 
     for (int i = 0; i < num_aicore; i++) {
         runtime.workers[i].aicpu_ready = 0;
@@ -511,6 +566,16 @@ int DeviceRunner::run(Runtime &runtime, int block_dim, int launch_aicpu_num) {
         }
     }
 
+    if (enable_perfmon_probe_) {
+        rc = init_perfmon_probe(num_aicore);
+        if (rc != 0) {
+            LOG_ERROR("Perfmon probe init failed: %d, disabling for this run", rc);
+            CLEAR_PROFILING_FLAG(kernel_args_.args.enable_profiling_flag, PROFILING_FLAG_PERFMON_PROBE);
+            kernel_args_.args.aicore_perfmon_buf_addrs = 0;
+            enable_perfmon_probe_ = false;
+        }
+    }
+
     // Cleanup guard for early returns: stops all started collectors so
     // their mgmt + poll threads exit cleanly. stop() is idempotent and a
     // no-op on collectors that never started.
@@ -570,6 +635,21 @@ int DeviceRunner::run(Runtime &runtime, int block_dim, int launch_aicpu_num) {
     if (rc != 0) {
         LOG_ERROR("launch_aicpu_kernel (main) failed: %d", rc);
         return rc;
+    }
+
+    // Perfmon probe: AICPU blind-configures perfmon in simpler_aicpu_init (on
+    // stream_aicpu_, before AICore runs). Wait for its ready flag so perfmon is
+    // fully configured before the AICore kernel is kickstarted below.
+    if (enable_perfmon_probe_) {
+        if (wait_perfmon_ready() != 0) {
+            LOG_ERROR("Perfmon probe: ready-flag wait failed; launching AICore anyway");
+        }
+        // Attempt 1: flip the global biuperf-prof flag BEFORE launching AICore,
+        // so the AICore kernel SQE gets SQE_BIZ_FLAG_BIUPERF and HWTS sets
+        // perf_mon_en at kickstart. base_addr stays ours.
+        int sw_rc = perfmon_call_prof_switch(device_id_, kProfCmdStart);
+        LOG_INFO_V0("Perfmon probe attempt1: rtProfSetProSwitch(PROF_INSTR, START) -> %d", sw_rc);
+        perfmon_prof_switch_started_ = (sw_rc == 0);
     }
 
     LOG_INFO_V0("=== launch_aicore_kernel ===");
@@ -1136,6 +1216,191 @@ void DeviceRunner::finalize_collectors() {
     if (l0_perf_collector_.is_initialized()) {
         l0_perf_collector_.stop();
     }
+    if (enable_perfmon_probe_) {
+        finalize_perfmon_probe();
+    }
+}
+
+int DeviceRunner::init_perfmon_probe(int num_aicore) {
+    // Probe buffer size: must comfortably hold one run's worth of trace per
+    // core; a wrap (samp_wrt > buf_len at finalize) is treated as data loss
+    // and only logged. 1 MiB starts as a safe default — pick by P99
+    // measurement once we have raw byte counts from real kernels (#905).
+    constexpr uint32_t kPerfmonBufBytes = 1u << 20;
+    perfmon_buf_len_ = kPerfmonBufBytes;
+    perfmon_buf_dev_ptrs_.assign(num_aicore, nullptr);
+
+    // HBM (experiment): re-check whether the perfmon DMA writeback lands when
+    // the self-managed buffer is HBM rather than DDR. a5 user-mode rtMalloc
+    // returns the same VA across pools, so this is mostly a sanity re-check.
+    for (int i = 0; i < num_aicore; i++) {
+        void *ptr = nullptr;
+        int rc = rtMalloc(&ptr, kPerfmonBufBytes, RT_MEMORY_HBM, 0);
+        if (rc != 0 || ptr == nullptr) {
+            LOG_ERROR("Perfmon probe: rtMalloc per-core buffer %d failed: %d", i, rc);
+            return -1;
+        }
+        perfmon_buf_dev_ptrs_[i] = ptr;
+    }
+
+    // Device-resident addr table that AICPU dereferences at perfmon_aicpu_init.
+    size_t table_bytes = sizeof(uint64_t) * static_cast<size_t>(num_aicore);
+    int rc = rtMalloc(&perfmon_addr_table_dev_, table_bytes, RT_MEMORY_HBM, 0);
+    if (rc != 0 || perfmon_addr_table_dev_ == nullptr) {
+        LOG_ERROR("Perfmon probe: rtMalloc addr table failed: %d", rc);
+        return -1;
+    }
+    std::vector<uint64_t> host_table(num_aicore);
+    for (int i = 0; i < num_aicore; i++) {
+        host_table[i] = reinterpret_cast<uint64_t>(perfmon_buf_dev_ptrs_[i]);
+    }
+    rc = rtMemcpy(perfmon_addr_table_dev_, table_bytes, host_table.data(), table_bytes, RT_MEMCPY_HOST_TO_DEVICE);
+    if (rc != 0) {
+        LOG_ERROR("Perfmon probe: rtMemcpy addr table H2D failed: %d", rc);
+        return -1;
+    }
+
+    // Ready flag: 4-byte GM, zeroed. AICPU sets it to 1 after blind-config;
+    // host polls it (wait_perfmon_ready) before launching the AICore kernel.
+    rc = rtMalloc(&perfmon_ready_flag_dev_, sizeof(uint32_t), RT_MEMORY_HBM, 0);
+    if (rc != 0 || perfmon_ready_flag_dev_ == nullptr) {
+        LOG_ERROR("Perfmon probe: rtMalloc ready flag failed: %d", rc);
+        return -1;
+    }
+    uint32_t zero = 0;
+    rc = rtMemcpy(perfmon_ready_flag_dev_, sizeof(uint32_t), &zero, sizeof(uint32_t), RT_MEMCPY_HOST_TO_DEVICE);
+    if (rc != 0) {
+        LOG_ERROR("Perfmon probe: zero ready flag failed: %d", rc);
+        return -1;
+    }
+
+    // DEBUG regdump: uint32[num_aicore * PERFMON_REGDUMP_STRIDE]. AICore writes
+    // all perfmon regs here at kernel entry; we D2H-read + print in finalize.
+    perfmon_regdump_count_ = num_aicore;
+    size_t regdump_bytes = sizeof(uint32_t) * static_cast<size_t>(num_aicore) * PERFMON_REGDUMP_STRIDE;
+    rc = rtMalloc(&perfmon_regdump_dev_, regdump_bytes, RT_MEMORY_HBM, 0);
+    if (rc != 0 || perfmon_regdump_dev_ == nullptr) {
+        LOG_ERROR("Perfmon probe: rtMalloc regdump failed: %d", rc);
+        return -1;
+    }
+    rtMemset(perfmon_regdump_dev_, regdump_bytes, 0, regdump_bytes);
+
+    kernel_args_.args.aicore_perfmon_buf_addrs = reinterpret_cast<uint64_t>(perfmon_addr_table_dev_);
+    kernel_args_.args.perfmon_buf_len = perfmon_buf_len_;
+    kernel_args_.args.perfmon_num_cores = static_cast<uint32_t>(num_aicore);
+    kernel_args_.args.perfmon_ready_flag = reinterpret_cast<uint64_t>(perfmon_ready_flag_dev_);
+    kernel_args_.args.perfmon_regdump_addr = reinterpret_cast<uint64_t>(perfmon_regdump_dev_);
+    LOG_INFO_V0(
+        "Perfmon probe: %d cores x %u bytes; addr table device=0x%lx; ready flag=0x%lx", num_aicore, perfmon_buf_len_,
+        kernel_args_.args.aicore_perfmon_buf_addrs, kernel_args_.args.perfmon_ready_flag
+    );
+    return 0;
+}
+
+int DeviceRunner::wait_perfmon_ready() {
+    if (perfmon_ready_flag_dev_ == nullptr) {
+        return 0;  // probe not active
+    }
+    // AICPU sets the flag in simpler_aicpu_init, which runs early on stream_aicpu_.
+    // Spin-poll via D2H copy with a generous cap (perfmon blind-config is fast).
+    constexpr int kMaxSpins = 100000;
+    uint32_t flag = 0;
+    for (int s = 0; s < kMaxSpins; s++) {
+        int rc = rtMemcpy(&flag, sizeof(uint32_t), perfmon_ready_flag_dev_, sizeof(uint32_t), RT_MEMCPY_DEVICE_TO_HOST);
+        if (rc == 0 && flag != 0) {
+            LOG_INFO_V0("Perfmon probe: AICPU signalled ready after %d polls", s);
+            return 0;
+        }
+    }
+    LOG_ERROR("Perfmon probe: timed out waiting for AICPU ready flag");
+    return -1;
+}
+
+void DeviceRunner::finalize_perfmon_probe() {
+    // Attempt 1: clear the global biuperf-prof flag (reverse of enable).
+    if (perfmon_prof_switch_started_) {
+        perfmon_call_prof_switch(device_id_, kProfCmdStop);
+        perfmon_prof_switch_started_ = false;
+    }
+
+    // DEBUG regdump: D2H-read the per-core perfmon register snapshot AICore took
+    // at kernel entry (post-kickstart) and print it. Order matches AICore's
+    // write in KERNEL_ENTRY.
+    if (perfmon_regdump_dev_ != nullptr && perfmon_regdump_count_ > 0) {
+        size_t bytes = sizeof(uint32_t) * static_cast<size_t>(perfmon_regdump_count_) * PERFMON_REGDUMP_STRIDE;
+        std::vector<uint32_t> rd(static_cast<size_t>(perfmon_regdump_count_) * PERFMON_REGDUMP_STRIDE, 0);
+        int rc = rtMemcpy(rd.data(), bytes, perfmon_regdump_dev_, bytes, RT_MEMCPY_DEVICE_TO_HOST);
+        if (rc == 0) {
+            for (int c = 0; c < perfmon_regdump_count_; c++) {
+                const uint32_t *s = rd.data() + static_cast<size_t>(c) * PERFMON_REGDUMP_STRIDE;
+                LOG_INFO_V0(
+                    "Perfmon regdump core %d @entry: en=0x%x glob=0x%x buf_len=0x%x glitch=0x%x "
+                    "base_l=0x%x base_h=0x%x wptr=0x%x samp_crt=0x%x samp_wrt=0x%x",
+                    c, s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8]
+                );
+            }
+        } else {
+            LOG_WARN("Perfmon probe: regdump D2H failed: %d", rc);
+        }
+    }
+
+    // Streams are already synced (run() calls aclrtSynchronizeStreamWithTimeout
+    // on both AICPU and AICore streams before this guard fires), and AICPU's
+    // perfmon_aicpu_finalize cleared GLOBAL_EN inside scheduler shutdown, so
+    // HW is no longer writing. Safe to copy device buffers back to host.
+    const int n = static_cast<int>(perfmon_buf_dev_ptrs_.size());
+    if (n > 0 && perfmon_buf_len_ > 0) {
+        std::vector<uint8_t> scratch(perfmon_buf_len_);
+        std::string dir = output_prefix_.empty() ? std::string(".") : output_prefix_;
+        for (int i = 0; i < n; i++) {
+            void *dev = perfmon_buf_dev_ptrs_[i];
+            if (dev == nullptr) {
+                continue;
+            }
+            int rc = rtMemcpy(scratch.data(), perfmon_buf_len_, dev, perfmon_buf_len_, RT_MEMCPY_DEVICE_TO_HOST);
+            if (rc != 0) {
+                LOG_WARN("Perfmon probe: rtMemcpy core %d D2H failed: %d", i, rc);
+                continue;
+            }
+            char path[512];
+            std::snprintf(path, sizeof(path), "%s/perfmon_probe_core_%02d.bin", dir.c_str(), i);
+            FILE *fp = std::fopen(path, "wb");
+            if (fp == nullptr) {
+                LOG_WARN("Perfmon probe: fopen %s failed", path);
+                continue;
+            }
+            std::fwrite(scratch.data(), 1, perfmon_buf_len_, fp);
+            std::fclose(fp);
+            LOG_INFO_V0("Perfmon probe: dumped core %d (%u bytes) to %s", i, perfmon_buf_len_, path);
+        }
+    }
+
+    for (auto *p : perfmon_buf_dev_ptrs_) {
+        if (p != nullptr) {
+            rtFree(p);
+        }
+    }
+    perfmon_buf_dev_ptrs_.clear();
+    if (perfmon_addr_table_dev_ != nullptr) {
+        rtFree(perfmon_addr_table_dev_);
+        perfmon_addr_table_dev_ = nullptr;
+    }
+    if (perfmon_ready_flag_dev_ != nullptr) {
+        rtFree(perfmon_ready_flag_dev_);
+        perfmon_ready_flag_dev_ = nullptr;
+    }
+    if (perfmon_regdump_dev_ != nullptr) {
+        rtFree(perfmon_regdump_dev_);
+        perfmon_regdump_dev_ = nullptr;
+    }
+    perfmon_regdump_count_ = 0;
+    kernel_args_.args.aicore_perfmon_buf_addrs = 0;
+    kernel_args_.args.perfmon_buf_len = 0;
+    kernel_args_.args.perfmon_num_cores = 0;
+    kernel_args_.args.perfmon_ready_flag = 0;
+    kernel_args_.args.perfmon_regdump_addr = 0;
+    perfmon_buf_len_ = 0;
+    enable_perfmon_probe_ = false;
 }
 
 int DeviceRunner::init_l2_perf(int num_aicore, int device_id) {

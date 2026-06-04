@@ -89,6 +89,24 @@ struct KernelArgs {
     // See the a2a3 kernel_args.h for the full design rationale (CANN's
     // AICPU args copy makes inline fields write-only).
     uint64_t device_wall_data_base{0};
+
+    // Perfmon probe (issue #905): device pointer to a uint64_t[num_aicore]
+    // table of per-core perfmon writeback buffer device addresses. AICPU
+    // reads it at init, programs PERF_MON_BASE_ADDR_L/H per core, enables
+    // global. 0 = perfmon probe off (host did not allocate buffers, gated by
+    // PROFILING_FLAG_PERFMON_PROBE in enable_profiling_flag).
+    uint64_t aicore_perfmon_buf_addrs{0};
+    uint32_t perfmon_buf_len{0};   // bytes per per-core buffer; programmed into PERF_MON_BUF_LEN
+    uint32_t perfmon_num_cores{0};  // # of regs[] entries AICPU blind-configs perfmon on
+    // DEBUG: device ptr to uint32[num_cores * PERFMON_REGDUMP_STRIDE]. AICore at
+    // kernel entry (post-kickstart) reads all perfmon regs and writes them here
+    // (PERFMON_REGDUMP_N values per core); host D2H-reads + prints. 0 = off.
+    uint64_t perfmon_regdump_addr{0};
+    // Device ptr to a 4-byte GM flag. AICPU writes 1 after it has blind-configured
+    // perfmon on all cores (in simpler_aicpu_init, before AICore is launched);
+    // host polls it and only launches the AICore kernel once it reads 1, so
+    // perfmon is configured before the AICore kickstart. 0 = probe off.
+    uint64_t perfmon_ready_flag{0};
 };
 
 #ifdef __cplusplus

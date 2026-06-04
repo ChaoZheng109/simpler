@@ -619,6 +619,26 @@ private:
     int init_pmu(int num_cores, int num_threads, const std::string &csv_path, PmuEventType event_type, int device_id);
     int init_l0_perf(int num_aicore, int num_threads, int device_id);
 
+    // Perfmon writeback probe (issue #905). Env-var gated
+    // (PYPTO_L0_PERFMON_PROBE=1); allocates one HBM buffer per AICore + a
+    // device-resident addr table, hands the table to AICPU via KernelArgs.
+    // On teardown copies each buffer back and writes it to a per-core file
+    // under output_prefix_, then frees device memory.
+    bool enable_perfmon_probe_{false};
+    uint32_t perfmon_buf_len_{0};                 // bytes per per-core buffer
+    std::vector<void *> perfmon_buf_dev_ptrs_;    // num_aicore entries, owned by this DeviceRunner
+    void *perfmon_addr_table_dev_{nullptr};       // device array of uint64_t[num_aicore] base addrs
+    void *perfmon_ready_flag_dev_{nullptr};       // 4-byte GM flag AICPU sets after blind-config
+    void *perfmon_regdump_dev_{nullptr};          // DEBUG: AICore writes all perfmon regs here at entry
+    int perfmon_regdump_count_{0};                // # of cores in the regdump (= num_aicore)
+    bool perfmon_prof_switch_started_{false};     // Attempt 1: rtProfSetProSwitch(PROF_INSTR) armed
+    int init_perfmon_probe(int num_aicore);
+    void finalize_perfmon_probe();
+    // Poll the perfmon_ready_flag until AICPU has blind-configured perfmon
+    // (must be called after AICPU launch, before AICore launch). Returns 0 on
+    // ready, -1 on timeout.
+    int wait_perfmon_ready();
+
     // Per-run collector teardown: stops mgmt + poll threads on every collector
     // whose init succeeded, in the only safe order (stop() joins mgmt before
     // poll). Idempotent — collectors that never initialized are skipped.

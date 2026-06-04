@@ -99,6 +99,11 @@ __aicore__ uint64_t get_aicore_pmu_reg_base() {
     return static_cast<uint64_t>(reinterpret_cast<uintptr_t>(pthread_getspecific(g_pmu_reg_base_key)));
 }
 
+// Perfmon probe is onboard-only (no perfmon HW in sim); stub the debug hooks
+// so the shared aicore_executor links. get returns the "probe off" sentinel.
+__aicore__ void set_aicore_perfmon_en_at_entry(uint32_t) {}
+__aicore__ uint32_t get_aicore_perfmon_en_at_entry() { return 0xFFFFFFFFu; }
+
 // Core identity setter function pointers — set by DeviceRunner after dlopen.
 // These point into cpu_sim_context.cpp (host_runtime SO) and set per-thread
 // subblock_id and cluster_id for pto-isa's TPUSH/TPOP hooks.

@@ -52,6 +52,7 @@ class Runtime;
 [[block_local]] static __gm__ L0PerfAicoreRing *s_aicore_l0_perf_ring;
 [[block_local]] static __gm__ PmuAicoreRing *s_aicore_pmu_ring;
 [[block_local]] static uint64_t s_aicore_pmu_reg_base;
+[[block_local]] static uint32_t s_aicore_perfmon_en_at_entry;
 
 __attribute__((weak)) __aicore__ void set_aicore_profiling_flag(uint32_t flag) { s_aicore_profiling_flag = flag; }
 __attribute__((weak)) __aicore__ uint32_t get_aicore_profiling_flag() { return s_aicore_profiling_flag; }
@@ -71,6 +72,9 @@ __attribute__((weak)) __aicore__ __gm__ PmuAicoreRing *get_aicore_pmu_ring() { r
 
 __attribute__((weak)) __aicore__ void set_aicore_pmu_reg_base(uint64_t reg_base) { s_aicore_pmu_reg_base = reg_base; }
 __attribute__((weak)) __aicore__ uint64_t get_aicore_pmu_reg_base() { return s_aicore_pmu_reg_base; }
+
+__attribute__((weak)) __aicore__ void set_aicore_perfmon_en_at_entry(uint32_t en) { s_aicore_perfmon_en_at_entry = en; }
+__attribute__((weak)) __aicore__ uint32_t get_aicore_perfmon_en_at_entry() { return s_aicore_perfmon_en_at_entry; }
 
 extern __aicore__ void aicore_execute(__gm__ Runtime *runtime, int block_idx, CoreType core_type);
 
@@ -147,6 +151,50 @@ extern "C" __global__ __aicore__ void KERNEL_ENTRY(aicore_kernel)(__gm__ KernelA
     } else {
         set_aicore_pmu_ring(nullptr);
         set_aicore_pmu_reg_base(0);
+    }
+
+    // DEBUG (perfmon probe): at kernel entry — immediately after kickstart,
+    // before any task runs — read ALL perfmon regs and dump them so we see the
+    // full post-kickstart state (what HWTS set en/base/etc to). en is also
+    // stashed for the Handshake path as a cross-check.
+    // ld_dev offset is a 12-bit signed immediate, so the 0xB0xx regs are read
+    // via a base rebased to 0xB000 (offsets then 0..0x28, all < 2048); 0xC4 is
+    // read from a base at reg_base+0.
+    if (GET_PROFILING_FLAG(k_args->enable_profiling_flag, PROFILING_FLAG_PERFMON_PROBE)) {
+        __gm__ uint64_t *perfmon_regs = reinterpret_cast<__gm__ uint64_t *>(k_args->regs);
+        if (perfmon_regs != nullptr) {
+            uint64_t reg_base = perfmon_regs[get_physical_core_id()];
+            int32_t *bc4 = reinterpret_cast<int32_t *>(reg_base);
+            int32_t *bb = reinterpret_cast<int32_t *>(reg_base + REG_MMIO_PERF_MON_GLOBAL_EN_OFFSET);
+            // ld_dev's 2nd arg must be a compile-time immediate in [-2048, 2047].
+            // Keep each offset a plain constexpr int (no runtime int16_t cast,
+            // which defeats the immediate-range deduction). 0xC4 is read from
+            // bc4 (reg_base+0); the 0xB0xx regs from bb (reg_base+0xB000), so
+            // their relative offsets are 0..0x28.
+            constexpr int B = static_cast<int>(REG_MMIO_PERF_MON_GLOBAL_EN_OFFSET);
+            uint32_t v_en      = static_cast<uint32_t>(ld_dev(bc4, static_cast<int>(REG_MMIO_PERF_MON_EN_OFFSET)));
+            uint32_t v_glob    = static_cast<uint32_t>(ld_dev(bb, static_cast<int>(REG_MMIO_PERF_MON_GLOBAL_EN_OFFSET) - B));
+            uint32_t v_buflen  = static_cast<uint32_t>(ld_dev(bb, static_cast<int>(REG_MMIO_PERF_MON_BUF_LEN_OFFSET) - B));
+            uint32_t v_glitch  = static_cast<uint32_t>(ld_dev(bb, static_cast<int>(REG_MMIO_PERF_MON_GLITCH_FILTER_OFFSET) - B));
+            uint32_t v_basel   = static_cast<uint32_t>(ld_dev(bb, static_cast<int>(REG_MMIO_PERF_MON_BASE_ADDR_L_OFFSET) - B));
+            uint32_t v_baseh   = static_cast<uint32_t>(ld_dev(bb, static_cast<int>(REG_MMIO_PERF_MON_BASE_ADDR_H_OFFSET) - B));
+            uint32_t v_wptr    = static_cast<uint32_t>(ld_dev(bb, static_cast<int>(REG_MMIO_PERF_MON_WPTR_O_OFFSET) - B));
+            uint32_t v_sampcrt = static_cast<uint32_t>(ld_dev(bb, static_cast<int>(REG_MMIO_PERF_MON_SAMP_CRT_OFFSET) - B));
+            uint32_t v_sampwrt = static_cast<uint32_t>(ld_dev(bb, static_cast<int>(REG_MMIO_PERF_MON_SAMP_WRT_OFFSET) - B));
+            set_aicore_perfmon_en_at_entry(v_en);
+            __gm__ uint32_t *regdump = reinterpret_cast<__gm__ uint32_t *>(k_args->perfmon_regdump_addr);
+            if (regdump != nullptr) {
+                __gm__ uint32_t *slot = regdump + static_cast<uint64_t>(get_physical_core_id()) * PERFMON_REGDUMP_STRIDE;
+                slot[0] = v_en;     slot[1] = v_glob;   slot[2] = v_buflen;
+                slot[3] = v_glitch; slot[4] = v_basel;  slot[5] = v_baseh;
+                slot[6] = v_wptr;   slot[7] = v_sampcrt; slot[8] = v_sampwrt;
+                dcci(slot, SINGLE_CACHE_LINE, CACHELINE_OUT);
+            }
+        } else {
+            set_aicore_perfmon_en_at_entry(0xFFFFFFFFu);
+        }
+    } else {
+        set_aicore_perfmon_en_at_entry(0xFFFFFFFFu);
     }
 
     aicore_execute(k_args->runtime_args, block_idx, core_type);

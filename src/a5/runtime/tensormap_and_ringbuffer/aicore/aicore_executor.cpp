@@ -73,6 +73,9 @@ __aicore__ __attribute__((weak)) void aicore_execute(__gm__ Runtime *runtime, in
 
     // Phase 2: Report physical core ID, signal ready
     my_hank->physical_core_id = get_physical_core_id();
+    // DEBUG (perfmon probe): forward the post-kickstart perf_mon_en value read
+    // at kernel entry so AICPU can log it next to its pre-launch / finalize reads.
+    my_hank->aicore_perfmon_en = get_aicore_perfmon_en_at_entry();
     OUT_OF_ORDER_STORE_BARRIER();
     my_hank->aicore_regs_ready = 1;
     dcci(&my_hank->aicore_regs_ready, SINGLE_CACHE_LINE, CACHELINE_OUT);

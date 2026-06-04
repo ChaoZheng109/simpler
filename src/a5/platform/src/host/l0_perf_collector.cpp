@@ -214,27 +214,44 @@ int L0PerfCollector::open_acl_prof_session(int device_id) {
         return -1;
     }
 
-    aclError prof_start_rc = aclprofStart(acl_prof_cfg_);
-    LOG_INFO_V1("L0PerfCollector: aclprofStart -> %d", (int)prof_start_rc);
-    if (prof_start_rc != ACL_SUCCESS) {
-        aclprofDestroyConfig(acl_prof_cfg_);
-        acl_prof_cfg_ = nullptr;
-        aclprofFinalize();
-        return -1;
+    // Experiment toggle: when L0_SKIP_ACLPROF_START is set we skip aclprofStart
+    // (②) while keeping rtProfSetProSwitch (①) + prof_drv_start (③). Probes
+    // whether aclprofStart's AICORE event config is required to enable
+    // perf_mon, or only ①+③ matter (combo ①+③).
+    const char *skip_aclstart = std::getenv("L0_SKIP_ACLPROF_START");
+    if (skip_aclstart == nullptr || skip_aclstart[0] == '0') {
+        aclError prof_start_rc = aclprofStart(acl_prof_cfg_);
+        LOG_INFO_V1("L0PerfCollector: aclprofStart -> %d", (int)prof_start_rc);
+        if (prof_start_rc != ACL_SUCCESS) {
+            aclprofDestroyConfig(acl_prof_cfg_);
+            acl_prof_cfg_ = nullptr;
+            aclprofFinalize();
+            return -1;
+        }
+    } else {
+        LOG_INFO_V0("L0PerfCollector: L0_SKIP_ACLPROF_START set — skipping aclprofStart (② omitted)");
     }
 
     // PROF_INSTR is the runtime-level switch that routes DFX trace data to
     // biu_perf channels. aclprofStart alone does not do this on dav-c310.
-    int rt_rc = call_rt_prof_set_pro_switch(device_id, kProfCmdStart);
-    LOG_INFO_V1("L0PerfCollector: rtProfSetProSwitch(PROF_INSTR, START) -> %d", rt_rc);
-    if (rt_rc != 0) {
-        aclprofStop(acl_prof_cfg_);
-        aclprofDestroyConfig(acl_prof_cfg_);
-        acl_prof_cfg_ = nullptr;
-        aclprofFinalize();
-        return -1;
+    // Experiment toggle: when L0_SKIP_PROF_SET_SWITCH is set we skip ① while
+    // keeping aclprofStart (②) + prof_drv_start (③). Probes whether the SQE
+    // biuperf flag is required to enable perf_mon (combo ②+③).
+    const char *skip_setswitch = std::getenv("L0_SKIP_PROF_SET_SWITCH");
+    if (skip_setswitch == nullptr || skip_setswitch[0] == '0') {
+        int rt_rc = call_rt_prof_set_pro_switch(device_id, kProfCmdStart);
+        LOG_INFO_V1("L0PerfCollector: rtProfSetProSwitch(PROF_INSTR, START) -> %d", rt_rc);
+        if (rt_rc != 0) {
+            aclprofStop(acl_prof_cfg_);
+            aclprofDestroyConfig(acl_prof_cfg_);
+            acl_prof_cfg_ = nullptr;
+            aclprofFinalize();
+            return -1;
+        }
+        rt_prof_switch_started_ = true;
+    } else {
+        LOG_INFO_V0("L0PerfCollector: L0_SKIP_PROF_SET_SWITCH set — skipping rtProfSetProSwitch (① omitted)");
     }
-    rt_prof_switch_started_ = true;
     return 0;
 }
 
@@ -523,28 +540,42 @@ int L0PerfCollector::initialize(
     shm_dev_ = shm_dev_local;
     set_memory_context(alloc_cb, register_cb, free_cb, shm_dev_local, shm_host_local, shm_size, device_id);
 
-    if (start_all_biu_perf_channels() != 0) {
-        // Partial biu_perf starts were already rolled back inside
-        // start_all_biu_perf_channels. shm_dev_ is left registered with
-        // manager_; the caller's finalize() path releases it via
-        // manager_.release_owned_buffers().
-        if (hal_handle_ != nullptr) {
-            dlclose(hal_handle_);
-            hal_handle_ = nullptr;
+    // Experiment toggle: when L0_SKIP_BIU_PERF_CHANNELS is set we skip
+    // prof_drv_start (③) and the drain thread, keeping only aclprofStart +
+    // rtProfSetProSwitch. Lets us probe whether the driver channel is required
+    // to enable perf_mon, or only to consume the data (combos A/B).
+    const char *skip_channels = std::getenv("L0_SKIP_BIU_PERF_CHANNELS");
+    const bool channels_enabled = (skip_channels == nullptr || skip_channels[0] == '0');
+    if (channels_enabled) {
+        if (start_all_biu_perf_channels() != 0) {
+            // Partial biu_perf starts were already rolled back inside
+            // start_all_biu_perf_channels. shm_dev_ is left registered with
+            // manager_; the caller's finalize() path releases it via
+            // manager_.release_owned_buffers().
+            if (hal_handle_ != nullptr) {
+                dlclose(hal_handle_);
+                hal_handle_ = nullptr;
+            }
+            close_acl_prof_session();
+            return -1;
         }
-        close_acl_prof_session();
-        return -1;
-    }
 
-    // Channels are recording — start the dedicated stamp-drain thread so the
-    // driver biu_perf ring is read continuously (decoupled from markers).
-    stamp_drain_running_.store(true, std::memory_order_release);
-    stamp_drain_thread_ = std::thread(&L0PerfCollector::stamp_drain_loop, this);
+        // Channels are recording — start the dedicated stamp-drain thread so the
+        // driver biu_perf ring is read continuously (decoupled from markers).
+        stamp_drain_running_.store(true, std::memory_order_release);
+        stamp_drain_thread_ = std::thread(&L0PerfCollector::stamp_drain_loop, this);
+    } else {
+        LOG_INFO_V0(
+            "L0PerfCollector: L0_SKIP_BIU_PERF_CHANNELS set — skipping prof_drv_start "
+            "and drain thread (aclprofStart + rtProfSetProSwitch only)"
+        );
+    }
 
     initialized_ = true;
     LOG_INFO_V1(
-        "L0PerfCollector: initialized: dev=%d, SHM=0x%lx, 18 biu_perf channels started, output=%s",
-        device_id, reinterpret_cast<unsigned long>(shm_dev_), output_prefix_.c_str()
+        "L0PerfCollector: initialized: dev=%d, SHM=0x%lx, biu_perf channels=%s, output=%s",
+        device_id, reinterpret_cast<unsigned long>(shm_dev_), channels_enabled ? "18 started" : "SKIPPED",
+        output_prefix_.c_str()
     );
     return 0;
 }

@@ -17,6 +17,7 @@
 #include "aicpu/device_time.h"
 #include "aicpu/l0_perf_collector_aicpu.h"
 #include "aicpu/l2_perf_collector_aicpu.h"
+#include "aicpu/perfmon_collector_aicpu.h"
 #include "aicpu/platform_regs.h"
 #include "aicpu/pmu_collector_aicpu.h"
 #include "common/memory_barrier.h"
@@ -538,6 +539,16 @@ int32_t SchedulerContext::shutdown(int32_t thread_idx) {
         }
     }
     LOG_INFO_V0("Thread %d: Shutdown complete", thread_idx);
+
+#if PTO2_PROFILING
+    // Perfmon finalize AFTER AICore deinit — read perfmon registers once the
+    // AICore kernel has been sent EXIT, to see whether en/samp differ from the
+    // before-deinit reading. Blind (all cores, once-guarded across threads).
+    if (is_perfmon_enabled()) {
+        perfmon_aicpu_finalize();
+    }
+#endif
+
     return rc;
 }
 
@@ -609,6 +620,15 @@ int32_t SchedulerContext::handshake_all_cores(Runtime *runtime) {
 
 #if PTO2_PROFILING
         physical_core_ids_[i] = physical_core_id;
+        // DEBUG (perfmon probe): AICore stamped its post-kickstart perf_mon_en
+        // (0xC4) into the handshake at kernel entry. Log it so we see the
+        // run-time en value (vs AICPU pre-launch 0x1 and finalize 0x4).
+        if (is_perfmon_enabled()) {
+            LOG_INFO_V0(
+                "Perfmon core %d (phys %u): perf_mon_en at AICore entry = 0x%x", i, physical_core_id,
+                hank->aicore_perfmon_en
+            );
+        }
 #endif
 
 #if !PTO2_PROFILING

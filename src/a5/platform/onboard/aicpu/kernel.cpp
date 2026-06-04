@@ -17,6 +17,7 @@
 #include "aicpu/device_time.h"
 #include "aicpu/l0_perf_collector_aicpu.h"
 #include "aicpu/l2_perf_collector_aicpu.h"
+#include "aicpu/perfmon_collector_aicpu.h"
 #include "aicpu/platform_regs.h"
 #include "aicpu/platform_aicpu_affinity.h"
 #include "aicpu/pmu_collector_aicpu.h"
@@ -61,6 +62,23 @@ extern "C" __attribute__((visibility("default"))) int simpler_aicpu_init(void *a
     g_device_start_cycle = get_sys_cnt_aicpu();
     if (k_args->device_wall_data_base != 0) {
         *reinterpret_cast<uint64_t *>(k_args->device_wall_data_base) = 0;
+    }
+
+    // Perfmon probe: blind-configure perfmon on all cores HERE — single-threaded
+    // and, crucially, BEFORE the host launches the AICore kernel. The host polls
+    // perfmon_ready_flag and only launches AICore once we set it, so perfmon is
+    // configured at AICore kickstart. Blind config indexes regs[] directly, so
+    // it needs no handshake (which would require AICore already running).
+    if (GET_PROFILING_FLAG(k_args->enable_profiling_flag, PROFILING_FLAG_PERFMON_PROBE)) {
+        set_platform_regs(k_args->regs);
+        set_platform_perfmon_buf_addrs(k_args->aicore_perfmon_buf_addrs);
+        set_platform_perfmon_buf_len(k_args->perfmon_buf_len);
+        set_perfmon_enabled(true);
+        perfmon_aicpu_init(static_cast<int>(k_args->perfmon_num_cores));
+        if (k_args->perfmon_ready_flag != 0) {
+            *reinterpret_cast<volatile uint32_t *>(k_args->perfmon_ready_flag) = 1;
+            cache_flush_range(reinterpret_cast<void *>(k_args->perfmon_ready_flag), sizeof(uint32_t));
+        }
     }
 
     LOG_INFO_V0("%s", "Runtime Executor Init: Initializing AICPU kernel");
@@ -109,6 +127,9 @@ extern "C" __attribute__((visibility("default"))) int simpler_aicpu_exec(void *a
     set_pmu_enabled(GET_PROFILING_FLAG(k_args->enable_profiling_flag, PROFILING_FLAG_PMU));
     set_platform_l0_perf_base(k_args->l0_perf_data_base);
     set_l0_swimlane_enabled(GET_PROFILING_FLAG(k_args->enable_profiling_flag, PROFILING_FLAG_L0_SWIMLANE));
+    set_platform_perfmon_buf_addrs(k_args->aicore_perfmon_buf_addrs);
+    set_platform_perfmon_buf_len(k_args->perfmon_buf_len);
+    set_perfmon_enabled(GET_PROFILING_FLAG(k_args->enable_profiling_flag, PROFILING_FLAG_PERFMON_PROBE));
 
     // Affinity gate: drop excess threads before entering runtime
     if (!platform_aicpu_affinity_gate(runtime->aicpu_thread_num, PLATFORM_MAX_AICPU_THREADS_JUST_FOR_LAUNCH)) {
