@@ -628,6 +628,13 @@ int32_t SchedulerContext::handshake_all_cores(Runtime *runtime) {
                 "Perfmon core %d (phys %u): perf_mon_en at AICore entry = 0x%x", i, physical_core_id,
                 hank->aicore_perfmon_en
             );
+            // Post-handshake base override: addr-only defers the whole config
+            // to here; rearm-addr did the blind config pre-launch and only
+            // re-asserts base here (to take back the cores the driver kickstart
+            // re-pointed to its own ring). Either way, write our base now.
+            if (is_perfmon_addr_only() || is_perfmon_rearm_addr()) {
+                perfmon_aicpu_set_addr_after_handshake(static_cast<int>(physical_core_id), reg_addr);
+            }
         }
 #endif
 
@@ -905,8 +912,16 @@ int32_t SchedulerContext::init(
         return rc;
     }
 #if PTO2_PROFILING
-    if (is_l0_swimlane_enabled()) {
+    // L0 swimlane normally retires cores outside biu_perf's 6-cluster coverage
+    // so dispatch locks to the monitored 18. Perfmon unify wants the OPPOSITE:
+    // all 108 cores must actually run tasks so perfmon produces samples on each,
+    // proving data lands in our self-managed addr (and channel stays empty).
+    // So in unify mode skip the retire and keep every core in dispatch.
+    bool skip_retire = is_perfmon_unify() || is_perfmon_rearm_addr() || is_perfmon_skip_retire();
+    if (is_l0_swimlane_enabled() && !skip_retire) {
         retire_uncovered_cores_for_l0(runtime);
+    } else if (skip_retire) {
+        LOG_INFO_V0("Perfmon: skipping L0 retire — all %d cores stay in dispatch", cores_total_num_);
     }
 #endif
     if (!assign_cores_to_threads()) {

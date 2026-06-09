@@ -74,10 +74,24 @@ extern "C" __attribute__((visibility("default"))) int simpler_aicpu_init(void *a
         set_platform_perfmon_buf_addrs(k_args->aicore_perfmon_buf_addrs);
         set_platform_perfmon_buf_len(k_args->perfmon_buf_len);
         set_perfmon_enabled(true);
-        perfmon_aicpu_init(static_cast<int>(k_args->perfmon_num_cores));
-        if (k_args->perfmon_ready_flag != 0) {
-            *reinterpret_cast<volatile uint32_t *>(k_args->perfmon_ready_flag) = 1;
-            cache_flush_range(reinterpret_cast<void *>(k_args->perfmon_ready_flag), sizeof(uint32_t));
+        bool addr_only = GET_PROFILING_FLAG(k_args->enable_profiling_flag, PROFILING_FLAG_PERFMON_ADDR_ONLY);
+        set_perfmon_addr_only(addr_only);
+        set_perfmon_unify(GET_PROFILING_FLAG(k_args->enable_profiling_flag, PROFILING_FLAG_PERFMON_UNIFY));
+        set_perfmon_rearm_addr(GET_PROFILING_FLAG(k_args->enable_profiling_flag, PROFILING_FLAG_PERFMON_REARM_ADDR));
+        set_perfmon_gen_only(GET_PROFILING_FLAG(k_args->enable_profiling_flag, PROFILING_FLAG_PERFMON_GEN_ONLY));
+        set_perfmon_skip_retire(GET_PROFILING_FLAG(k_args->enable_profiling_flag, PROFILING_FLAG_PERFMON_SKIP_RETIRE));
+        if (addr_only) {
+            // Addr-only: do NOT blind-configure here and do NOT signal ready —
+            // base_addr is written per core from the scheduler handshake, after
+            // the AICore kernel (and its kickstart) is already running. Host
+            // launches AICore without waiting on perfmon_ready_flag.
+            LOG_INFO_V0("%s", "Perfmon addr-only: deferring base_addr write to post-handshake");
+        } else {
+            perfmon_aicpu_init(static_cast<int>(k_args->perfmon_num_cores));
+            if (k_args->perfmon_ready_flag != 0) {
+                *reinterpret_cast<volatile uint32_t *>(k_args->perfmon_ready_flag) = 1;
+                cache_flush_range(reinterpret_cast<void *>(k_args->perfmon_ready_flag), sizeof(uint32_t));
+            }
         }
     }
 

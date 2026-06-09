@@ -625,6 +625,7 @@ private:
     // On teardown copies each buffer back and writes it to a per-core file
     // under output_prefix_, then frees device memory.
     bool enable_perfmon_probe_{false};
+    bool perfmon_addr_only_{false};               // sub-mode: write only base_addr post-handshake
     uint32_t perfmon_buf_len_{0};                 // bytes per per-core buffer
     std::vector<void *> perfmon_buf_dev_ptrs_;    // num_aicore entries, owned by this DeviceRunner
     void *perfmon_addr_table_dev_{nullptr};       // device array of uint64_t[num_aicore] base addrs

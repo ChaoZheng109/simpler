@@ -179,6 +179,28 @@ inline double cycles_to_us(uint64_t cycles) {
 #define PROFILING_FLAG_PMU (1u << 2)
 #define PROFILING_FLAG_L0_SWIMLANE (1u << 3)
 #define PROFILING_FLAG_PERFMON_PROBE (1u << 4)
+// Sub-mode of PERFMON_PROBE: instead of blind-configuring every perfmon reg
+// before AICore launch, AICPU writes ONLY base_addr after the AICore
+// handshake (post-kickstart), leaving buf_len/en/global_en at firmware
+// defaults. Probes whether base_addr is still overridable once HW enabled it.
+#define PROFILING_FLAG_PERFMON_ADDR_ONLY (1u << 5)
+// Extends ADDR_ONLY: the post-handshake write also forces buf_len + resets
+// wptr + sets global_en=1 on every core, so the driver-unarmed cores (gen=0)
+// also write into their self-managed buffer and all cores share one buf_len.
+#define PROFILING_FLAG_PERFMON_UNIFY (1u << 6)
+// Combine blind-config (PROBE, arms gen on all cores BEFORE kickstart) with a
+// post-handshake base re-write: kickstart lets the driver re-point its 18
+// monitored cores' base to its own ring, so after handshake we re-assert our
+// base on every core to take all 108 back. Also skips the L0 retire so all
+// cores run. Unlike ADDR_ONLY, blind-config still runs (this does NOT defer).
+#define PROFILING_FLAG_PERFMON_REARM_ADDR (1u << 7)
+// Extends REARM_ADDR: pre-launch blind config opens ONLY global_en (gen), NOT
+// perf_mon_en — en is left for the HWTS kickstart to set. Lets us observe which
+// cores the kickstart actually arms (en) rather than blindly arming all 108.
+#define PROFILING_FLAG_PERFMON_GEN_ONLY (1u << 8)
+// Standalone: suppress the L0 retire so all 108 cores stay in dispatch.
+// Composable with any perfmon mode (e.g. addr-only + skip-retire).
+#define PROFILING_FLAG_PERFMON_SKIP_RETIRE (1u << 9)
 #define GET_PROFILING_FLAG(flags, bit) ((((uint32_t)(flags)) & ((uint32_t)(bit))) != 0u)
 #define SET_PROFILING_FLAG(flags, bit) ((flags) |= (uint32_t)(bit))
 #define CLEAR_PROFILING_FLAG(flags, bit) ((flags) &= ~((uint32_t)(bit)))

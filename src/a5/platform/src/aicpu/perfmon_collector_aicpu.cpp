@@ -28,6 +28,11 @@
 static uint64_t g_perfmon_buf_addrs_table = 0;
 static uint32_t g_perfmon_buf_len = 0;
 static bool g_enable_perfmon = false;
+static bool g_perfmon_addr_only = false;
+static bool g_perfmon_unify = false;
+static bool g_perfmon_rearm_addr = false;
+static bool g_perfmon_gen_only = false;
+static bool g_perfmon_skip_retire = false;
 
 // Per-core resolved AICore MMIO base address, indexed by regs[] order (blind
 // config — not by handshake's logical->physical map). 0 = no perfmon for it.
@@ -42,6 +47,26 @@ extern "C" void set_platform_perfmon_buf_len(uint32_t buf_len) { g_perfmon_buf_l
 extern "C" void set_perfmon_enabled(bool enable) { g_enable_perfmon = enable; }
 
 extern "C" bool is_perfmon_enabled() { return g_enable_perfmon; }
+
+extern "C" void set_perfmon_addr_only(bool addr_only) { g_perfmon_addr_only = addr_only; }
+
+extern "C" bool is_perfmon_addr_only() { return g_perfmon_addr_only; }
+
+extern "C" void set_perfmon_unify(bool unify) { g_perfmon_unify = unify; }
+
+extern "C" bool is_perfmon_unify() { return g_perfmon_unify; }
+
+extern "C" void set_perfmon_rearm_addr(bool rearm) { g_perfmon_rearm_addr = rearm; }
+
+extern "C" bool is_perfmon_rearm_addr() { return g_perfmon_rearm_addr; }
+
+extern "C" void set_perfmon_gen_only(bool gen_only) { g_perfmon_gen_only = gen_only; }
+
+extern "C" bool is_perfmon_gen_only() { return g_perfmon_gen_only; }
+
+extern "C" void set_perfmon_skip_retire(bool skip) { g_perfmon_skip_retire = skip; }
+
+extern "C" bool is_perfmon_skip_retire() { return g_perfmon_skip_retire; }
 
 void perfmon_aicpu_init(int num_cores) {
     if (g_perfmon_buf_addrs_table == 0) {
@@ -88,10 +113,16 @@ void perfmon_aicpu_init(int num_cores) {
         write_reg(reg_addr, RegId::PERF_MON_EN, 0);
 
         // Program 48-bit writeback base: low 32 bits + high 16 bits.
+        // rearm-addr mode deliberately does NOT touch base here — base is only
+        // written AFTER the handshake (perfmon_aicpu_set_addr_after_handshake),
+        // so the pre-launch arm leaves the driver's biu_perf base path intact
+        // and we only redirect to our buffer post-handshake.
         uint32_t lo = static_cast<uint32_t>(buf_addr & 0xFFFFFFFFu);
         uint32_t hi = static_cast<uint32_t>((buf_addr >> 32) & 0xFFFFu);
-        write_reg(reg_addr, RegId::PERF_MON_BASE_ADDR_L, lo);
-        write_reg(reg_addr, RegId::PERF_MON_BASE_ADDR_H, hi);
+        if (!g_perfmon_rearm_addr) {
+            write_reg(reg_addr, RegId::PERF_MON_BASE_ADDR_L, lo);
+            write_reg(reg_addr, RegId::PERF_MON_BASE_ADDR_H, hi);
+        }
 
         // Tell HW how big each buffer is. HW default 0 → refuses to write.
         write_reg(reg_addr, RegId::PERF_MON_BUF_LEN, g_perfmon_buf_len);
@@ -122,7 +153,11 @@ void perfmon_aicpu_init(int num_cores) {
         // Experiment: no barrier between the two enable writes — a dsb here may
         // stall and stretch the gap before en. MMIO writes to the same
         // Device-nGnRnE region are already ordered.
-        write_reg(reg_addr, RegId::PERF_MON_EN, 1);
+        // gen-only mode: leave en=0 here and let the HWTS kickstart set it, so we
+        // can observe which cores HW actually arms instead of arming all 108.
+        if (!g_perfmon_gen_only) {
+            write_reg(reg_addr, RegId::PERF_MON_EN, 1);
+        }
 
         // Immediate readback on core 0 only — confirms whether the values we
         // wrote actually landed in MMIO (rules out write_reg / RegId mapping
@@ -147,6 +182,86 @@ void perfmon_aicpu_init(int num_cores) {
     wmb();
 
     LOG_INFO_V0("Perfmon probe initialized on %d cores", num_cores);
+}
+
+void perfmon_aicpu_set_addr_after_handshake(int phys_core_id, uint64_t reg_addr) {
+    if (g_perfmon_buf_addrs_table == 0) {
+        LOG_ERROR("perfmon_set_addr: buf_addrs table is NULL (host did not allocate)");
+        return;
+    }
+    if (phys_core_id < 0 || phys_core_id >= PLATFORM_MAX_CORES) {
+        LOG_WARN("perfmon_set_addr: phys_core_id %d out of range [0,%d)", phys_core_id, PLATFORM_MAX_CORES);
+        return;
+    }
+    if (reg_addr == 0) {
+        LOG_WARN("perfmon_set_addr: core %d reg_addr=0, skipped", phys_core_id);
+        return;
+    }
+
+    uint64_t *buf_addr_table = reinterpret_cast<uint64_t *>(g_perfmon_buf_addrs_table);
+    uint64_t buf_addr = buf_addr_table[phys_core_id];
+    if (buf_addr == 0) {
+        LOG_WARN("perfmon_set_addr: core %d buf_addr=0, skipped", phys_core_id);
+        return;
+    }
+
+    // Read the firmware-default perfmon state left by HWTS kickstart BEFORE we
+    // touch anything. buf_len is the headline question of this experiment.
+    uint64_t def_len = read_reg(reg_addr, RegId::PERF_MON_BUF_LEN);
+    uint64_t def_en = read_reg(reg_addr, RegId::PERF_MON_EN);
+    uint64_t def_gen = read_reg(reg_addr, RegId::PERF_MON_GLOBAL_EN);
+    uint64_t def_lo = read_reg(reg_addr, RegId::PERF_MON_BASE_ADDR_L);
+    uint64_t def_hi = read_reg(reg_addr, RegId::PERF_MON_BASE_ADDR_H);
+    uint64_t def_wptr = read_reg(reg_addr, RegId::PERF_MON_WPTR_O);
+
+    // Sentinel at our buffer start: if HW redirects to it, this is overwritten.
+    *reinterpret_cast<volatile uint32_t *>(buf_addr) = 0xDEADBEEFu;
+
+    // Write ONLY base_addr — leave buf_len / en / global_en / counters at the
+    // firmware defaults logged above. This is the whole point of addr-only.
+    uint32_t lo = static_cast<uint32_t>(buf_addr & 0xFFFFFFFFu);
+    uint32_t hi = static_cast<uint32_t>((buf_addr >> 32) & 0xFFFFu);
+    write_reg(reg_addr, RegId::PERF_MON_BASE_ADDR_L, lo);
+    write_reg(reg_addr, RegId::PERF_MON_BASE_ADDR_H, hi);
+    wmb();
+
+    // Read base back: did the override stick while HW already had en set?
+    uint64_t rb_lo = read_reg(reg_addr, RegId::PERF_MON_BASE_ADDR_L);
+    uint64_t rb_hi = read_reg(reg_addr, RegId::PERF_MON_BASE_ADDR_H);
+    LOG_INFO_V0(
+        "Perfmon addr-only core %d: DEFAULTS buf_len=0x%lx en=0x%lx gen=0x%lx base=0x%lx_%08lx wptr=0x%lx | "
+        "wrote base=0x%x_%08x -> readback base=0x%lx_%08lx (buf_addr=0x%lx)",
+        phys_core_id, def_len, def_en, def_gen, def_hi, def_lo, def_wptr, hi, lo, rb_hi, rb_lo, buf_addr
+    );
+
+    // Unify sub-mode: also force buf_len + reset wptr + global_en across ALL
+    // cores so the 90 the driver never armed (gen=0) start writing too, and
+    // every core uses the same self-managed buf_len. Order: buf_len → wptr=0 →
+    // global_en=1 last, so the en AND gen gate only flips on after base/len/wptr
+    // are already set. Read each back — spec claims these are writable only at
+    // en=0, so the readback is the test of whether en=1 lets them through.
+    if (g_perfmon_unify) {
+        write_reg(reg_addr, RegId::PERF_MON_BUF_LEN, g_perfmon_buf_len);
+        write_reg(reg_addr, RegId::PERF_MON_WPTR_O, 0);
+        wmb();
+        write_reg(reg_addr, RegId::PERF_MON_GLOBAL_EN, 1);
+        wmb();
+        uint64_t rb_len = read_reg(reg_addr, RegId::PERF_MON_BUF_LEN);
+        uint64_t rb_wptr = read_reg(reg_addr, RegId::PERF_MON_WPTR_O);
+        uint64_t rb_gen = read_reg(reg_addr, RegId::PERF_MON_GLOBAL_EN);
+        LOG_INFO_V0(
+            "Perfmon unify core %d: wrote buf_len=0x%x wptr=0 global_en=1 -> readback buf_len=0x%lx "
+            "wptr=0x%lx gen=0x%lx",
+            phys_core_id, g_perfmon_buf_len, rb_len, rb_wptr, rb_gen
+        );
+    }
+
+    // Record reg_addr so finalize can read back wptr / samp on this core. Track
+    // the high-water core index since we index by physical id, not regs[] order.
+    s_perfmon_reg_addrs[phys_core_id] = reg_addr;
+    if (phys_core_id + 1 > s_perfmon_num_cores) {
+        s_perfmon_num_cores = phys_core_id + 1;
+    }
 }
 
 void perfmon_aicpu_finalize() {

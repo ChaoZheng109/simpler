@@ -477,9 +477,39 @@ int DeviceRunner::run(Runtime &runtime, int block_dim, int launch_aicpu_num) {
     // Perfmon writeback probe (issue #905), env-var gated, opt-in only —
     // does not touch any existing path. AICPU programs the 0xB000 register
     // block per core and HW DMAs trace into per-core GM buffers we own.
-    enable_perfmon_probe_ = (std::getenv("PYPTO_L0_PERFMON_PROBE") != nullptr);
+    // Addr-only is a sub-mode of the probe: it reuses the buffer allocation +
+    // finalize readback but defers base_addr to post-handshake. Unify extends
+    // addr-only (also forces buf_len/wptr/global_en on all cores). Setting
+    // either implies the probe is on; unify implies addr-only.
+    bool perfmon_unify = (std::getenv("PYPTO_L0_PERFMON_UNIFY") != nullptr);
+    // arm-all: blind-config pre-launch (arms gen before kickstart) + re-write
+    // base after handshake + skip retire. Deliberately does NOT set addr_only,
+    // so the AICPU blind config still runs and the host still waits for ready.
+    // gen-only extends arm-all: blind config opens only gen, leaving en to the
+    // kickstart. Implies arm-all (so blind config runs + post-handshake base).
+    bool perfmon_gen_only = (std::getenv("PYPTO_L0_PERFMON_GEN_ONLY") != nullptr);
+    bool perfmon_arm_all = perfmon_gen_only || (std::getenv("PYPTO_L0_PERFMON_ARM_ALL") != nullptr);
+    perfmon_addr_only_ = perfmon_unify || (std::getenv("PYPTO_L0_PERFMON_ADDR_ONLY") != nullptr);
+    enable_perfmon_probe_ =
+        perfmon_arm_all || perfmon_addr_only_ || (std::getenv("PYPTO_L0_PERFMON_PROBE") != nullptr);
     if (enable_perfmon_probe_) {
         SET_PROFILING_FLAG(enable_profiling_flag, PROFILING_FLAG_PERFMON_PROBE);
+    }
+    if (perfmon_addr_only_) {
+        SET_PROFILING_FLAG(enable_profiling_flag, PROFILING_FLAG_PERFMON_ADDR_ONLY);
+    }
+    if (perfmon_unify) {
+        SET_PROFILING_FLAG(enable_profiling_flag, PROFILING_FLAG_PERFMON_UNIFY);
+    }
+    if (perfmon_arm_all) {
+        SET_PROFILING_FLAG(enable_profiling_flag, PROFILING_FLAG_PERFMON_REARM_ADDR);
+    }
+    if (perfmon_gen_only) {
+        SET_PROFILING_FLAG(enable_profiling_flag, PROFILING_FLAG_PERFMON_GEN_ONLY);
+    }
+    // Standalone, composable with any mode (e.g. addr-only + skip-retire).
+    if (std::getenv("PYPTO_L0_PERFMON_SKIP_RETIRE") != nullptr) {
+        SET_PROFILING_FLAG(enable_profiling_flag, PROFILING_FLAG_PERFMON_SKIP_RETIRE);
     }
 
     for (int i = 0; i < num_aicore; i++) {
@@ -640,7 +670,11 @@ int DeviceRunner::run(Runtime &runtime, int block_dim, int launch_aicpu_num) {
     // Perfmon probe: AICPU blind-configures perfmon in simpler_aicpu_init (on
     // stream_aicpu_, before AICore runs). Wait for its ready flag so perfmon is
     // fully configured before the AICore kernel is kickstarted below.
-    if (enable_perfmon_probe_) {
+    //
+    // Addr-only sub-mode writes base_addr from the scheduler handshake, which
+    // can only run after AICore is up — so there is nothing to wait for here;
+    // launch AICore immediately and let the handshake do the override.
+    if (enable_perfmon_probe_ && !perfmon_addr_only_) {
         if (wait_perfmon_ready() != 0) {
             LOG_ERROR("Perfmon probe: ready-flag wait failed; launching AICore anyway");
         }
@@ -1224,9 +1258,14 @@ void DeviceRunner::finalize_collectors() {
 int DeviceRunner::init_perfmon_probe(int num_aicore) {
     // Probe buffer size: must comfortably hold one run's worth of trace per
     // core; a wrap (samp_wrt > buf_len at finalize) is treated as data loss
-    // and only logged. 1 MiB starts as a safe default — pick by P99
-    // measurement once we have raw byte counts from real kernels (#905).
-    constexpr uint32_t kPerfmonBufBytes = 1u << 20;
+    // and only logged. Sized to match (≥) the firmware-default PERF_MON_BUF_LEN
+    // (0x3fffffc ≈ 64 MiB) that HWTS kickstart programs on the driver-monitored
+    // cores — in addr-only mode we override base but NOT buf_len, so HW still
+    // writes up to the firmware buf_len; an undersized buffer overruns into the
+    // next core's region. 64 MiB per core × num_aicore is large (108 → ~6.9 GB
+    // HBM and the same in .bin dumps) — acceptable for the probe, revisit for
+    // production (#905).
+    constexpr uint32_t kPerfmonBufBytes = 1u << 26;  // 64 MiB
     perfmon_buf_len_ = kPerfmonBufBytes;
     perfmon_buf_dev_ptrs_.assign(num_aicore, nullptr);
 
