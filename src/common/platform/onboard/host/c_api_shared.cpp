@@ -43,6 +43,9 @@
 #include "host/raii_scope_guard.h"
 #include "runtime.h"
 
+#define CHIP_TIMING_HOST_SPANS
+#include "common/chip_timing.h"
+
 // Forward-declared (rather than `#include "dlog_pub.h"`) so this TU does not
 // require CANN's toolchain include path on the host build. Resolved at link
 // time against `libunified_dlog.so` / `libascendalog.so`.
@@ -399,9 +402,18 @@ int run_prepared(
     });
 
     const auto host_t0 = std::chrono::steady_clock::now();
+    const uint64_t run_idx = simpler::chip_timing::next_run();
+    CHIP_TIMING_HOST_EVENT(
+        run_idx, "run_prepared", 'B',
+        static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(host_t0.time_since_epoch()).count())
+    );
 
     try {
-        int rc = runner->attach_current_thread(runner->device_id());
+        int rc = 0;
+        {
+            CHIP_TIMING_SCOPE(run_idx, "attach");
+            rc = runner->attach_current_thread(runner->device_id());
+        }
         if (rc != 0) return rc;
 
         Runtime *r = new (runtime) Runtime();
@@ -430,16 +442,23 @@ int run_prepared(
         // per-tensor direction decisions in runtime_maker. trb consumes it to
         // skip the D2H copy-back of read-only INPUT tensors; hbg still
         // ignores it — see bind_callable_to_runtime_impl.
-        auto bind_result = runner->bind_callable_to_runtime(*r, callable_id);
+        BindCallableResult bind_result;
+        {
+            CHIP_TIMING_SCOPE(run_idx, "bind_callable");
+            bind_result = runner->bind_callable_to_runtime(*r, callable_id);
+        }
         if (bind_result.rc != 0) {
             return bind_result.rc;
         }
 
         // Per-run binding (tensor args, GM heap, SM alloc)
-        rc = bind_callable_to_runtime_impl(
-            r, reinterpret_cast<const ChipStorageTaskArgs *>(args), bind_result.host_orch_func_ptr,
-            bind_result.signature, bind_result.sig_count, ring_task_window, ring_heap, ring_dep_pool
-        );
+        {
+            CHIP_TIMING_SCOPE(run_idx, "bind_impl");
+            rc = bind_callable_to_runtime_impl(
+                r, reinterpret_cast<const ChipStorageTaskArgs *>(args), bind_result.host_orch_func_ptr,
+                bind_result.signature, bind_result.sig_count, ring_task_window, ring_heap, ring_dep_pool
+            );
+        }
         if (rc != 0) {
             r->set_gm_sm_ptr(nullptr);
             validate_runtime_impl(r);
@@ -455,7 +474,10 @@ int run_prepared(
         runner->set_scope_stats_enabled(enable_scope_stats != 0);
         runner->set_output_prefix(output_prefix);
 
-        rc = runner->run(*r, block_dim, aicpu_thread_num);
+        {
+            CHIP_TIMING_SCOPE(run_idx, "runner_run");
+            rc = runner->run(*r, block_dim, aicpu_thread_num);
+        }
         if (rc != 0) {
             validate_runtime_impl(r);
             return rc;
@@ -468,12 +490,23 @@ int run_prepared(
             }
         }
 
-        rc = validate_runtime_impl(r);
+        {
+            CHIP_TIMING_SCOPE(run_idx, "validate");
+            rc = validate_runtime_impl(r);
+        }
         if (out_timing != NULL) {
             const auto host_t1 = std::chrono::steady_clock::now();
             out_timing->host_wall_ns =
                 static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(host_t1 - host_t0).count());
             out_timing->device_wall_ns = runner->last_device_wall_ns();
+            CHIP_TIMING_HOST_EVENT(
+                run_idx, "run_prepared", 'E',
+                static_cast<uint64_t>(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(host_t1.time_since_epoch()).count()
+                )
+            );
+            CHIP_TIMING_HOST_WALL(run_idx, "host_wall", out_timing->host_wall_ns / 1000.0);
+            CHIP_TIMING_DEV_WALL(run_idx, "device_wall", out_timing->device_wall_ns / 1000.0);
         }
         return rc;
     } catch (...) {

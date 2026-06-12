@@ -11,6 +11,7 @@
 #include <cstdio>
 
 #include "common/unified_log.h"
+#include "common/chip_timing.h"
 #include "common/kernel_args.h"
 #include "common/platform_config.h"
 #include "aicpu/dep_gen_collector_aicpu.h"
@@ -114,12 +115,16 @@ extern "C" __attribute__((visibility("default"))) int simpler_aicpu_exec(void *a
     const int32_t wall_slot = platform_aicpu_affinity_thread_idx();
     uint64_t *const wall = reinterpret_cast<uint64_t *>(k_args->device_wall_data_base);
     const bool wall_ok = wall != nullptr && wall_slot >= 0 && wall_slot < PLATFORM_MAX_AICPU_THREADS_JUST_FOR_LAUNCH;
+    const uint64_t wall_start = get_sys_cnt_aicpu();
     if (wall_ok) {
-        wall[wall_slot * 2] = get_sys_cnt_aicpu();
+        wall[wall_slot * 2] = wall_start;
     }
+    CHIP_TIMING_DEV_CYCLES("aicpu_wall", 'B', wall_start);
 
     LOG_INFO_V0("%s", "simpler_aicpu_exec: Calling aicpu_execute with Runtime");
+    CHIP_TIMING_DEV_CYCLES("aicpu_exec", 'B', get_sys_cnt_aicpu());
     int rc = aicpu_execute(runtime);
+    CHIP_TIMING_DEV_CYCLES("aicpu_exec", 'E', get_sys_cnt_aicpu());
     if (rc != 0) {
         LOG_ERROR("simpler_aicpu_exec: aicpu_execute failed with rc=%d", rc);
         return rc;
@@ -128,9 +133,11 @@ extern "C" __attribute__((visibility("default"))) int simpler_aicpu_exec(void *a
 
     // Run-wall: record this thread's end into its own slot (plain store).
     // Host reduces max(end) - min(start) → ns (see wall-capture note above).
+    const uint64_t wall_end = get_sys_cnt_aicpu();
     if (wall_ok) {
-        wall[wall_slot * 2 + 1] = get_sys_cnt_aicpu();
+        wall[wall_slot * 2 + 1] = wall_end;
     }
+    CHIP_TIMING_DEV_CYCLES("aicpu_wall", 'E', wall_end);
 
     return rc;
 }

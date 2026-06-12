@@ -31,6 +31,7 @@
 
 #include "aicpu/platform_aicpu_affinity.h"
 #include "callable_protocol.h"
+#include "common/chip_timing.h"
 #include "common/memory_barrier.h"
 #include "common/platform_config.h"
 #include "common/unified_log.h"
@@ -460,19 +461,21 @@ int DeviceRunner::run(Runtime &runtime, int block_dim, int launch_aicpu_num) {
         *reinterpret_cast<uint64_t *>(kernel_args_.device_wall_data_base) = 0;
     }
     const auto sim_t0 = std::chrono::steady_clock::now();
+    CHIP_TIMING_DEV_TP("aicpu_wall", 'B', sim_t0, -1);
 
     for (int i = 0; i < over_launch; i++) {
-        aicpu_threads.push_back(create_thread([this, &runtime, launch_aicpu_num, over_launch, &aicpu_rc, sim_t0]() {
+        aicpu_threads.push_back(create_thread([this, &runtime, launch_aicpu_num, over_launch, &aicpu_rc, sim_t0, i]() {
             if (!platform_aicpu_affinity_gate(launch_aicpu_num, over_launch)) {
                 return;
             }
             int rc = aicpu_execute_func_(&runtime);
+            const auto t1 = std::chrono::steady_clock::now();
+            CHIP_TIMING_DEV_TP("aicpu_wall", 'E', t1, i);
             if (rc != 0) {
                 int expected = 0;
                 aicpu_rc.compare_exchange_strong(expected, rc, std::memory_order_acq_rel);
             }
             if (kernel_args_.device_wall_data_base != 0) {
-                const auto t1 = std::chrono::steady_clock::now();
                 *reinterpret_cast<uint64_t *>(kernel_args_.device_wall_data_base) =
                     static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - sim_t0).count());
             }

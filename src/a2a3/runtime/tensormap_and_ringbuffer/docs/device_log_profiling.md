@@ -150,6 +150,8 @@ When `--enable-l2-swimlane` is used, the host terminal prints a **Task Statistic
 
 A high sched/exec ratio (e.g., >3x) indicates that scheduling overhead dominates, and optimizations should target the scheduler's dispatch hot path (cache flush, payload construction) or upstream task flow.
 
+For a host+device per-stage breakdown of a single `run_prepared()` (reconciled against `host_wall` / `device_wall`), see [Chip Timing](../../../../../docs/dfx/chip-timing.md) — opt-in `[CHIP_TIMING]` log lines at the V4 tier, parsed by `simpler_setup/tools/chip_timing.py`.
+
 ---
 
 ## Quick Reference: Extracting Profiling Data
