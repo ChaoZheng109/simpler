@@ -231,21 +231,32 @@ int SchedulerContext::prepare_block_for_dispatch(
     if (shape == PTO2ResourceShape::MIX) {
         uint8_t cmask = slot_state.active_mask.core_mask();
         int n = 0;
+        // Per-subtask placement on half-idle clusters. When filling idle capacity
+        // (to_pending == false: IDLE phase or early dispatch), each subtask takes a
+        // running slot if its core is idle, else a pending slot on the running core.
+        // to_pending == true (PENDING phase) places every subtask pending. This
+        // matches selection because both run same-thread/pass on distinct clusters
+        // (see plan_mix_cluster); MIX kernels self-handshake (TPUSH/TPOP), so
+        // staggered subtask start is safe.
+        bool derive = !to_pending;
         if (cmask & PTO2_SUBTASK_MASK_AIC) {
+            bool sub_pending = derive ? !tracker.is_aic_core_idle(core_offset) : true;
             out_handles[n++] = prepare_subtask_to_core(
-                thread_idx, tracker.get_aic_core_offset(core_offset), slot_state, PTO2SubtaskSlot::AIC, to_pending,
+                thread_idx, tracker.get_aic_core_offset(core_offset), slot_state, PTO2SubtaskSlot::AIC, sub_pending,
                 block_idx
             );
         }
         if (cmask & PTO2_SUBTASK_MASK_AIV0) {
+            bool sub_pending = derive ? !tracker.is_aiv0_core_idle(core_offset) : true;
             out_handles[n++] = prepare_subtask_to_core(
-                thread_idx, tracker.get_aiv0_core_offset(core_offset), slot_state, PTO2SubtaskSlot::AIV0, to_pending,
+                thread_idx, tracker.get_aiv0_core_offset(core_offset), slot_state, PTO2SubtaskSlot::AIV0, sub_pending,
                 block_idx
             );
         }
         if (cmask & PTO2_SUBTASK_MASK_AIV1) {
+            bool sub_pending = derive ? !tracker.is_aiv1_core_idle(core_offset) : true;
             out_handles[n++] = prepare_subtask_to_core(
-                thread_idx, tracker.get_aiv1_core_offset(core_offset), slot_state, PTO2SubtaskSlot::AIV1, to_pending,
+                thread_idx, tracker.get_aiv1_core_offset(core_offset), slot_state, PTO2SubtaskSlot::AIV1, sub_pending,
                 block_idx
             );
         }
@@ -363,11 +374,29 @@ void SchedulerContext::dispatch_shape(
             if (is_mix) {
                 auto candidates = cores;
                 uint8_t cmask = slot_state->active_mask.core_mask();
-                auto wanted = is_pending ? CoreTracker::MixPlacement::PENDING : CoreTracker::MixPlacement::RUNNING;
-                while (candidates.has_value()) {
-                    int32_t cluster_offset = candidates.pop_first();
-                    if (tracker.classify_mix_cluster(cluster_offset, cmask) == wanted) {
-                        selected_mix_clusters |= CoreTracker::BitStates(1ULL << cluster_offset);
+                if (slot_state->active_mask.requires_sync_start()) {
+                    // sync_start needs every block to start simultaneously, so every
+                    // subtask must take a running slot on a whole-idle cluster
+                    // (config 1 only). Identical to the pre-split path.
+                    auto wanted = is_pending ? CoreTracker::MixPlacement::PENDING : CoreTracker::MixPlacement::RUNNING;
+                    while (candidates.has_value()) {
+                        int32_t cluster_offset = candidates.pop_first();
+                        if (tracker.classify_mix_cluster(cluster_offset, cmask) == wanted) {
+                            selected_mix_clusters |= CoreTracker::BitStates(1ULL << cluster_offset);
+                        }
+                    }
+                } else {
+                    // Per-subtask placement: IDLE phase admits any placeable cluster
+                    // with >=1 idle subtask core (config 1 + 2/3); PENDING phase admits
+                    // placeable all-running clusters (all-pending). The per-subtask
+                    // running/pending split is derived in prepare_block_for_dispatch.
+                    while (candidates.has_value()) {
+                        int32_t cluster_offset = candidates.pop_first();
+                        auto plan = tracker.plan_mix_cluster(cluster_offset, cmask);
+                        bool admit = plan.placeable && (is_pending ? !plan.any_idle : plan.any_idle);
+                        if (admit) {
+                            selected_mix_clusters |= CoreTracker::BitStates(1ULL << cluster_offset);
+                        }
                     }
                 }
                 if (!selected_mix_clusters.has_value()) {
@@ -639,8 +668,17 @@ int32_t SchedulerContext::try_speculative_early_dispatch(int32_t thread_idx) {
         if (c == nullptr) break;
         if (c->payload->spec_state.load(std::memory_order_acquire) != PTO2_SPEC_STAGING) continue;  // released
         PTO2ResourceShape shape = c->active_mask.to_shape();
-        auto idle = tracker.get_idle_core_offset_states(shape);
-        auto pend = tracker.get_pending_core_offset_states(shape);
+        CoreTracker::BitStates idle, pend;
+        if (shape == PTO2ResourceShape::MIX) {
+            // Per-subtask placement: every placeable cluster (half-idle included).
+            // The per-subtask running/pending split is derived in
+            // prepare_block_for_dispatch, so the pending set is folded into idle here.
+            idle = tracker.get_mix_placeable_cluster_offset_states(c->active_mask.core_mask());
+            pend = CoreTracker::BitStates(0ULL);
+        } else {
+            idle = tracker.get_idle_core_offset_states(shape);
+            pend = tracker.get_pending_core_offset_states(shape);
+        }
         int32_t freecores = (idle.has_value() ? idle.count() : 0) + (pend.has_value() ? pend.count() : 0);
         if (freecores == 0) {  // no free cores of this shape — give it back for peers and stop
             sched_->early_dispatch_queue.push(c);

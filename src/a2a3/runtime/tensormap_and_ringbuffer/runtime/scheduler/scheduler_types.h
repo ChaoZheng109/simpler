@@ -333,6 +333,50 @@ public:
         return MixPlacement::REJECT;
     }
 
+    // Per-subtask placement verdict for one MIX cluster, generalizing
+    // classify_mix_cluster: instead of requiring every active core in the same
+    // state, each active core is placed independently — idle -> running slot,
+    // running + pending-free -> pending slot. `placeable` is false only when some
+    // active core has no free slot (running + pending-occupied). MIX kernels
+    // self-handshake intra-block (TPUSH/TPOP), so staggered subtask start is safe.
+    struct MixClusterPlan {
+        bool placeable;        // every active subtask core has a free slot
+        bool any_idle;         // >=1 active subtask core idle (eligible in IDLE phase)
+        bool all_active_idle;  // all active subtask cores idle (== classify RUNNING)
+    };
+    MixClusterPlan plan_mix_cluster(int32_t cluster_offset, uint8_t core_mask) const {
+        BitStates used(0ULL);
+        if (core_mask & PTO2_SUBTASK_MASK_AIC) {
+            used |= BitStates(1ULL << cluster_offset);
+        }
+        if (core_mask & PTO2_SUBTASK_MASK_AIV0) {
+            used |= BitStates(1ULL << (cluster_offset + 1));
+        }
+        if (core_mask & PTO2_SUBTASK_MASK_AIV1) {
+            used |= BitStates(1ULL << (cluster_offset + 2));
+        }
+        if (!used.has_value() || (pending_occupied_ & used).has_value()) {
+            return {false, false, false};
+        }
+        BitStates idle = core_states_ & used;
+        return {true, idle.has_value(), idle.count() == used.count()};
+    }
+
+    // All clusters where the block is placeable regardless of any_idle (config 1 +
+    // 2/3 + all-pending). Used by early dispatch; the per-subtask running/pending
+    // split is derived in prepare_block_for_dispatch.
+    BitStates get_mix_placeable_cluster_offset_states(uint8_t core_mask) const {
+        BitStates result(0ULL);
+        BitStates candidates = get_cluster_offset_states();
+        while (candidates.has_value()) {
+            int32_t cluster_offset = candidates.pop_first();
+            if (plan_mix_cluster(cluster_offset, core_mask).placeable) {
+                result |= BitStates(1ULL << cluster_offset);
+            }
+        }
+        return result;
+    }
+
     BitStates get_mix_running_cluster_offset_states(uint8_t core_mask) const {
         BitStates result(0ULL);
         BitStates candidates = get_cluster_offset_states();
@@ -357,8 +401,10 @@ public:
             BitStates available = ~pending_occupied_;
             BitStates mix_available =
                 (available & aic_mask_) & ((available >> 1) & aic_mask_) & ((available >> 2) & aic_mask_);
-            // Pending MIX can only reuse a fully-running cluster. Partially-running clusters
-            // could split one MIX block across immediate and pending placement.
+            // Shape-level query kept conservative (whole-running clusters only). The
+            // runtime MIX path splits half-idle clusters per-subtask via
+            // plan_mix_cluster(); this shape-level helper stays whole-cluster for any
+            // legacy caller that does not apply active_mask.
             BitStates running = ~core_states_;
             BitStates cluster_all_running =
                 (running & aic_mask_) & ((running >> 1) & aic_mask_) & ((running >> 2) & aic_mask_);
