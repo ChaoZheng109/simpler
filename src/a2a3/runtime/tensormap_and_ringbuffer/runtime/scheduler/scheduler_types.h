@@ -401,10 +401,8 @@ public:
             BitStates available = ~pending_occupied_;
             BitStates mix_available =
                 (available & aic_mask_) & ((available >> 1) & aic_mask_) & ((available >> 2) & aic_mask_);
-            // Shape-level query kept conservative (whole-running clusters only). The
-            // runtime MIX path splits half-idle clusters per-subtask via
-            // plan_mix_cluster(); this shape-level helper stays whole-cluster for any
-            // legacy caller that does not apply active_mask.
+            // Pending MIX can only reuse a fully-running cluster. Partially-running clusters
+            // could split one MIX block across immediate and pending placement.
             BitStates running = ~core_states_;
             BitStates cluster_all_running =
                 (running & aic_mask_) & ((running >> 1) & aic_mask_) & ((running >> 2) & aic_mask_);

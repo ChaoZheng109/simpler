@@ -374,29 +374,11 @@ void SchedulerContext::dispatch_shape(
             if (is_mix) {
                 auto candidates = cores;
                 uint8_t cmask = slot_state->active_mask.core_mask();
-                if (slot_state->active_mask.requires_sync_start()) {
-                    // sync_start needs every block to start simultaneously, so every
-                    // subtask must take a running slot on a whole-idle cluster
-                    // (config 1 only). Identical to the pre-split path.
-                    auto wanted = is_pending ? CoreTracker::MixPlacement::PENDING : CoreTracker::MixPlacement::RUNNING;
-                    while (candidates.has_value()) {
-                        int32_t cluster_offset = candidates.pop_first();
-                        if (tracker.classify_mix_cluster(cluster_offset, cmask) == wanted) {
-                            selected_mix_clusters |= CoreTracker::BitStates(1ULL << cluster_offset);
-                        }
-                    }
-                } else {
-                    // Per-subtask placement: IDLE phase admits any placeable cluster
-                    // with >=1 idle subtask core (config 1 + 2/3); PENDING phase admits
-                    // placeable all-running clusters (all-pending). The per-subtask
-                    // running/pending split is derived in prepare_block_for_dispatch.
-                    while (candidates.has_value()) {
-                        int32_t cluster_offset = candidates.pop_first();
-                        auto plan = tracker.plan_mix_cluster(cluster_offset, cmask);
-                        bool admit = plan.placeable && (is_pending ? !plan.any_idle : plan.any_idle);
-                        if (admit) {
-                            selected_mix_clusters |= CoreTracker::BitStates(1ULL << cluster_offset);
-                        }
+                auto wanted = is_pending ? CoreTracker::MixPlacement::PENDING : CoreTracker::MixPlacement::RUNNING;
+                while (candidates.has_value()) {
+                    int32_t cluster_offset = candidates.pop_first();
+                    if (tracker.classify_mix_cluster(cluster_offset, cmask) == wanted) {
+                        selected_mix_clusters |= CoreTracker::BitStates(1ULL << cluster_offset);
                     }
                 }
                 if (!selected_mix_clusters.has_value()) {
