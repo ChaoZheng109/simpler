@@ -27,8 +27,15 @@
 #define ASC_DEVKIT_VERSION_NUM 90000000
 #endif
 
+// MIX cluster is 1 AIC + 2 AIV on both a2a3 and a5. The pto soft SyncAll derives
+// its participant count from the AIV ratio; on the cube side get_subblockdim()
+// is unavailable, so without this define it falls back to ratio 1 and releases
+// early. Tell it the real ratio (syncall_soft.hpp honors __MIX_CORE_AIV_RATIO__).
+#define __MIX_CORE_AIV_RATIO__ 2
+
 #include "intrinsic.h"
 #include "tensor.h"
+#include <pto/pto-inst.hpp>
 
 #include "../generated/kernel_tiling/kernel_tiling.h"
 #include "metadata_layout.h"
@@ -42,13 +49,20 @@ constexpr uint64_t kQwenFaiHeadDim = 128;
 constexpr uint32_t kQwenRopeCores = 32;
 
 // Global cube<->vector barrier between phase-0 RoPE and the attention phase.
-// The FFTS flag-region base is set by the simpler runtime at launch.
-// AscendC::SyncAll<false> is the fused (mixed AIC+AIV) all-core barrier; the
-// default SyncAll() is AIV-only and never releases the Cube cores.
-static __aicore__ __attribute__((always_inline)) void qwen_fai_syncall_mix() {
+// a5 has no FFTS (AIC<->AIV use a physical path) and simpler's a5 runtime does
+// not set an FFTS base, so the hard AscendC::SyncAll<false> (FFTS flag region)
+// deadlocks. Use the pto soft (GM atomic-counter) Mix barrier instead; the
+// counter is carved from the last slot of the metadata barrier region, which
+// the tiler zero-initializes (the attention kernel's own barriers rely on it).
+static __aicore__ __attribute__((always_inline)) void qwen_fai_syncall_mix(__gm__ int32_t *barrier_state) {
   AscendC::PipeBarrier<PIPE_ALL>();
-  // isAIVOnly=false: fused Cube+Vector whole-core barrier.
-  AscendC::SyncAll<false>();
+  if (barrier_state == nullptr) {
+    return;  // needCoreNum == 0 single-core path: no cross-core barrier needed.
+  }
+  __gm__ int32_t *counter =
+      barrier_state + qwen_fai_metadata::kBarrierSlotCount * qwen_fai_metadata::kBarrierSlotWords;
+  pto::GlobalTensor<int32_t, pto::Shape<>, pto::Stride<>> gmWs(counter);
+  pto::SYNCALL<pto::SyncAllMode::Soft, pto::SyncCoreType::Mix>(gmWs);
 }
 
 static __aicore__ __attribute__((always_inline)) void
@@ -229,7 +243,7 @@ run_qwen_fai(__gm__ int64_t *args, __gm__ int32_t *barrier_state = nullptr) {
           static_cast<int32_t>(kQwenRopeCores));
     }
 #endif
-    qwen_fai_syncall_mix();
+    qwen_fai_syncall_mix(barrier_state);
   }
 
   Arch::PtoTopology topology{block_idx, block_num, sub_block_idx, 2};
