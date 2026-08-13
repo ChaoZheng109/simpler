@@ -2,13 +2,11 @@
 
 > **a5 port.** This is the a5 port of
 > [`examples/a2a3/tensormap_and_ringbuffer/qwen3_14b_decode/`](../../a2a3/tensormap_and_ringbuffer/qwen3_14b_decode/).
-> The generated kernels are copied verbatim from the a2a3 harvest — they already
-> use fully-qualified `pto::Stride` and the AIC cube pipe names are identical
-> across a2a3/a5, so no per-kernel edit was needed for correctness. The a2a3→a5
-> delta is the platform string plus the `attention_core_num` note in
-> "Relationship to the a2a3 example" below. Inter-op `pipe_barrier(PIPE_V)` in
-> the AIV kernels is left in (valid on a5, a throughput-only cleanup); removing
-> it to match the a5 `paged_attention` convention is a follow-up.
+> The kernels are the a2a3 harvest with the arch deltas listed in
+> "Relationship to the a2a3 example" below — the math is untouched, but the
+> a2a3 harvest is not byte-portable: a5 spells the L0A fractal, the legal
+> `pipe_barrier` pipes and the core-count accessor differently, and the a2a3
+> `__DAV_C220_*` guards name a macro ccec does not predefine on a5.
 
 Self-contained SceneTestCase port of pypto-lib
 `models/qwen3/14b/decode_fwd.py` entry `decode_fwd_layers` with
@@ -144,6 +142,21 @@ and `models/qwen3/14b/kernels/paged_attention_cce/` into `kernels/vendor/` here,
 re-transcribe `CALLABLE` from `OUT/kernel_config.py` (which already records
 `func_id`, `core_type`, per-kernel `signature`, and `extra_include_dirs`).
 
+The harvest is a2a3 codegen, so re-apply the deltas from "Relationship to the
+a2a3 example" afterwards. The three mechanical ones are one pass each:
+
+```bash
+cd examples/a5/tensormap_and_ringbuffer/qwen3_14b_decode
+grep -rlZ '__DAV_C220_' kernels | xargs -0 sed -i \
+    's/__DAV_C220_VEC__/__DAV_VEC__/g; s/__DAV_C220_CUBE__/__DAV_CUBE__/g'
+grep -rlZ 'pipe_barrier(PIPE_\(V\|MTE1\|FIX\));' kernels | xargs -0 sed -i \
+    '/^[[:space:]]*pipe_barrier(PIPE_\(V\|MTE1\|FIX\));[[:space:]]*$/d'
+sed -i 's/\.set_block_num(/.set_core_num(/g' kernels/orchestration/decode_fwd_layers.cpp
+```
+
+The Left-tile fractal and the `fai_body.hpp` edits (include order, soft Mix
+`SYNCALL`) are not mechanical — take them from this tree's history.
+
 One deliberate deviation from `kernel_config.py`: `decode_fwd_layers` declares
 `k_cache` / `v_cache` as plain inputs, but the extern writes the current token's
 KV into them. The `CALLABLE` marks them `INOUT` so simpler copies the pools back
@@ -174,10 +187,10 @@ harvest if you need a clean trace.
 
 ## Status — a5 port
 
-The a2a3 source passes on a2a3 device: output **and all 40 layers' KV caches**
-match the torch reference at `RTOL=5e-2 / ATOL=1e-1`. The a5 port re-uses those
-kernels verbatim; its on-device pass against the same golden is being verified
-on a5 silicon.
+Passes on a5 silicon against the same torch reference as the a2a3 source, at
+`RTOL=5e-2 / ATOL=1e-1`: the hidden output **and all 40 layers' K and V caches**
+match, with every element inside tolerance (worst element `out` 0.0625,
+`k_cache` / `v_cache` 0.03125 — one bf16 quantum at those magnitudes).
 
 ## Cost
 
@@ -206,10 +219,29 @@ of the sweep with a `--ignore` and a step of its own.
 
 ## Relationship to the a2a3 example
 
-The kernels are the a2a3 harvest, copied verbatim. The one arch-specific knob
-that carries over is `attention_core_num` in
+The kernels are the a2a3 harvest with the arch deltas below. The math — tiling,
+loop structure, GM offsets, the KV write's BSND row arithmetic — is identical,
+so a refresh is still "re-harvest a2a3, then re-apply this table".
+
+| Delta | Where | Why a5 needs it |
+| ----- | ----- | --------------- |
+| `set_block_num` → `set_core_num` (×18) | orchestration | a5 tmr `PTO2LaunchSpec` names the accessor `set_core_num` (hbg still has `set_block_num`) |
+| Left(A) tile `BLayout::RowMajor` → `ColMajor` (×288) | AIC kernels | a5 cube takes L0A in the ColMajor fractal: pto-isa's own `TileLeft` alias is `BLayout::ColMajor` off a2a3, and `CheckMadValid` asserts `!TileLeft::isRowMajor`. SFractal stays `RowMajor`, and the L1 `Mat` tiles the `TEXTRACT` reads from are unchanged |
+| drop `pipe_barrier(PIPE_V)` (×135), `pipe_barrier(PIPE_MTE1)` (×32), `pipe_barrier(PIPE_FIX)` (×3) | AIV + AIC kernels | a5 `pipe_barrier` accepts only `MTE3` / `M` / `ALL`; anything else is a compile error. Nothing is lost: a5's own `pto::Event` emits no barrier for a same-pipe V event either, and every cross-pipe order here is already carried by a `set_flag` / `wait_flag` pair |
+| `__DAV_C220_{VEC,CUBE}__` → `__DAV_{VEC,CUBE}__` (3 files) | attention extern | `__DAV_C220_*` is the a2a3 (`dav-c220`) ccec predefine. a5 builds as `dav-c310`, so on a5 those guards silently compiled out the whole RoPE/QK-norm/KV-write phase **and** the vendor FAI's cube and vector bodies — the task ran to completion writing nothing. `__DAV_VEC__` / `__DAV_CUBE__` are predefined on both arches and are what every other kernel here already uses |
+| `#include <pto/pto-inst.hpp>` moved after the vendor header | `kernel/fai_body.hpp` | `pto` and `KernelCommon` both declare `NUM_32` / `NUM_128` / `NUM_256` at namespace scope and `tensor.h` opens `namespace pto`, so including pto first makes those names ambiguous inside the vendor kernel |
+| hard `AscendC::SyncAll<false>` → `pto::SYNCALL<Soft, Mix>` | `kernel/fai_body.hpp`, `kernel/metadata_layout.h`, `tiling/entry.cpp` | the hard barrier is the FFTS flag region, whose base a2a3 gets from `rtGetC2cCtrlAddr`; that call is unsupported on a5 and simpler's a5 runtime sets no FFTS base, so the barrier never releases. The soft barrier's counter (`kSyncAllCounterWord`, one int32 past the kernel's own 48 slots) is zeroed by `clear_barrier` alongside them — it is a monotonic ticket counter, so a non-zero start splits the first round's arrivals across a participant boundary and hangs the half that lands above it |
+| `platforms: ["a5"]`, `ring_dep_pool=65536` | test `CASES` | the 40-layer graph's in-flight dependency footprint (~32 k) overflows a5's default 16 k pool |
+
+The vendor `FusedInferAttentionScore` tree is otherwise untouched, including its
+`Arch::AtlasA2` budget (UB 192 KiB, L1 512 KiB). a5 has L1 512 KiB and UB 248 KiB,
+so that budget is valid there — conservative on UB, not wrong.
+
+One arch-specific knob carries over unchanged: `attention_core_num` in
 `kernels/orchestration/decode_fwd_layers.cpp` (the AIC `block_num` the fused
 attention task spans). The a2a3 value is **24** = the a2a3 per-device AIC count.
 On a5 a device exposes **36 AIC** (2 dies × 18), so 24 is still a valid
 `block_num` — it runs, just leaving 12 cores idle. Raising it toward 36 for full
-utilization is a tuning follow-up, not a correctness requirement.
+utilization is a tuning follow-up, not a correctness requirement. It must stay
+**≥ 16**: the RoPE phase runs on `block_idx * 2 + sub_block_idx` lanes and needs
+all `kQwenRopeCores == 32` of them.

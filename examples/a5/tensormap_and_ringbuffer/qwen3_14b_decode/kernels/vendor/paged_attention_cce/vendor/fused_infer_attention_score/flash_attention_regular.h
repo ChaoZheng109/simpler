@@ -177,7 +177,7 @@ namespace SplitFuse {
 
             uint32_t coreIdx = ptoTopology.logicalBlockIdx;
             uint32_t coreNum = ptoTopology.logicalBlockNum;
-#ifdef __DAV_C220_CUBE__
+#ifdef __DAV_CUBE__
             AscendC::SetFlag<AscendC::HardEvent::M_MTE1>(EVENT_ID0);
             AscendC::SetFlag<AscendC::HardEvent::M_MTE1>(EVENT_ID1);
             AscendC::SetFlag<AscendC::HardEvent::M_MTE1>(EVENT_ID2);
@@ -213,7 +213,7 @@ namespace SplitFuse {
             uint32_t kPVDynNum = nDynNum * kDynNum / BlockMmadPV::L1TileShape::M;
             blockMmadPV.init(resource, nDynNum, kPVDynNum, MAX_KV_STACK_LEN, L1_QK_SIZE);
 #endif
-#ifdef __DAV_C220_VEC__
+#ifdef __DAV_VEC__
             AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0);
             AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID1);
             AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID2);
@@ -379,7 +379,7 @@ namespace SplitFuse {
                 }
             }
 
-#ifdef __DAV_C220_CUBE__
+#ifdef __DAV_CUBE__
             AscendC::WaitFlag<AscendC::HardEvent::M_MTE1>(EVENT_ID0);
             AscendC::WaitFlag<AscendC::HardEvent::M_MTE1>(EVENT_ID1);
             AscendC::WaitFlag<AscendC::HardEvent::M_MTE1>(EVENT_ID2);
@@ -401,7 +401,7 @@ namespace SplitFuse {
             AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(EVENT_ID6);
             AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(EVENT_ID7);
 #endif
-#ifdef __DAV_C220_VEC__
+#ifdef __DAV_VEC__
             AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0);
             AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID1);
             AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID2);
@@ -423,13 +423,13 @@ namespace SplitFuse {
 
             if constexpr (IS_FD && ENABLE_FD_COMBINE) {
                 if constexpr (USE_EPOCH_FD_BARRIER) {
-#ifdef __DAV_C220_VEC__
+#ifdef __DAV_VEC__
                     epochBarrierArriveAndWait(barrierState, ptoTopology);
 #endif
                 } else {
                     AscendC::SyncAll();
                 }
-#ifdef __DAV_C220_VEC__
+#ifdef __DAV_VEC__
                 CombineScale combineScale;
                 combineScale.init(resource);
                 combineScale(
@@ -665,14 +665,14 @@ namespace SplitFuse {
             bool isLastStackTile = false;
 
 
-#ifdef __DAV_C220_VEC__
+#ifdef __DAV_VEC__
                 if (kvSLoopNumTotal <= 0 || startIdx >= kvSLoopNumTotal) {
                     LayoutO layoutO(qSeqlen, embed * qHeads);
                     LayoutLse layoutLse(totalQTokens, qHeads);
                     epilogueInitOut(gO[gmOffsetO], gLse[gmOffsetLse], layoutO, layoutLse, qSBlockSize, qNBlockSize);
                 }
 #endif
-#ifdef __DAV_C220_CUBE__
+#ifdef __DAV_CUBE__
                 LayoutQ layoutQTemp(rowNum, embed);
                 LayoutK layoutKTemp(strideK, stackSeqTile);
                 LayoutV layoutVTemp(stackSeqTile, strideV);
@@ -694,7 +694,7 @@ namespace SplitFuse {
                             curStackTileMod * WORKSPACE_BLOCK_SIZE_DB);
                         GemmCoord actualBlockShapeQK{rowNum, stackSeqTile, embed};
                         LayoutS layOutS(rowNum, stackSeqTile, stackSeqTilePad);
-#ifdef __DAV_C220_CUBE__
+#ifdef __DAV_CUBE__
                         if constexpr (PAGED_CACHE_FLAG) {
                             blockMmadQK(
                                 gQ[gmOffsetQ],
@@ -726,7 +726,7 @@ namespace SplitFuse {
                         }
                         Arch::CrossCoreSetFlag<0x2, PIPE_FIX>(qkReady);
 #endif
-#ifdef __DAV_C220_VEC__
+#ifdef __DAV_VEC__
                         LayoutP layOutP(rowNum, stackSeqTile, stackSeqTilePad);
                         LayoutMask layOutMask(COMP_TRIU_MASK_DIM_LEN, COMP_TRIU_MASK_DIM_LEN);
                         LayoutQ layOutFullMask(pseQ, pseKv);
@@ -964,7 +964,7 @@ namespace SplitFuse {
                             curStackTileMod * WORKSPACE_BLOCK_SIZE_DB);
                         GemmCoord actualBlockShapePV{rowNum, embedV, stackSeqTile};
                         LayoutOTmp layoutOTmp(rowNum, embedV, embedRoundV);
-#ifdef __DAV_C220_CUBE__
+#ifdef __DAV_CUBE__
                         LayoutP layoutPTemp(rowNum, stackSeqTile, stackSeqTilePad);
                         uint64_t gmOffsetP = coreIdx * WORKSPACE_BLOCK_SIZE_DB * (PRE_LAUNCH + 1) + curStackTileMod * WORKSPACE_BLOCK_SIZE_DB;
                         if constexpr (PAGED_CACHE_FLAG) {
@@ -1004,7 +1004,7 @@ namespace SplitFuse {
                         }
                         Arch::CrossCoreSetFlag<0x2, PIPE_FIX>(pvReady);
 #endif
-#ifdef __DAV_C220_VEC__
+#ifdef __DAV_VEC__
                         LayoutO layoutO(qSeqlen, embed * qHeads);
                         LayoutUpdate layoutUpdate(rowNum, embed, embedRound);
                         LayoutLse layoutLse(totalQTokens, qHeads);

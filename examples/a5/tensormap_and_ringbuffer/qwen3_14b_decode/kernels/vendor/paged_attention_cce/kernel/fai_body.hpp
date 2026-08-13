@@ -35,7 +35,6 @@
 
 #include "intrinsic.h"
 #include "tensor.h"
-#include <pto/pto-inst.hpp>
 
 #include "../generated/kernel_tiling/kernel_tiling.h"
 #include "metadata_layout.h"
@@ -44,6 +43,11 @@
 
 #include "rope_qkv_generated.hpp"
 
+// After the vendor header: pto and KernelCommon both declare NUM_32 / NUM_128 /
+// NUM_256 at namespace scope, and `tensor.h` opens `namespace pto`, so pulling
+// pto in first makes every unqualified use inside the vendor kernel ambiguous.
+#include <pto/pto-inst.hpp>
+
 constexpr uint64_t kQwenFaiHeadDim = 128;
 // The generated RoPE body is specialized to the standalone 32-lane dispatch.
 constexpr uint32_t kQwenRopeCores = 32;
@@ -51,16 +55,14 @@ constexpr uint32_t kQwenRopeCores = 32;
 // Global cube<->vector barrier between phase-0 RoPE and the attention phase.
 // a5 has no FFTS (AIC<->AIV use a physical path) and simpler's a5 runtime does
 // not set an FFTS base, so the hard AscendC::SyncAll<false> (FFTS flag region)
-// deadlocks. Use the pto soft (GM atomic-counter) Mix barrier instead; the
-// counter is carved from the last slot of the metadata barrier region, which
-// the tiler zero-initializes (the attention kernel's own barriers rely on it).
+// deadlocks. Use the pto soft (GM atomic-counter) Mix barrier instead, over the
+// counter word tiling/entry.cpp zeroes past the attention kernel's own slots.
 static __aicore__ __attribute__((always_inline)) void qwen_fai_syncall_mix(__gm__ int32_t *barrier_state) {
   AscendC::PipeBarrier<PIPE_ALL>();
   if (barrier_state == nullptr) {
     return;  // needCoreNum == 0 single-core path: no cross-core barrier needed.
   }
-  __gm__ int32_t *counter =
-      barrier_state + qwen_fai_metadata::kBarrierSlotCount * qwen_fai_metadata::kBarrierSlotWords;
+  __gm__ int32_t *counter = barrier_state + qwen_fai_metadata::kSyncAllCounterWord;
   pto::GlobalTensor<int32_t, pto::Shape<>, pto::Stride<>> gmWs(counter);
   pto::SYNCALL<pto::SyncAllMode::Soft, pto::SyncCoreType::Mix>(gmWs);
 }
@@ -204,7 +206,7 @@ run_qwen_fai(__gm__ int64_t *args, __gm__ int32_t *barrier_state = nullptr) {
                          nullptr};
 
   uint32_t sub_block_idx = 0;
-#ifdef __DAV_C220_VEC__
+#ifdef __DAV_VEC__
   sub_block_idx = static_cast<uint32_t>(get_sub_block_id(args));
 #endif
   uint32_t block_idx = static_cast<uint32_t>(get_block_idx(args));
@@ -214,7 +216,7 @@ run_qwen_fai(__gm__ int64_t *args, __gm__ int32_t *barrier_state = nullptr) {
   // paged K plus projected V, then a global cube<->vec FFTS barrier makes those
   // GM writes visible to every core before the attention phase reads them.
   if constexpr (WithRope) {
-#ifdef __DAV_C220_VEC__
+#ifdef __DAV_VEC__
     // Drive the golden-correct pypto-generated rope_qkv (copied verbatim). The
     // fused ABI packs 17 tensors then the sole scalar; map them to the
     // generated parameter order (k_cache, q_tnd, v_cache, seq_lens, inv_rms,

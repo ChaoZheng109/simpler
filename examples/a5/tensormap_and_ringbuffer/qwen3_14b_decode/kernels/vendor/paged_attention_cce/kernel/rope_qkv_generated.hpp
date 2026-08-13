@@ -9,7 +9,7 @@
 
 #include <cstdint>
 
-#ifdef __DAV_C220_VEC__
+#ifdef __DAV_VEC__
 #include <pto/pto-inst.hpp>
 #include "tensor.h"
 #include "intrinsic.h"
@@ -267,7 +267,6 @@ static __aicore__ void rope_qkv(__gm__ bfloat16_t* v1, __gm__ bfloat16_t* v2, __
       uint64_t v128 = (uint64_t) v53;
       TASSIGN(v127, v128);
       wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
-      pipe_barrier(PIPE_V);
       wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
       TCONCAT(v127, v112, v78);
       // pto: %3
@@ -280,14 +279,12 @@ static __aicore__ void rope_qkv(__gm__ bfloat16_t* v1, __gm__ bfloat16_t* v2, __
       // pto: %k_raw_inline122__tile
       uint64_t v132 = (uint64_t) v53;
       TASSIGN(v131, v132);
-      pipe_barrier(PIPE_V);
       TMULS(v131, v129, v87);
       // pto: %4
       Tile<TileType::Vec, float, 8, 128, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null> v133 = Tile<TileType::Vec, float, 8, 128, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null>(v26, v38);
       // pto: %4
       uint64_t v134 = (uint64_t) v56;
       TASSIGN(v133, v134);
-      pipe_barrier(PIPE_V);
       TMUL(v133, v131, v131);
       // pto: %tmp_tile
       Tile<TileType::Vec, float, 8, 128, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null> v135 = Tile<TileType::Vec, float, 8, 128, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null>(v26, v38);
@@ -299,7 +296,6 @@ static __aicore__ void rope_qkv(__gm__ bfloat16_t* v1, __gm__ bfloat16_t* v2, __
       // pto: %k_ss_inline196__tile
       uint64_t v138 = (uint64_t) v51;
       TASSIGN(v137, v138);
-      pipe_barrier(PIPE_V);
       TROWSUM(v137, v133, v135);
       // pto: %t__rm_a0_tmp_v0
       Tile<TileType::Vec, float, 1, 8, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null> v139 = Tile<TileType::Vec, float, 1, 8, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null>(v37, v26);
@@ -311,7 +307,6 @@ static __aicore__ void rope_qkv(__gm__ bfloat16_t* v1, __gm__ bfloat16_t* v2, __
       // pto: %t__row_major_tmp_v1
       uint64_t v142 = (uint64_t) v56;
       TASSIGN(v141, v142);
-      pipe_barrier(PIPE_V);
       TMULS(v141, v139, v22);
       // pto: %t__rm_a0_tmp_v2
       Tile<TileType::Vec, float, 1, 8, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null> v143 = Tile<TileType::Vec, float, 1, 8, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null>(v37, v26);
@@ -323,7 +318,6 @@ static __aicore__ void rope_qkv(__gm__ bfloat16_t* v1, __gm__ bfloat16_t* v2, __
       // pto: %t__row_major_tmp_v3
       uint64_t v146 = (uint64_t) v56;
       TASSIGN(v145, v146);
-      pipe_barrier(PIPE_V);
       TADDS(v145, v143, v21);
       // pto: %t__rm_a0_tmp_v4
       Tile<TileType::Vec, float, 1, 8, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null> v147 = Tile<TileType::Vec, float, 1, 8, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null>(v37, v26);
@@ -335,7 +329,6 @@ static __aicore__ void rope_qkv(__gm__ bfloat16_t* v1, __gm__ bfloat16_t* v2, __
       // pto: %t__row_major_tmp_v5
       uint64_t v150 = (uint64_t) v56;
       TASSIGN(v149, v150);
-      pipe_barrier(PIPE_V);
       TSQRT(v149, v147);
       // pto: %k_inv_inline78__rm_a0_tmp_v6
       Tile<TileType::Vec, float, 1, 8, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null> v151 = Tile<TileType::Vec, float, 1, 8, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null>(v37, v26);
@@ -347,7 +340,6 @@ static __aicore__ void rope_qkv(__gm__ bfloat16_t* v1, __gm__ bfloat16_t* v2, __
       // pto: %k_inv_inline78__row_major_tmp_v7
       uint64_t v154 = (uint64_t) v52;
       TASSIGN(v153, v154);
-      pipe_barrier(PIPE_V);
       TRECIP(v153, v151);
       // pto: %k_inv_inline78__tile
       Tile<TileType::Vec, float, 8, 1, BLayout::ColMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null> v155 = Tile<TileType::Vec, float, 8, 1, BLayout::ColMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null>(v26, v37);
@@ -365,7 +357,6 @@ static __aicore__ void rope_qkv(__gm__ bfloat16_t* v1, __gm__ bfloat16_t* v2, __
       // pto: %k_normed_inline49__tile
       uint64_t v160 = (uint64_t) v53;
       TASSIGN(v159, v160);
-      pipe_barrier(PIPE_V);
       TROWEXPANDMUL(v159, v157, v155);
       // pto: %slice_view
       Tile<TileType::Vec, float, 1, 128, BLayout::RowMajor, 1, 128, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null> v161;
@@ -389,9 +380,7 @@ static __aicore__ void rope_qkv(__gm__ bfloat16_t* v1, __gm__ bfloat16_t* v2, __
       // pto: %9
       uint64_t v169 = (uint64_t) v56;
       TASSIGN(v168, v169);
-      pipe_barrier(PIPE_V);
       TEXTRACT(v164, v162, v45, v45);
-      pipe_barrier(PIPE_V);
       TCOLEXPANDMUL(v168, v164, v92);
       // pto: %10
       Tile<TileType::Vec, float, 1, 64, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null> v170 = Tile<TileType::Vec, float, 1, 64, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null>(v37, v23);
@@ -399,21 +388,18 @@ static __aicore__ void rope_qkv(__gm__ bfloat16_t* v1, __gm__ bfloat16_t* v2, __
       uint64_t v171 = (uint64_t) v52;
       TASSIGN(v170, v171);
       TEXTRACT(v166, v162, v45, v23);
-      pipe_barrier(PIPE_V);
       TCOLEXPANDMUL(v170, v166, v102);
       // pto: %rot_lo_inline45__tile
       Tile<TileType::Vec, float, 1, 64, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null> v172 = Tile<TileType::Vec, float, 1, 64, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null>(v37, v23);
       // pto: %rot_lo_inline45__tile
       uint64_t v173 = (uint64_t) v56;
       TASSIGN(v172, v173);
-      pipe_barrier(PIPE_V);
       TSUB(v172, v168, v170);
       // pto: %11
       Tile<TileType::Vec, float, 1, 64, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null> v174 = Tile<TileType::Vec, float, 1, 64, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null>(v37, v23);
       // pto: %11
       uint64_t v175 = (uint64_t) v52;
       TASSIGN(v174, v175);
-      pipe_barrier(PIPE_V);
       TCOLEXPANDMUL(v174, v166, v97);
       // pto: %12
       Tile<TileType::Vec, float, 1, 64, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null> v176 = Tile<TileType::Vec, float, 1, 64, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null>(v37, v23);
@@ -426,21 +412,18 @@ static __aicore__ void rope_qkv(__gm__ bfloat16_t* v1, __gm__ bfloat16_t* v2, __
       // pto: %rot_hi_inline221__tile
       uint64_t v179 = (uint64_t) v52;
       TASSIGN(v178, v179);
-      pipe_barrier(PIPE_V);
       TADD(v178, v174, v176);
       // pto: %13
       Tile<TileType::Vec, float, 1, 128, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null> v180 = Tile<TileType::Vec, float, 1, 128, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null>(v37, v38);
       // pto: %13
       uint64_t v181 = (uint64_t) v53;
       TASSIGN(v180, v181);
-      pipe_barrier(PIPE_V);
       TCONCAT(v180, v172, v178);
       // pto: %14
       Tile<TileType::Vec, bfloat16_t, 1, 128, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null> v182 = Tile<TileType::Vec, bfloat16_t, 1, 128, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null>(v37, v38);
       // pto: %14
       uint64_t v183 = (uint64_t) v51;
       TASSIGN(v182, v183);
-      pipe_barrier(PIPE_V);
       TCVT(v182, v180, v19, v18);
       set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
       // pto: %15
@@ -448,7 +431,6 @@ static __aicore__ void rope_qkv(__gm__ bfloat16_t* v1, __gm__ bfloat16_t* v2, __
       // pto: %15
       uint64_t v185 = (uint64_t) v53;
       TASSIGN(v184, v185);
-      pipe_barrier(PIPE_V);
       wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID1);
       TMULS(v184, v117, v87);
       // pto: %v_row_bf16_inline202__tile
@@ -456,7 +438,6 @@ static __aicore__ void rope_qkv(__gm__ bfloat16_t* v1, __gm__ bfloat16_t* v2, __
       // pto: %v_row_bf16_inline202__tile
       uint64_t v187 = (uint64_t) v55;
       TASSIGN(v186, v187);
-      pipe_barrier(PIPE_V);
       TCVT(v186, v184, v19, v18);
       set_flag(PIPE_V, PIPE_MTE3, EVENT_ID1);
       // pto: %16
@@ -464,7 +445,6 @@ static __aicore__ void rope_qkv(__gm__ bfloat16_t* v1, __gm__ bfloat16_t* v2, __
       // pto: %16
       uint64_t v189 = (uint64_t) v53;
       TASSIGN(v188, v189);
-      pipe_barrier(PIPE_V);
       wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID2);
       TCONCAT(v188, v122, v76);
       // pto: %17
@@ -477,14 +457,12 @@ static __aicore__ void rope_qkv(__gm__ bfloat16_t* v1, __gm__ bfloat16_t* v2, __
       // pto: %q_raw_inline151__tile
       uint64_t v193 = (uint64_t) v53;
       TASSIGN(v192, v193);
-      pipe_barrier(PIPE_V);
       TMULS(v192, v190, v87);
       // pto: %18
       Tile<TileType::Vec, float, 16, 128, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null> v194 = Tile<TileType::Vec, float, 16, 128, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null>(v35, v38);
       // pto: %18
       uint64_t v195 = (uint64_t) v56;
       TASSIGN(v194, v195);
-      pipe_barrier(PIPE_V);
       TMUL(v194, v192, v192);
       // pto: %19
       Tile<TileType::Vec, float, 16, 128, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null> v196 = Tile<TileType::Vec, float, 16, 128, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null>(v35, v38);
@@ -496,7 +474,6 @@ static __aicore__ void rope_qkv(__gm__ bfloat16_t* v1, __gm__ bfloat16_t* v2, __
       // pto: %q_ss_inline61__tile
       uint64_t v199 = (uint64_t) v54;
       TASSIGN(v198, v199);
-      pipe_barrier(PIPE_V);
       TROWSUM(v198, v194, v196);
       // pto: %t__rm_a0_tmp_v8
       Tile<TileType::Vec, float, 1, 16, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null> v200 = Tile<TileType::Vec, float, 1, 16, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null>(v37, v35);
@@ -508,7 +485,6 @@ static __aicore__ void rope_qkv(__gm__ bfloat16_t* v1, __gm__ bfloat16_t* v2, __
       // pto: %t__row_major_tmp_v9
       uint64_t v203 = (uint64_t) v56;
       TASSIGN(v202, v203);
-      pipe_barrier(PIPE_V);
       TMULS(v202, v200, v22);
       // pto: %t__rm_a0_tmp_v10
       Tile<TileType::Vec, float, 1, 16, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null> v204 = Tile<TileType::Vec, float, 1, 16, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null>(v37, v35);
@@ -520,7 +496,6 @@ static __aicore__ void rope_qkv(__gm__ bfloat16_t* v1, __gm__ bfloat16_t* v2, __
       // pto: %t__row_major_tmp_v11
       uint64_t v207 = (uint64_t) v56;
       TASSIGN(v206, v207);
-      pipe_barrier(PIPE_V);
       TADDS(v206, v204, v21);
       // pto: %t__rm_a0_tmp_v12
       Tile<TileType::Vec, float, 1, 16, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null> v208 = Tile<TileType::Vec, float, 1, 16, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null>(v37, v35);
@@ -532,7 +507,6 @@ static __aicore__ void rope_qkv(__gm__ bfloat16_t* v1, __gm__ bfloat16_t* v2, __
       // pto: %t__row_major_tmp_v13
       uint64_t v211 = (uint64_t) v56;
       TASSIGN(v210, v211);
-      pipe_barrier(PIPE_V);
       TSQRT(v210, v208);
       // pto: %q_inv_inline192__rm_a0_tmp_v14
       Tile<TileType::Vec, float, 1, 16, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null> v212 = Tile<TileType::Vec, float, 1, 16, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null>(v37, v35);
@@ -544,7 +518,6 @@ static __aicore__ void rope_qkv(__gm__ bfloat16_t* v1, __gm__ bfloat16_t* v2, __
       // pto: %q_inv_inline192__row_major_tmp_v15
       uint64_t v215 = (uint64_t) v52;
       TASSIGN(v214, v215);
-      pipe_barrier(PIPE_V);
       TRECIP(v214, v212);
       // pto: %q_inv_inline192__tile
       Tile<TileType::Vec, float, 16, 1, BLayout::ColMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null> v216 = Tile<TileType::Vec, float, 16, 1, BLayout::ColMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null>(v35, v37);
@@ -562,21 +535,18 @@ static __aicore__ void rope_qkv(__gm__ bfloat16_t* v1, __gm__ bfloat16_t* v2, __
       // pto: %q_heads_inline237__tile
       uint64_t v221 = (uint64_t) v53;
       TASSIGN(v220, v221);
-      pipe_barrier(PIPE_V);
       TROWEXPANDMUL(v220, v218, v216);
       // pto: %q_lo_inline136__tile_textract
       Tile<TileType::Vec, float, 16, 64, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null> v222 = Tile<TileType::Vec, float, 16, 64, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null>(v35, v23);
       // pto: %q_lo_inline136__tile_textract
       uint64_t v223 = (uint64_t) v56;
       TASSIGN(v222, v223);
-      pipe_barrier(PIPE_V);
       TEXTRACT(v222, v220, v45, v45);
       // pto: %24
       Tile<TileType::Vec, float, 16, 64, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null> v224 = Tile<TileType::Vec, float, 16, 64, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null>(v35, v23);
       // pto: %24
       uint64_t v225 = (uint64_t) v56;
       TASSIGN(v224, v225);
-      pipe_barrier(PIPE_V);
       TCOLEXPANDMUL(v224, v222, v92);
       set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
       // pto: %q_hi_inline142__tile_textract
@@ -590,28 +560,24 @@ static __aicore__ void rope_qkv(__gm__ bfloat16_t* v1, __gm__ bfloat16_t* v2, __
       // pto: %25
       uint64_t v229 = (uint64_t) v52;
       TASSIGN(v228, v229);
-      pipe_barrier(PIPE_V);
       TCOLEXPANDMUL(v228, v226, v102);
       // pto: %q_rot_lo_inline285__tile
       Tile<TileType::Vec, float, 16, 64, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null> v230 = Tile<TileType::Vec, float, 16, 64, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null>(v35, v23);
       // pto: %q_rot_lo_inline285__tile
       uint64_t v231 = (uint64_t) v56;
       TASSIGN(v230, v231);
-      pipe_barrier(PIPE_V);
       TSUB(v230, v224, v228);
       // pto: %26
       Tile<TileType::Vec, float, 16, 64, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null> v232 = Tile<TileType::Vec, float, 16, 64, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null>(v35, v23);
       // pto: %26
       uint64_t v233 = (uint64_t) v52;
       TASSIGN(v232, v233);
-      pipe_barrier(PIPE_V);
       TEXTRACT(v232, v220, v45, v23);
       // pto: %27
       Tile<TileType::Vec, float, 16, 64, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null> v234 = Tile<TileType::Vec, float, 16, 64, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null>(v35, v23);
       // pto: %27
       uint64_t v235 = (uint64_t) v52;
       TASSIGN(v234, v235);
-      pipe_barrier(PIPE_V);
       TCOLEXPANDMUL(v234, v232, v97);
       set_flag(PIPE_V, PIPE_MTE2, EVENT_ID1);
       // pto: %28
@@ -625,7 +591,6 @@ static __aicore__ void rope_qkv(__gm__ bfloat16_t* v1, __gm__ bfloat16_t* v2, __
       // pto: %29
       uint64_t v239 = (uint64_t) v53;
       TASSIGN(v238, v239);
-      pipe_barrier(PIPE_V);
       TCOLEXPANDMUL(v238, v236, v107);
       set_flag(PIPE_V, PIPE_MTE2, EVENT_ID2);
       // pto: %q_rot_hi_inline39__tile
@@ -633,14 +598,12 @@ static __aicore__ void rope_qkv(__gm__ bfloat16_t* v1, __gm__ bfloat16_t* v2, __
       // pto: %q_rot_hi_inline39__tile
       uint64_t v241 = (uint64_t) v52;
       TASSIGN(v240, v241);
-      pipe_barrier(PIPE_V);
       TADD(v240, v234, v238);
       // pto: %30
       Tile<TileType::Vec, float, 16, 128, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null> v242 = Tile<TileType::Vec, float, 16, 128, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null>(v35, v38);
       // pto: %30
       uint64_t v243 = (uint64_t) v53;
       TASSIGN(v242, v243);
-      pipe_barrier(PIPE_V);
       TCONCAT(v242, v230, v240);
       set_flag(PIPE_V, PIPE_MTE2, EVENT_ID3);
       // pto: %137
@@ -655,7 +618,6 @@ static __aicore__ void rope_qkv(__gm__ bfloat16_t* v1, __gm__ bfloat16_t* v2, __
       // pto: %32
       uint64_t v248 = (uint64_t) v53;
       TASSIGN(v247, v248);
-      pipe_barrier(PIPE_V);
       TCVT(v247, v245, v19, v18);
       set_flag(PIPE_V, PIPE_MTE3, EVENT_ID2);
       // pto: %k_cache__iter_v3_pview
@@ -802,7 +764,6 @@ static __aicore__ void rope_qkv(__gm__ bfloat16_t* v1, __gm__ bfloat16_t* v2, __
       uint64_t v302 = (uint64_t) v42;
       TASSIGN(v301, v302);
       wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID3);
-      pipe_barrier(PIPE_V);
       wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID1);
       TCONCAT(v301, v286, v78);
       // pto: %41
@@ -815,14 +776,12 @@ static __aicore__ void rope_qkv(__gm__ bfloat16_t* v1, __gm__ bfloat16_t* v2, __
       // pto: %42
       uint64_t v306 = (uint64_t) v42;
       TASSIGN(v305, v306);
-      pipe_barrier(PIPE_V);
       TMULS(v305, v303, v261);
       // pto: %43
       Tile<TileType::Vec, float, 8, 128, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null> v307 = Tile<TileType::Vec, float, 8, 128, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null>(v26, v38);
       // pto: %43
       uint64_t v308 = (uint64_t) v45;
       TASSIGN(v307, v308);
-      pipe_barrier(PIPE_V);
       TMUL(v307, v305, v305);
       // pto: %44
       Tile<TileType::Vec, float, 8, 128, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null> v309 = Tile<TileType::Vec, float, 8, 128, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null>(v26, v38);
@@ -834,7 +793,6 @@ static __aicore__ void rope_qkv(__gm__ bfloat16_t* v1, __gm__ bfloat16_t* v2, __
       // pto: %45
       uint64_t v312 = (uint64_t) v40;
       TASSIGN(v311, v312);
-      pipe_barrier(PIPE_V);
       TROWSUM(v311, v307, v309);
       // pto: %46
       Tile<TileType::Vec, float, 1, 8, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null> v313 = Tile<TileType::Vec, float, 1, 8, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null>(v37, v26);
@@ -846,7 +804,6 @@ static __aicore__ void rope_qkv(__gm__ bfloat16_t* v1, __gm__ bfloat16_t* v2, __
       // pto: %47
       uint64_t v316 = (uint64_t) v45;
       TASSIGN(v315, v316);
-      pipe_barrier(PIPE_V);
       TMULS(v315, v313, v22);
       // pto: %49
       Tile<TileType::Vec, float, 1, 8, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null> v317 = Tile<TileType::Vec, float, 1, 8, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null>(v37, v26);
@@ -858,7 +815,6 @@ static __aicore__ void rope_qkv(__gm__ bfloat16_t* v1, __gm__ bfloat16_t* v2, __
       // pto: %50
       uint64_t v320 = (uint64_t) v45;
       TASSIGN(v319, v320);
-      pipe_barrier(PIPE_V);
       TADDS(v319, v317, v21);
       // pto: %52
       Tile<TileType::Vec, float, 1, 8, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null> v321 = Tile<TileType::Vec, float, 1, 8, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null>(v37, v26);
@@ -870,7 +826,6 @@ static __aicore__ void rope_qkv(__gm__ bfloat16_t* v1, __gm__ bfloat16_t* v2, __
       // pto: %53
       uint64_t v324 = (uint64_t) v45;
       TASSIGN(v323, v324);
-      pipe_barrier(PIPE_V);
       TSQRT(v323, v321);
       // pto: %55
       Tile<TileType::Vec, float, 1, 8, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null> v325 = Tile<TileType::Vec, float, 1, 8, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null>(v37, v26);
@@ -882,7 +837,6 @@ static __aicore__ void rope_qkv(__gm__ bfloat16_t* v1, __gm__ bfloat16_t* v2, __
       // pto: %56
       uint64_t v328 = (uint64_t) v41;
       TASSIGN(v327, v328);
-      pipe_barrier(PIPE_V);
       TRECIP(v327, v325);
       // pto: %57
       Tile<TileType::Vec, float, 8, 1, BLayout::ColMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null> v329 = Tile<TileType::Vec, float, 8, 1, BLayout::ColMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null>(v26, v37);
@@ -900,7 +854,6 @@ static __aicore__ void rope_qkv(__gm__ bfloat16_t* v1, __gm__ bfloat16_t* v2, __
       // pto: %59
       uint64_t v334 = (uint64_t) v42;
       TASSIGN(v333, v334);
-      pipe_barrier(PIPE_V);
       TROWEXPANDMUL(v333, v331, v329);
       // pto: %171
       Tile<TileType::Vec, float, 1, 128, BLayout::RowMajor, 1, 128, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null> v335;
@@ -924,9 +877,7 @@ static __aicore__ void rope_qkv(__gm__ bfloat16_t* v1, __gm__ bfloat16_t* v2, __
       // pto: %63
       uint64_t v343 = (uint64_t) v45;
       TASSIGN(v342, v343);
-      pipe_barrier(PIPE_V);
       TEXTRACT(v338, v336, v45, v45);
-      pipe_barrier(PIPE_V);
       TCOLEXPANDMUL(v342, v338, v266);
       // pto: %64
       Tile<TileType::Vec, float, 1, 64, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null> v344 = Tile<TileType::Vec, float, 1, 64, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null>(v37, v23);
@@ -934,21 +885,18 @@ static __aicore__ void rope_qkv(__gm__ bfloat16_t* v1, __gm__ bfloat16_t* v2, __
       uint64_t v345 = (uint64_t) v41;
       TASSIGN(v344, v345);
       TEXTRACT(v340, v336, v45, v23);
-      pipe_barrier(PIPE_V);
       TCOLEXPANDMUL(v344, v340, v276);
       // pto: %65
       Tile<TileType::Vec, float, 1, 64, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null> v346 = Tile<TileType::Vec, float, 1, 64, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null>(v37, v23);
       // pto: %65
       uint64_t v347 = (uint64_t) v45;
       TASSIGN(v346, v347);
-      pipe_barrier(PIPE_V);
       TSUB(v346, v342, v344);
       // pto: %66
       Tile<TileType::Vec, float, 1, 64, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null> v348 = Tile<TileType::Vec, float, 1, 64, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null>(v37, v23);
       // pto: %66
       uint64_t v349 = (uint64_t) v41;
       TASSIGN(v348, v349);
-      pipe_barrier(PIPE_V);
       TCOLEXPANDMUL(v348, v340, v271);
       // pto: %67
       Tile<TileType::Vec, float, 1, 64, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null> v350 = Tile<TileType::Vec, float, 1, 64, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null>(v37, v23);
@@ -961,21 +909,18 @@ static __aicore__ void rope_qkv(__gm__ bfloat16_t* v1, __gm__ bfloat16_t* v2, __
       // pto: %68
       uint64_t v353 = (uint64_t) v41;
       TASSIGN(v352, v353);
-      pipe_barrier(PIPE_V);
       TADD(v352, v348, v350);
       // pto: %69
       Tile<TileType::Vec, float, 1, 128, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null> v354 = Tile<TileType::Vec, float, 1, 128, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null>(v37, v38);
       // pto: %69
       uint64_t v355 = (uint64_t) v42;
       TASSIGN(v354, v355);
-      pipe_barrier(PIPE_V);
       TCONCAT(v354, v346, v352);
       // pto: %70
       Tile<TileType::Vec, bfloat16_t, 1, 128, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null> v356 = Tile<TileType::Vec, bfloat16_t, 1, 128, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null>(v37, v38);
       // pto: %70
       uint64_t v357 = (uint64_t) v40;
       TASSIGN(v356, v357);
-      pipe_barrier(PIPE_V);
       TCVT(v356, v354, v19, v18);
       set_flag(PIPE_V, PIPE_MTE3, EVENT_ID3);
       // pto: %71
@@ -983,7 +928,6 @@ static __aicore__ void rope_qkv(__gm__ bfloat16_t* v1, __gm__ bfloat16_t* v2, __
       // pto: %71
       uint64_t v359 = (uint64_t) v42;
       TASSIGN(v358, v359);
-      pipe_barrier(PIPE_V);
       wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID4);
       TMULS(v358, v291, v261);
       // pto: %72
@@ -991,7 +935,6 @@ static __aicore__ void rope_qkv(__gm__ bfloat16_t* v1, __gm__ bfloat16_t* v2, __
       // pto: %72
       uint64_t v361 = (uint64_t) v44;
       TASSIGN(v360, v361);
-      pipe_barrier(PIPE_V);
       TCVT(v360, v358, v19, v18);
       set_flag(PIPE_V, PIPE_MTE3, EVENT_ID4);
       // pto: %73
@@ -999,7 +942,6 @@ static __aicore__ void rope_qkv(__gm__ bfloat16_t* v1, __gm__ bfloat16_t* v2, __
       // pto: %73
       uint64_t v363 = (uint64_t) v42;
       TASSIGN(v362, v363);
-      pipe_barrier(PIPE_V);
       wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID5);
       TCONCAT(v362, v296, v76);
       // pto: %74
@@ -1012,14 +954,12 @@ static __aicore__ void rope_qkv(__gm__ bfloat16_t* v1, __gm__ bfloat16_t* v2, __
       // pto: %75
       uint64_t v367 = (uint64_t) v42;
       TASSIGN(v366, v367);
-      pipe_barrier(PIPE_V);
       TMULS(v366, v364, v261);
       // pto: %76
       Tile<TileType::Vec, float, 16, 128, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null> v368 = Tile<TileType::Vec, float, 16, 128, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null>(v35, v38);
       // pto: %76
       uint64_t v369 = (uint64_t) v45;
       TASSIGN(v368, v369);
-      pipe_barrier(PIPE_V);
       TMUL(v368, v366, v366);
       // pto: %77
       Tile<TileType::Vec, float, 16, 128, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null> v370 = Tile<TileType::Vec, float, 16, 128, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null>(v35, v38);
@@ -1031,7 +971,6 @@ static __aicore__ void rope_qkv(__gm__ bfloat16_t* v1, __gm__ bfloat16_t* v2, __
       // pto: %78
       uint64_t v373 = (uint64_t) v43;
       TASSIGN(v372, v373);
-      pipe_barrier(PIPE_V);
       TROWSUM(v372, v368, v370);
       // pto: %79
       Tile<TileType::Vec, float, 1, 16, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null> v374 = Tile<TileType::Vec, float, 1, 16, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null>(v37, v35);
@@ -1043,7 +982,6 @@ static __aicore__ void rope_qkv(__gm__ bfloat16_t* v1, __gm__ bfloat16_t* v2, __
       // pto: %80
       uint64_t v377 = (uint64_t) v45;
       TASSIGN(v376, v377);
-      pipe_barrier(PIPE_V);
       TMULS(v376, v374, v22);
       // pto: %82
       Tile<TileType::Vec, float, 1, 16, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null> v378 = Tile<TileType::Vec, float, 1, 16, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null>(v37, v35);
@@ -1055,7 +993,6 @@ static __aicore__ void rope_qkv(__gm__ bfloat16_t* v1, __gm__ bfloat16_t* v2, __
       // pto: %83
       uint64_t v381 = (uint64_t) v45;
       TASSIGN(v380, v381);
-      pipe_barrier(PIPE_V);
       TADDS(v380, v378, v21);
       // pto: %85
       Tile<TileType::Vec, float, 1, 16, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null> v382 = Tile<TileType::Vec, float, 1, 16, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null>(v37, v35);
@@ -1067,7 +1004,6 @@ static __aicore__ void rope_qkv(__gm__ bfloat16_t* v1, __gm__ bfloat16_t* v2, __
       // pto: %86
       uint64_t v385 = (uint64_t) v45;
       TASSIGN(v384, v385);
-      pipe_barrier(PIPE_V);
       TSQRT(v384, v382);
       // pto: %88
       Tile<TileType::Vec, float, 1, 16, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null> v386 = Tile<TileType::Vec, float, 1, 16, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null>(v37, v35);
@@ -1079,7 +1015,6 @@ static __aicore__ void rope_qkv(__gm__ bfloat16_t* v1, __gm__ bfloat16_t* v2, __
       // pto: %89
       uint64_t v389 = (uint64_t) v41;
       TASSIGN(v388, v389);
-      pipe_barrier(PIPE_V);
       TRECIP(v388, v386);
       // pto: %90
       Tile<TileType::Vec, float, 16, 1, BLayout::ColMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null> v390 = Tile<TileType::Vec, float, 16, 1, BLayout::ColMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null>(v35, v37);
@@ -1097,21 +1032,18 @@ static __aicore__ void rope_qkv(__gm__ bfloat16_t* v1, __gm__ bfloat16_t* v2, __
       // pto: %92
       uint64_t v395 = (uint64_t) v42;
       TASSIGN(v394, v395);
-      pipe_barrier(PIPE_V);
       TROWEXPANDMUL(v394, v392, v390);
       // pto: %93
       Tile<TileType::Vec, float, 16, 64, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null> v396 = Tile<TileType::Vec, float, 16, 64, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null>(v35, v23);
       // pto: %93
       uint64_t v397 = (uint64_t) v45;
       TASSIGN(v396, v397);
-      pipe_barrier(PIPE_V);
       TEXTRACT(v396, v394, v45, v45);
       // pto: %94
       Tile<TileType::Vec, float, 16, 64, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null> v398 = Tile<TileType::Vec, float, 16, 64, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null>(v35, v23);
       // pto: %94
       uint64_t v399 = (uint64_t) v45;
       TASSIGN(v398, v399);
-      pipe_barrier(PIPE_V);
       TCOLEXPANDMUL(v398, v396, v266);
       set_flag(PIPE_V, PIPE_MTE2, EVENT_ID4);
       // pto: %95
@@ -1125,28 +1057,24 @@ static __aicore__ void rope_qkv(__gm__ bfloat16_t* v1, __gm__ bfloat16_t* v2, __
       // pto: %96
       uint64_t v403 = (uint64_t) v41;
       TASSIGN(v402, v403);
-      pipe_barrier(PIPE_V);
       TCOLEXPANDMUL(v402, v400, v276);
       // pto: %97
       Tile<TileType::Vec, float, 16, 64, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null> v404 = Tile<TileType::Vec, float, 16, 64, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null>(v35, v23);
       // pto: %97
       uint64_t v405 = (uint64_t) v45;
       TASSIGN(v404, v405);
-      pipe_barrier(PIPE_V);
       TSUB(v404, v398, v402);
       // pto: %98
       Tile<TileType::Vec, float, 16, 64, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null> v406 = Tile<TileType::Vec, float, 16, 64, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null>(v35, v23);
       // pto: %98
       uint64_t v407 = (uint64_t) v41;
       TASSIGN(v406, v407);
-      pipe_barrier(PIPE_V);
       TEXTRACT(v406, v394, v45, v23);
       // pto: %99
       Tile<TileType::Vec, float, 16, 64, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null> v408 = Tile<TileType::Vec, float, 16, 64, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null>(v35, v23);
       // pto: %99
       uint64_t v409 = (uint64_t) v41;
       TASSIGN(v408, v409);
-      pipe_barrier(PIPE_V);
       TCOLEXPANDMUL(v408, v406, v271);
       set_flag(PIPE_V, PIPE_MTE2, EVENT_ID5);
       // pto: %100
@@ -1160,7 +1088,6 @@ static __aicore__ void rope_qkv(__gm__ bfloat16_t* v1, __gm__ bfloat16_t* v2, __
       // pto: %101
       uint64_t v413 = (uint64_t) v42;
       TASSIGN(v412, v413);
-      pipe_barrier(PIPE_V);
       TCOLEXPANDMUL(v412, v410, v281);
       set_flag(PIPE_V, PIPE_MTE2, EVENT_ID6);
       // pto: %102
@@ -1168,14 +1095,12 @@ static __aicore__ void rope_qkv(__gm__ bfloat16_t* v1, __gm__ bfloat16_t* v2, __
       // pto: %102
       uint64_t v415 = (uint64_t) v41;
       TASSIGN(v414, v415);
-      pipe_barrier(PIPE_V);
       TADD(v414, v408, v412);
       // pto: %103
       Tile<TileType::Vec, float, 16, 128, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null> v416 = Tile<TileType::Vec, float, 16, 128, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null>(v35, v38);
       // pto: %103
       uint64_t v417 = (uint64_t) v42;
       TASSIGN(v416, v417);
-      pipe_barrier(PIPE_V);
       TCONCAT(v416, v404, v414);
       set_flag(PIPE_V, PIPE_MTE2, EVENT_ID7);
       // pto: %174
@@ -1190,7 +1115,6 @@ static __aicore__ void rope_qkv(__gm__ bfloat16_t* v1, __gm__ bfloat16_t* v2, __
       // pto: %105
       uint64_t v422 = (uint64_t) v42;
       TASSIGN(v421, v422);
-      pipe_barrier(PIPE_V);
       TCVT(v421, v419, v19, v18);
       set_flag(PIPE_V, PIPE_MTE3, EVENT_ID5);
       // pto: %k_cache__phi_v6_pview
@@ -1241,6 +1165,6 @@ static __aicore__ void rope_qkv(__gm__ bfloat16_t* v1, __gm__ bfloat16_t* v2, __
 }
 
 }  // namespace qwen_rope_gen
-#endif  // __DAV_C220_VEC__
+#endif  // __DAV_VEC__
 
 #endif  // PYPTO_QWEN_ROPE_QKV_GENERATED_HPP

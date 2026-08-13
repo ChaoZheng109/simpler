@@ -55,6 +55,9 @@ static __aicore__ void clear_barrier(__gm__ int32_t *barrier) {
         slot_data[0] = 0;
         dcci(slot_data, SINGLE_CACHE_LINE, CACHELINE_OUT);
     }
+    __gm__ int32_t *syncall_counter = barrier + qwen_fai_metadata::kSyncAllCounterWord;
+    syncall_counter[0] = 0;
+    dcci(syncall_counter, SINGLE_CACHE_LINE, CACHELINE_OUT);
     dsb(DSB_DDR);
 }
 
