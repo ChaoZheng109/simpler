@@ -800,6 +800,24 @@ def _dump_name_map(mapping: dict, output_path: Path) -> Path | None:
     return output_path
 
 
+def select_scene_classes(module) -> list[type]:
+    """SceneTestCase subclasses defined in ``module``, in definition order.
+
+    Only classes whose ``__module__`` matches are returned: scene-test modules
+    commonly import a foreign-runtime class to reuse its CALLABLE, and running
+    such a file must not dispatch that imported runtime's cases too. This
+    mirrors pytest's per-file collection, which ignores imported bindings.
+    """
+    return [
+        v
+        for v in vars(module).values()
+        if isinstance(v, type)
+        and issubclass(v, SceneTestCase)
+        and v is not SceneTestCase
+        and v.__module__ == module.__name__
+    ]
+
+
 def _parse_case_selector(value: str) -> tuple[str | None, str | None]:
     """Parse one ``--case`` value into ``(class_name, case_name)``.
 
@@ -1932,11 +1950,7 @@ class SceneTestCase:
         # artifacts land in distinct directories with no shared filenames.
 
         module = sys.modules[module_name]
-        test_classes = [
-            v
-            for v in vars(module).values()
-            if isinstance(v, type) and issubclass(v, SceneTestCase) and v is not SceneTestCase and hasattr(v, "CASES")
-        ]
+        test_classes = select_scene_classes(module)
 
         # Apply --runtime/--level filters (child mode sets both; parent may also
         # use them when the user wants a narrow run).
