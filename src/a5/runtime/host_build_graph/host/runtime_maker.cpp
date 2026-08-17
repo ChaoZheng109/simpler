@@ -36,6 +36,7 @@
 
 #include <atomic>
 #include <cerrno>
+#include <chrono>
 #include <cinttypes>
 #include <cstddef>
 #include <cstdint>
@@ -591,10 +592,15 @@ int32_t run_host_orchestration(
     // rt_orchestration_done take the runtime as an argument.
     entry_points->bind(rt);
 
+    const auto orch_start = std::chrono::steady_clock::now();
     rt_scope_begin(rt);
     entry_points->entry(orch_l2);
     rt_scope_end(rt);
     rt_orchestration_done(rt);
+    const auto orch_end = std::chrono::steady_clock::now();
+    const int64_t orch_elapsed_ns =
+        std::chrono::duration_cast<std::chrono::nanoseconds>(orch_end - orch_start).count();
+    LOG_TIMING("host-orch: orchestration execution took %" PRId64 " ns", orch_elapsed_ns);
 
     const int32_t total_tasks = pto2_sm_layout::ring_current_task_index_addr(host_sm)->load(std::memory_order_acquire);
     if (!upload_graph_submissions(runtime, api, *graph_state)) return -1;
