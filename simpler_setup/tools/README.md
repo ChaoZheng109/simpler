@@ -18,6 +18,7 @@ no repo checkout required.
 - **[phase_time_split](#phase_time_split)** — the same segment spans split into on-CPU and off-CPU per segment, from per-thread CPU clocks, with cold and warm binds reported separately
 - **[dump_viewer](#dump_viewer)** — inspect / export args dumps (see [docs/args-dump.md](../../docs/dfx/args-dump.md) for full workflow)
 - **[deps_viewer](#deps_viewer)** — `deps.json` (dep_gen) → text or pan/zoom HTML dependency graph
+- **[wait_reduction_sim](#wait_reduction_sim)** — `deps.json` (dep_gen) → bounded-bitmap WAIT reduction coverage vs the full-DAG upper bound, per BL
 
 For CLIs that allow an omitted input, auto-detection paths
 (`outputs/*/chip_swimlane_records.json`, `outputs/*/args_dump/`) are resolved
@@ -664,6 +665,77 @@ python -m simpler_setup.tools.dump_viewer --task 0x0000000200000a00 --stage befo
 # Export a specific arg by index (always exports)
 python -m simpler_setup.tools.dump_viewer outputs/<case>_<ts>/args_dump/ --index 42
 ```
+
+---
+
+## wait_reduction_sim
+
+Measure how many redundant WAIT edges the `tensormap_and_ringbuffer`
+runtime's bounded reachability bitmap reduction would remove from a real
+dependency graph, against the exact full-DAG transitive reduction as the
+upper bound (issue #1376 acceptance #9). Decides the production bitmap
+window (BL) from data instead of guesswork.
+
+### Overview
+
+`wait_reduction_sim` reads the same `deps.json` the
+[`deps_viewer`](#deps_viewer) consumes (edges are as-constructed, i.e.
+pre-reduction, so one capture serves baseline and comparison alike). It
+reconstructs the global submission order from the `tasks[]` record order,
+OR-accumulates edge flags per `(pred, succ)` pair, and runs two models over
+the WAIT subgraph:
+
+- **Full reduction** — exact transitive reachability over the whole DAG:
+  the upper bound any reducer could reach.
+- **Online bitmap** — a faithful mirror of the runtime's
+  `reduce_wait_edges` (frozen per-task `R[t]`, two-pass `direct`/`via`
+  fold, `d > BL` window misses kept) at each requested window size.
+
+The report includes per-BL removal counts, `WAIT|RETAIN → RETAIN` demotions
+vs pure WAIT drops, window and cross-ring misses, and the producer→consumer
+submission-distance CDF. `DepGenRecord` does not preserve explicit
+dependency kinds yet (#1827), so removal counts are accurate while the report
+marks affected demote-vs-drop classifications as uncertain.
+
+> **`estimated_dep_pool_entries_removed` and
+> `estimated_readiness_fanout_nodes_removed` are edge-count upper bounds, not
+> runtime savings.** Both equal the removed-edge count, i.e. they assume one
+> removed edge frees one dependency-pool entry. On-device counting shows about
+> 90% of removed edges point at producers that are already
+> `CHIP_TASK_COMPLETED` when the consumer is wired; those take the
+> `completed_fanin` branch and never call `dep_pool.prepend`, so they free no
+> entry. On a DeepSeek-V4 decode step these two columns overstate the measured
+> saving by roughly 10x (990 of 19,114 entries actually saved, −5.2%). The
+> *edge* counts are sound — that step's pure-drop count matched the prediction
+> exactly and the total was within 6%. Full measurement in
+> [`docs/investigations/2026-09-wait-reduction-bitmap-window-sizing.md`](../../docs/investigations/2026-09-wait-reduction-bitmap-window-sizing.md).
+
+### Usage
+
+```bash
+# Capture once (dep_gen records pre-construction edges; see docs/dfx/dep-gen.md)
+pytest examples/a5/tensormap_and_ringbuffer/qwen3_14b_decode --platform a5 --enable-dep-gen
+
+# Compare BL=64/128/256 (default) against the upper bound
+python -m simpler_setup.tools.wait_reduction_sim outputs/<case>_<ts>/deps.json
+
+# Machine-readable output, e.g. to diff two captures
+python -m simpler_setup.tools.wait_reduction_sim deps_a.json deps_b.json --json report.json
+```
+
+Reading the output: when `BL=64 removed ≈ upper_bound`, the single-word
+window already saturates the graph's redundancy and larger windows buy
+nothing; when the `pct_pairs_within_window` column is well below 100 for a
+BL, the graph has far-apart producer/consumer pairs that only a wider
+window could cover.
+
+A low `removed / upper_bound` ratio is **not** on its own a case for widening:
+check `cross_ring_misses` first. Qwen3-14B decode removes 1 of 40 redundant
+edges at BL=64 and the same 1 at BL=256, because 39 of its misses are
+cross-ring long edges that no window in this range reaches. Only
+`pct_pairs_within_window` being the binding constraint argues for a wider BL —
+see the [investigation entry](../../docs/investigations/2026-09-wait-reduction-bitmap-window-sizing.md)
+for the BL=64/128/256 comparison and why BL=64 is the shipped choice.
 
 ---
 
