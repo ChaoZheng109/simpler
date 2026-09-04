@@ -436,8 +436,8 @@ dependency wiring remains an Orchestrator responsibility:
   packed windows;
 - materialization registers each non-root on one producer selected from its
   saved fanin CSR;
-- an in-graph task's release/acquire `task_state` is its Graph-local completion flag, so
-  such tasks need neither shared-memory completion flags nor task-table slots;
+- an in-graph task's release/acquire `task_state` is its Graph-local completion truth, so
+  such tasks need neither a shared-memory `task_states` byte nor a task-table slot;
 - producer completion closes and drains only its current wake-list rather than
   traversing the saved fanout CSR;
 - a woken consumer scans its saved fanin CSR and either enters its shape queue
@@ -461,7 +461,7 @@ outer GRAPH
 ```
 
 In-graph tasks count as zero tasks of the run itself. The last one to complete
-finishes the one outer Graph task, publishes that task's completion flag, wakes
+finishes the one outer Graph task, publishes that task's `task_states` byte, wakes
 external consumers, and contributes one to the host-visible completion count.
 
 Localization or materialization failure is fail-fast: the Scheduler latches an

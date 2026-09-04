@@ -65,7 +65,7 @@ bool SchedulerState::TaskHeaderView::init_data_from_layout(void *sm_dev_base) {
     tasks = sm_layout::task_header_addr(sm_dev_base);
 
     // Per-slot SM-side initialization (reset_for_reuse + active_mask, and clearing
-    // the completion flag) happens init-on-write in orch::prepare_task as each slot
+    // the progress state) happens init-on-write in orch::prepare_task as each slot
     // is claimed; host prebuilt-arena init skips SM access here.
 
     return true;
@@ -101,7 +101,7 @@ SchedulerLayout SchedulerState::reserve_layout(DeviceArena &arena) {
     layout.off_graph_ready_queue_slots = ready_queue_reserve_layout(arena, READY_QUEUE_CAPACITY_LIMIT);
     layout.off_graph_prepare_queue_slots = ready_queue_reserve_layout(arena, READY_QUEUE_CAPACITY_LIMIT);
     // Polling: no dep_pool arena region — producer dependencies are inline ids on
-    // the payload and readiness is via progress_flags.
+    // the payload and readiness is via the task_states array.
     return layout;
 }
 

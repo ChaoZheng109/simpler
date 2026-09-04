@@ -396,20 +396,37 @@ void SchedulerContext::dispatch_shape(
         // Flush prepared-but-unpublished handles. Required before
         // `enter_drain_mode` so the drain coordinator sees cores as occupied,
         // and at the per-task boundary when `any_sync_start` is true.
+        //
+        // The publication ledger is settled around the flush, not after it:
+        // every task whose blocks are in `handles[]` accounts BEFORE the token
+        // writes (so PUBLISHED precedes the tokens whose FINs drive completion)
+        // and the tasks that reached their total seal AFTER, once their tokens
+        // are out.
         auto flush_publish = [&]() {
-            if (handle_count == 0) return;
-            wmb();
-            uint64_t dispatch_ts = 0;
+            int seal_n = 0;
+            for (int i = 0; i < published_n; i++) {
+                if (sched_->account_published_blocks(*published_list[i], published_counts[i])) {
+                    published_list[seal_n++] = published_list[i];
+                }
+            }
+            published_n = 0;
+            if (handle_count != 0) {
+                wmb();
+                uint64_t dispatch_ts = 0;
 #if SIMPLER_DFX
-            if (chip_swimlane_level_ >= ChipSwimlaneLevel::SCHEDULE_TIMING) {
-                dispatch_ts = get_sys_cnt_aicpu();
-            }
+                if (chip_swimlane_level_ >= ChipSwimlaneLevel::SCHEDULE_TIMING) {
+                    dispatch_ts = get_sys_cnt_aicpu();
+                }
 #endif
-            for (int i = 0; i < handle_count; i++) {
-                publish_subtask_to_core(handles[i], dispatch_ts, thread_idx);
+                for (int i = 0; i < handle_count; i++) {
+                    publish_subtask_to_core(handles[i], dispatch_ts, thread_idx);
+                }
+                handle_count = 0;
+                made_progress = true;
             }
-            handle_count = 0;
-            made_progress = true;
+            for (int i = 0; i < seal_n; i++) {
+                sched_->seal_ed_publish_list(*published_list[i]);
+            }
         };
 
         for (int bi = 0; bi < got; bi++) {
@@ -500,9 +517,6 @@ void SchedulerContext::dispatch_shape(
         }
 
         flush_publish();
-        for (int i = 0; i < published_n; i++) {
-            sched_->record_published_blocks(*published_list[i], published_counts[i]);
-        }
 #if SIMPLER_SCHED_PROFILING
         chip_swimlane.sched_dispatch_setup_cycle += (get_sys_cnt_aicpu() - t_setup_start);
 #endif
@@ -668,6 +682,8 @@ int32_t SchedulerContext::stage_consumer_blocks(
     };
     if (idle.has_value()) prepare_from(idle, /*to_pending=*/false);
     if (pend.has_value()) prepare_from(pend, /*to_pending=*/true);
+    // Account before the tokens, seal after them (see account_published_blocks).
+    const bool owns_seal = sched_->account_published_blocks(*c, staged);
     if (n > 0) {
         wmb();
         for (int i = 0; i < n; i++) {
@@ -683,9 +699,16 @@ int32_t SchedulerContext::stage_consumer_blocks(
     for (int w = 0; w < EARLY_DISPATCH_CORE_MASK_WORDS; w++)
         if (my_cores[w] != 0) c->to_payload().staged_core_mask[w].fetch_or(my_cores[w], std::memory_order_seq_cst);
 
-    // Full publication and release are independent events. The seq_cst
-    // state/launch/count operations form a two-sided handshake. A released
-    // block must ring before contributing to the publication count.
+    // Full publication and release are independent events. Doorbell ownership
+    // is a two-sided seq_cst handshake between the fetch_or above and the
+    // release path's early_dispatch_state store: each staged bit is claimed
+    // exactly once, by whichever side observes the other's write, so a bit the
+    // releaser missed is rung below and a bit it took is not rung twice.
+    // published_block_count takes no part in that handshake, which is why the
+    // accounting above may precede these rings: a consumer released by the
+    // resulting publication cannot take cores this task's blocks already hold
+    // (prepare_block_for_dispatch claimed them before any of this) and holds
+    // nothing the rings below wait on.
     bool released =
         staged > 0 && c->to_payload().early_dispatch_state.load(std::memory_order_seq_cst) == EARLY_DISPATCH_DISPATCHED;
 
@@ -707,7 +730,7 @@ int32_t SchedulerContext::stage_consumer_blocks(
         }
         wmb();
     }
-    sched_->record_published_blocks(*c, staged);
+    if (owns_seal) sched_->seal_ed_publish_list(*c);
     return staged;
 }
 
@@ -921,7 +944,7 @@ int32_t SchedulerContext::try_early_dispatch(
 // =============================================================================
 
 // P owns no AICore cores. It drains the per-S CompletedTaskQueues and runs
-// on_task_complete for every finished task: publish progress_flags, drain the
+// on_task_complete for every finished task: publish task_states, drain the
 // wake list (route/re-register waiters into the ready queues). As the sole
 // producer of the ready queues its enqueues never contend. P owns
 // completed_tasks_ and the terminal completed_ flip, so the S threads keep

@@ -71,7 +71,7 @@ struct TaskId {
     static constexpr TaskId invalid() { return TaskId{UINT64_MAX}; }
 
     // A local id is signed throughout this runtime — it is a task-table index, and the
-    // table, the completion flags and the fanin payload all address slots with int32_t.
+    // table, the task states and the fanin payload all address slots with int32_t.
     // The low field is therefore narrowed to uint32_t before it is widened into the raw
     // word, so a negative value cannot sign-extend over the id-space bits above it.
     static constexpr TaskId make_global(int32_t local_id) {
