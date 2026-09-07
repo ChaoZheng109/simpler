@@ -665,7 +665,9 @@ int32_t SchedulerContext::retire_cores(Runtime *runtime, const int32_t *core_ids
     }
     if (count == 0) return 0;
 
-    bool released[PLATFORM_MAX_CORES] = {};
+    // platform_retire_aicore_group writes every entry it is given, so this
+    // needs no initializer: nothing reads an element it did not fill.
+    bool released[PLATFORM_MAX_CORES];
     const int32_t rc = platform_retire_aicore_group(targets, count, platform_aicore_exit_deadline(), released);
     if (rc != 0) {
         // Naming the cores is the only signal an unreleased worker leaves: it

@@ -112,22 +112,27 @@ int32_t platform_retire_aicore_group(const AicoreExitTarget *targets, size_t cou
     }
     wmb();
 
-    bool acknowledged[PLATFORM_MAX_CORES] = {};
-    for (size_t i = 0; i < count; ++i) {
-        while (read_reg(targets[i].reg_addr, RegId::COND) != AICORE_EXITED_VALUE) {
-            if (get_sys_cnt_aicpu() > deadline) break;
+    // Round-robin rather than blocking on one core at a time. Blocking spends
+    // the shared deadline on whichever core happens to come first, and every
+    // core behind it is then judged on a peer's timeout instead of its own.
+    // Sweeping non-blockingly gives each core the whole budget: a core is only
+    // abandoned once the deadline passes with it still silent.
+    // Only the first `count` entries are ever read, and the sweep below reads
+    // one before it writes it, so those must start false — but zeroing the
+    // whole PLATFORM_MAX_CORES array would clear three times what is used.
+    bool acknowledged[PLATFORM_MAX_CORES];
+    for (size_t i = 0; i < count; ++i)
+        acknowledged[i] = false;
+    size_t remaining = count;
+    while (remaining != 0) {
+        for (size_t i = 0; i < count; ++i) {
+            if (acknowledged[i]) continue;
+            if (read_reg(targets[i].reg_addr, RegId::COND) == AICORE_EXITED_VALUE) {
+                acknowledged[i] = true;
+                --remaining;
+            }
         }
-        acknowledged[i] = read_reg(targets[i].reg_addr, RegId::COND) == AICORE_EXITED_VALUE;
-    }
-    // One shared deadline bounds the all-dead case to a single timeout, but it
-    // also means a core whose turn came after it expired never got a wait of
-    // its own. Such a core has had the rest of the pass to acknowledge; a
-    // second read decides it on its own evidence rather than on a peer's
-    // timeout, and costs one register read per still-silent core.
-    for (size_t i = 0; i < count; ++i) {
-        if (!acknowledged[i]) {
-            acknowledged[i] = read_reg(targets[i].reg_addr, RegId::COND) == AICORE_EXITED_VALUE;
-        }
+        if (remaining == 0 || get_sys_cnt_aicpu() > deadline) break;
     }
 
     // No window closes until every ACK above is in, so a core is never quiesced
