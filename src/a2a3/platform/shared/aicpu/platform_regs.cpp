@@ -68,6 +68,17 @@ void platform_signal_aicore_exit(uint64_t reg_addr) { write_reg(reg_addr, RegId:
 
 uint64_t platform_aicore_exit_deadline() { return get_sys_cnt_aicpu() + inner_get_deinit_timeout_ticks(); }
 
+void platform_close_aicore_window(uint64_t reg_addr) {
+    // Initialize task dispatch register to idle state
+    write_reg(reg_addr, RegId::DATA_MAIN_BASE, AICPU_IDLE_TASK_ID);
+    // Close fast path control
+    write_reg(reg_addr, RegId::FAST_PATH_ENABLE, REG_SPR_FAST_PATH_CLOSE);
+    // Complete the posted MMIO close. A release store alone is not a
+    // device-write completion fence; the drain that pairs with this read is the
+    // caller's, so several windows share one.
+    (void)read_reg(reg_addr, RegId::FAST_PATH_ENABLE);
+}
+
 int32_t platform_finish_aicore_exit(uint64_t reg_addr, uint64_t deadline) {
     // Wait for AICore to acknowledge exit, until the caller's deadline. On
     // timeout, skip register cleanup (AICore is unresponsive; host will
@@ -77,14 +88,7 @@ int32_t platform_finish_aicore_exit(uint64_t reg_addr, uint64_t deadline) {
             return -1;
         }
     }
-
-    // Initialize task dispatch register to idle state
-    write_reg(reg_addr, RegId::DATA_MAIN_BASE, AICPU_IDLE_TASK_ID);
-    // Close fast path control
-    write_reg(reg_addr, RegId::FAST_PATH_ENABLE, REG_SPR_FAST_PATH_CLOSE);
-    // Complete the posted MMIO close before a caller publishes a Normal-memory
-    // return gate. A release store alone is not a device-write completion fence.
-    (void)read_reg(reg_addr, RegId::FAST_PATH_ENABLE);
+    platform_close_aicore_window(reg_addr);
     rmb();
     return 0;
 }
@@ -126,13 +130,21 @@ int32_t platform_retire_aicore_group(const AicoreExitTarget *targets, size_t cou
         }
     }
 
+    // No window closes until every ACK above is in, so a core is never quiesced
+    // while a peer is still being waited on. COND is not re-read here: the
+    // passes above already established it.
     int32_t rc = 0;
     for (size_t i = 0; i < count; ++i) {
         if (acknowledged[i]) {
-            acknowledged[i] = platform_finish_aicore_exit(targets[i].reg_addr, deadline) == 0;
+            platform_close_aicore_window(targets[i].reg_addr);
+        } else {
+            rc = -1;
         }
-        if (!acknowledged[i]) rc = -1;
     }
+    // One drain covers every readback the close pass issued, so each release
+    // store below is ordered after the CLOSE it belongs to. Draining per window
+    // instead costs a dsb apiece and measured ~45% of the close pass.
+    rmb();
     // An open return gate is only ever paired with a closed window: releasing a
     // core whose window is still open is the ordering violation this protocol
     // exists to prevent. Unreleased cores are reported through `released` so

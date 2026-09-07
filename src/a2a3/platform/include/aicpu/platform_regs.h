@@ -162,6 +162,12 @@ uint64_t platform_aicore_exit_deadline();
  */
 int32_t platform_finish_aicore_exit(uint64_t reg_addr, uint64_t deadline);
 
+// Quiesce a core whose COND the caller has already observed as EXITED: dispatch
+// back to idle, fast path closed, and the posted close read back so it is
+// complete. Issues no fence of its own — a caller closing several windows owes
+// one rmb() after the last call and before it publishes any return gate.
+void platform_close_aicore_window(uint64_t reg_addr);
+
 /**
  * Deinitialize AICore registers before termination
  *
