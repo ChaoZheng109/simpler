@@ -97,6 +97,7 @@ def _invoked_cases(invocations: Path) -> list[tuple[str, str, str]]:
                 ("tensormap_and_ringbuffer", "paged_attention_unroll_manual_scope", "Case1"),
                 ("tensormap_and_ringbuffer", "paged_attention_unroll_manual_scope", "Case2"),
                 ("tensormap_and_ringbuffer", "batch_paged_attention", "Case1"),
+                ("tensormap_and_ringbuffer", "sliding_window_deps", "Dense16"),
                 ("tensormap_and_ringbuffer", "qwen3_14b_decode", "StressBatch16Seq3500"),
             ],
         ),
@@ -125,6 +126,7 @@ def _invoked_cases(invocations: Path) -> list[tuple[str, str, str]]:
                 ("tensormap_and_ringbuffer", "paged_attention_unroll_manual_scope", "Case1"),
                 ("tensormap_and_ringbuffer", "paged_attention_unroll_manual_scope", "Case2"),
                 ("tensormap_and_ringbuffer", "batch_paged_attention", "Case1"),
+                ("tensormap_and_ringbuffer", "sliding_window_deps", "Dense16"),
                 ("tensormap_and_ringbuffer", "qwen3_14b_decode", "StressBatch16Seq3500"),
             ],
         ),
@@ -256,7 +258,7 @@ def test_default_runtime_remains_tensormap_and_ringbuffer(tmp_path: Path) -> Non
 
     assert result.returncode == 0, result.stdout + result.stderr
     invoked_cases = _invoked_cases(invocations)
-    assert len(invoked_cases) == 8
+    assert len(invoked_cases) == 9
     assert all(runtime == "tensormap_and_ringbuffer" for runtime, _, _ in invoked_cases)
     assert "Runtime: tensormap_and_ringbuffer" in result.stdout
     assert "[parallel]" in result.stdout

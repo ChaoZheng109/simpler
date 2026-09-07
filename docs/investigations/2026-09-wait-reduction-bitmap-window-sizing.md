@@ -5,11 +5,17 @@
 deferred**. On the two production workloads measured, the wider windows buy
 either nothing at all (Qwen3) or twice the edge removals against a coverage
 gain that the same measurement shows is worth no end-to-end time (DeepSeek-V4).
-This entry also records the second, larger result: **BL=64 itself is
-end-to-end neutral** — bounded transitive reduction preserves WAIT
-reachability exactly, so no task's earliest start time moves, and the
-bookkeeping it does make cheaper turns out to be ~5% of dependency-pool
-pressure that is not on the critical path.
+This entry also records the second, larger result: **BL=64 is end-to-end
+neutral on both production workloads** — bounded transitive reduction
+preserves WAIT reachability exactly, so no task's earliest start time moves,
+and the bookkeeping it does make cheaper turns out to be ~5% of
+dependency-pool pressure that is not on the critical path there.
+
+**Amended 2026-09-07** — "neutral" is a property of those two workloads, not
+of the mechanism. Both are near-chains: their per-task fanin degree is at most
+1.5, so there is almost no wiring or fanout-walk work for reduction to remove.
+Given a workload whose fanin degree is 16, the same BL=64 code is **−20.47%
+`Orch` and −2.59% `Effective`**. See "Where the mechanism does pay" below.
 
 ## Question
 
@@ -101,6 +107,62 @@ entry and no completion-time traversal — only the readiness accounting and one
 `fanout_lock` round trip each. The ~5% of dependency-pool pressure that
 reduction does free is real and independently measured, but it is not on the
 critical path of a step whose ~30 ms is AICore compute.
+
+### Where the mechanism does pay (added 2026-09-07)
+
+The paragraph above is a statement about *these graphs*, and the corpus that
+produced it is uniformly sparse. Per-task fanin degree, from `--enable-dep-gen`
+captures of the benchmark suite:
+
+| case | tasks | WAIT edges | edges/task | full-DAG redundant |
+| ---- | ----: | ---------: | ---------: | -----------------: |
+| alternating_matmul_add (C1) | 1000 | 0 | 0.00 | 0 |
+| benchmark_bgemm (C0) | 1000 | 750 | 0.75 | 0 |
+| paged_attention_unroll (C1) | 1280 | 1280 | 1.00 | 256 |
+| paged_attention_unroll (C2) | 576 | 704 | 1.22 | 192 |
+| batch_paged_attention (C1) | 4112 | 6128 | 1.49 | 2032 |
+
+Nothing in that corpus exceeds 1.5 edges per task, so there is almost no
+wiring or completion-fanout work for reduction to remove — which is what
+"neutral" was measuring.
+
+`sliding_window_deps` (`out[i] = mean(base[i], out[i-1..i-16])`) puts the same
+BL=64 code under a degree-16 graph built entirely from Step-A creator edges, no
+explicit dependency. Measured at `steps=1000` on a2a3, same die, both arms
+serial, 100 rounds, trimmed to 80:
+
+| metric | pre-#2009 (`fab1a41e`) | #2009 | change |
+| ------ | ---------------------: | ----: | -----: |
+| Orch | 1879.8 ± 12.8 µs | 1495.0 ± 8.8 µs | **−20.47%** |
+| Sched | 17133.5 ± 29.8 µs | 16689.7 ± 35.2 µs | **−2.59%** |
+| Effective | 17135.3 ± 29.8 µs | 16691.4 ± 35.3 µs | **−2.59%** |
+| Device wall | 17157.8 ± 29.7 µs | 16713.4 ± 35.2 µs | −2.59% |
+
+dep_gen reports 1001 tasks / 15,865 WAIT edges / 14,865 redundant, and BL=64
+removes **100%** of them — every redundant edge sits at submission distance
+≤ 16.
+
+The case exists for both architectures, since #2009 shipped the reduction to
+a2a3 and a5 alike, and dep_gen on a5 produces the identical graph. The timing
+above is a2a3 only: the host these numbers came from is a2a3 silicon, so the
+a5 arm of the same comparison has not been run.
+
+Two things this corrects:
+
+- **`Orch` falls, it does not rise.** `wire_fanin_task` runs on the
+  orchestrator thread and is charged to the `Orch` span, so dropping 15 of 16
+  edges per task removes 15 `lock_fanout` round trips and 15
+  `dep_pool.prepend` calls from *inside* that window. The per-submit bitmap
+  cost is real but an order of magnitude smaller: 1878 → 1493 ns per task,
+  **~26 ns saved per removed edge**. `Orch` only rises where reduction removes
+  nothing.
+- **The fixed baseline-first ordering is a confound and is not controlled
+  for.** Both arms ran in that order inside one allocation, and the direction
+  of any ordering effect on the device-side spans was never measured, so
+  nothing here rules it out. What makes the gap hard to attribute to ordering
+  alone is its size against the spread: `Orch` moves 385 µs where the
+  per-round standard deviation is 9–13 µs. A swapped-order repeat is what
+  would settle it.
 
 ### The simulator's resource columns overstate the runtime saving ~10x
 

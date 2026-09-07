@@ -43,6 +43,10 @@ A2A3_TMR_EXAMPLE_CASES=(
     # spmd_paged_attention temporarily disabled: pre-existing onboard stall
     # (507018 S1:running-stalled), reproduces on baseline — see KNOWN_ISSUES.md.
     # "spmd_paged_attention=Case1,Case2"
+    # The only case here with a per-task fanin degree above 1.5; every other
+    # entry is a near-chain, so an O(fanout) regression in wiring, dependency-pool
+    # allocation, or the completion fanout walk is invisible without it.
+    "sliding_window_deps=Dense16"
     "qwen3_14b_decode=StressBatch16Seq3500"
 )
 
@@ -63,6 +67,10 @@ A5_TMR_EXAMPLE_CASES=(
     "paged_attention_unroll=Case1,Case2"
     "paged_attention_unroll_manual_scope=Case1,Case2"
     "batch_paged_attention=Case1"
+    # The only case here with a per-task fanin degree above 1.5; every other
+    # entry is a near-chain, so an O(fanout) regression in wiring, dependency-pool
+    # allocation, or the completion fanout walk is invisible without it.
+    "sliding_window_deps=Dense16"
     "qwen3_14b_decode=StressBatch16Seq3500"
 )
 
