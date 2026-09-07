@@ -1086,7 +1086,10 @@ std::optional<GraphDefinition> graph_layout_definition(const GraphRecording &rec
 // Every section is written in full here, so the destination's prior content does not
 // reach the device — with one exception, `fanout_offsets`, which is accumulated
 // rather than assigned and is therefore zeroed below before its first increment.
-// The alignment slack between sections is written by nobody and read by nobody.
+// Two kinds of byte are written by nobody and read by nobody: the alignment slack
+// between sections, and `InGraphTaskDefinition`'s interior padding, which the
+// per-field assignment below cannot reach and a static_assert on that struct's
+// size pins against further growth.
 bool graph_fill_definition(const GraphRecording &recording, GraphDefinition definition, std::byte *image) {
     if (image == nullptr) return false;
     always_assert(
@@ -1133,18 +1136,55 @@ bool graph_fill_definition(const GraphRecording &recording, GraphDefinition defi
         required_heap += output_bytes;
 
         if (source.fanin_count == 0) roots[root_cursor++] = static_cast<uint16_t>(i);
+        // Early-dispatch qualification, carrying the top-level submit path's
+        // conjunction over to the Definition's own data. An internal fanin of at
+        // least one excludes a body root, whose real gate is the outer shell's
+        // activation rather than this CSR. A body records once per shape and every
+        // execution replays it, so the verdict costs nothing per invocation.
+        //
+        // The top-level conjunction's Graph-shell term has no counterpart here:
+        // graph_begin refuses a nested recording, so no producer in a body is a
+        // Graph shell.
+        bool ed_candidate = source.fanin_count > 0 && !source.task_attrs.has_predicate() &&
+                            source.active_mask.to_shape() != ResourceShape::DUMMY;
+        const size_t row_begin = fanin_cursor;
         for (int32_t f = 0; f < source.fanin_count; ++f) {
             const int32_t producer = recording.internal_fanins[source.fanin_offset + f];
             if (producer >= i) return false;
             fanin_indices[fanin_cursor++] = static_cast<uint16_t>(producer);
             fanout_offsets[producer + 1]++;
+            if (!recording.tasks[producer].task_attrs.allow_early_resolve()) ed_candidate = false;
         }
         fanin_offsets[i + 1] = static_cast<int32_t>(fanin_cursor);
+        if (ed_candidate) {
+            // A candidate's row is sorted ascending, and the builder emits a
+            // producer before its consumers, so the row's tail names its deepest
+            // producer — the entry the completion chain's tail-first scan bets on.
+            // Every other row keeps its record order, which is the consumer's
+            // deduplicated operand order and names no depth.
+            std::sort(fanin_indices + row_begin, fanin_indices + fanin_cursor);
+            // Every producer of a candidate must record its publication state.
+            // Producers precede consumers, so each entry here was assigned its own
+            // ed_flags at its own iteration and this only ever adds to it.
+            for (size_t f = row_begin; f < fanin_cursor; ++f) {
+                tasks[fanin_indices[f]].ed_flags |= ED_FLAG_TRACKED;
+            }
+        }
 
         InGraphTaskDefinition &task = tasks[i];
         std::copy(source.kernel_ids.begin(), source.kernel_ids.end(), std::begin(task.kernel_id));
         task.active_mask = source.active_mask.raw();
-        task.task_attrs = source.task_attrs.raw();
+        // The recorded attrs carry the caller's early-resolve intent, which the
+        // qualification above consumes; no in-graph task reaches the device with
+        // that bit set.
+        TaskAttrs wire_attrs = source.task_attrs;
+        wire_attrs.set_early_resolve(false);
+        task.task_attrs = wire_attrs.raw();
+        // Assignment, not accumulation: this entry may hold a previous body's
+        // verdict, and only a consumer recorded later can add ED_FLAG_TRACKED to
+        // it, which happens after this write.
+        task.ed_flags = ed_candidate ? ED_FLAG_CANDIDATE : 0;
+        task.reserved = 0;
         task.logical_block_num = source.logical_block_num;
         task.total_required_subtasks = source.total_required_subtasks;
         task.tensor_count = source.tensor_count;
@@ -2236,8 +2276,11 @@ TaskOutputTensors graph_record_submit_in_graph_task(
     task.kernel_ids[static_cast<int>(SubtaskSlot::AIV0)] = aiv0_kernel_id;
     task.kernel_ids[static_cast<int>(SubtaskSlot::AIV1)] = aiv1_kernel_id;
     task.active_mask = active_mask;
+    // The recorded copy keeps the caller's early-resolve intent, which is the input
+    // graph_fill_definition qualifies this body's early dispatch against. The bit is
+    // cleared on the way into the Definition instead, so no in-graph task reaches
+    // the device carrying it.
     task.task_attrs = task_attrs;
-    task.task_attrs.set_early_resolve(false);
     task.logical_block_num = args.launch_spec.block_num();
     // Mirror prepare_task's contract: block_num must be positive and the subtask
     // count must fit int16_t. An out-of-contract value marks asynchronous
@@ -2946,9 +2989,17 @@ TaskOutputTensors OrchestratorState::alloc_tensors(const CoreTaskArgs &args) {
     // task — the same shape submit_dummy_task records — and replay reserves the
     // intermediate heap for every in-graph task anyway, so the outputs land at
     // addresses the replayed Definition derives for itself.
+    //
+    // An allocation is transparent to early-dispatch qualification inside a body
+    // exactly as it is at top level: its output is ready at creation, so it must
+    // never be the unflagged producer that disqualifies a consumer. The top-level
+    // path marks the slot after prepare_task, which this branch returns before, so
+    // here the recorded attrs carry the mark instead.
     if (active_graph_recording(orch) != nullptr) {
+        TaskAttrs alloc_attrs;
+        alloc_attrs.set_early_resolve(true);
         return graph_record_submit_in_graph_task(
-            orch, args, ActiveMask{}, TaskAttrs{}, INVALID_KERNEL_ID, INVALID_KERNEL_ID, INVALID_KERNEL_ID
+            orch, args, ActiveMask{}, alloc_attrs, INVALID_KERNEL_ID, INVALID_KERNEL_ID, INVALID_KERNEL_ID
         );
     }
 

@@ -1009,6 +1009,18 @@ target_sources(test_a5_hbg_ed_qualification PRIVATE
     ${HBG_ORCH_SHARED_SOURCES}
     ${CMAKE_SOURCE_DIR}/../../../src/common/platform/shared/aicpu/args_dump_aicpu.cpp
 )
+# Drives the real recording path to pin the in-graph early-dispatch verdicts a
+# Definition carries and the sorted fanin CSR row of a candidate.
+add_a2a3_hbg_runtime_test(test_hbg_graph_ed_qualification common/test_hbg_graph_ed_qualification.cpp)
+target_sources(test_hbg_graph_ed_qualification PRIVATE
+    ${HBG_ORCH_SHARED_SOURCES}
+    ${CMAKE_SOURCE_DIR}/../../../src/common/platform/shared/aicpu/args_dump_aicpu.cpp
+)
+add_a5_hbg_runtime_test(test_a5_hbg_graph_ed_qualification common/test_hbg_graph_ed_qualification.cpp)
+target_sources(test_a5_hbg_graph_ed_qualification PRIVATE
+    ${HBG_ORCH_SHARED_SOURCES}
+    ${CMAKE_SOURCE_DIR}/../../../src/common/platform/shared/aicpu/args_dump_aicpu.cpp
+)
 add_a2a3_hbg_runtime_test(test_hbg_graph_recording_bounds common/test_hbg_graph_recording_bounds.cpp)
 target_sources(test_hbg_graph_recording_bounds PRIVATE
     ${HBG_ORCH_SHARED_SOURCES}

@@ -170,9 +170,9 @@ TEST_F(HbgEdQualificationTest, WakeScanCursorResumesAndNeverRewalks) {
     auto &tasks = sm_handle->header->tasks;
     const int32_t *row = c_slot.to_payload().fanin_data();
 
-    // Never hung: cursor is the 0xFF sentinel and the first scan starts at the
+    // Never hung: cursor is the 0xFFFF sentinel and the first scan starts at the
     // row's tail.
-    EXPECT_EQ(c_slot.wake_scan_cursor, 0xFF);
+    EXPECT_EQ(c_slot.wake_scan_cursor, 0xFFFF);
     EXPECT_EQ(sched.classify_fanin_state(&c_slot), 2);
     EXPECT_EQ(c_slot.wake_scan_cursor, 2);
 

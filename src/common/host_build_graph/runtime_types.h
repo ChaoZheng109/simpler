@@ -646,6 +646,20 @@ struct alignas(64) ChipTaskSlotState {
     // ranges through claim_block_range().
     std::atomic<int16_t> next_block_idx{0};
 
+    // Completion-chain scan cursor: the fanin-row index this task last hung at
+    // in the wake list. The state a producer publishes is monotone, so indices
+    // above the cursor stay completed forever and every reclassification
+    // resumes here instead of re-walking the row's completed tail. 0xFFFF =
+    // never hung; the scan start folds it to the row's last index. The
+    // classifier owning this task is its only writer, so a plain field
+    // suffices.
+    //
+    // The row it indexes is the payload's inline fanin region for a GLOBAL task
+    // and the Definition's fanin CSR row for an IN_GRAPH one. The CSR row is
+    // bounded by the in-graph task cap rather than by CHIP_MAX_FANIN, which is
+    // what makes this wider than its early-dispatch twin below.
+    uint16_t wake_scan_cursor{0xFFFF};
+
     // Completion state, PENDING or COMPLETED only (never PUBLISHED). PENDING at
     // submit; COMPLETED at whichever completion path owns this slot. For an
     // IN_GRAPH task this is the readiness truth the device itself polls
@@ -683,23 +697,15 @@ struct alignas(64) ChipTaskSlotState {
     // task is hung on in the publish list. The row is sorted and the state byte
     // is monotone, so indices above the cursor are known-published forever
     // and every rescan resumes here — each row entry is loaded once per life.
+    // Only a GLOBAL task holds a publish list, so this indexes the payload's
+    // inline fanin region alone, which append_fanin_or_fail hard-caps at
+    // CHIP_MAX_FANIN with a named fatal.
     uint8_t ed_publish_scan_cursor{0};
-
-    // Completion-chain scan cursor: the fanin-row index this task last hung at
-    // in the wake list. The state byte is monotone, so indices above the
-    // cursor stay completed forever and every reclassification resumes here
-    // instead of re-walking the row's completed tail. 0xFF = never hung; the
-    // scan start folds it to fanin_count - 1. The classifier owning this task
-    // is its only writer, so a plain byte suffices.
-    uint8_t wake_scan_cursor{0xFF};
-    // Both cursors store fanin-row indices in a byte; 0xFF is wake's never-hung
-    // sentinel. append_fanin_or_fail hard-caps rows at CHIP_MAX_FANIN with a
-    // named fatal, and this ties any future cap raise to the cursor width.
-    static_assert(CHIP_MAX_FANIN < 0xFF, "scan cursors are uint8_t and 0xFF is reserved");
+    static_assert(CHIP_MAX_FANIN <= 0xFF, "ed_publish_scan_cursor is a uint8_t fanin-row index");
 
     // Keeps the record at one cache line. Members run widest-first up to the
     // byte block above, so their sizes sum to exactly the bytes this leaves.
-    uint8_t reserved[4];
+    uint8_t reserved[3];
 
     int32_t claim_block_range(int32_t block_limit, int32_t max_count, int32_t &start) {
         int16_t current = next_block_idx.load(std::memory_order_relaxed);
@@ -750,7 +756,7 @@ struct alignas(64) ChipTaskSlotState {
         // time cannot race a tracker.
         ed_flags = 0;
         ed_publish_scan_cursor = 0;
-        wake_scan_cursor = 0xFF;
+        wake_scan_cursor = 0xFFFF;
         ed_publish_list_head.store(nullptr, std::memory_order_relaxed);
         next_in_ed_publish_list = nullptr;
         // Note: active_mask and task_attrs are per-submit-constant fields
@@ -774,7 +780,7 @@ static_assert(sizeof(ChipTaskSlotState) == 64);
 static_assert(
     offsetof(ChipTaskSlotState, ed_publish_list_head) == 16, "the ED publish pair sits right after its wake-list twin"
 );
-static_assert(offsetof(ChipTaskSlotState, reserved) == 60, "ChipTaskSlotState grew interior padding");
+static_assert(offsetof(ChipTaskSlotState, reserved) == 61, "ChipTaskSlotState grew interior padding");
 
 // =============================================================================
 // Per-Task Storage

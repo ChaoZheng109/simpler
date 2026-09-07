@@ -27,6 +27,9 @@ static_assert(
     MAX_IN_GRAPH_TASKS <= (1 << TaskId::IN_GRAPH_LOCAL_ID_BITS),
     "an in-graph local id must fit the low field of an IN_GRAPH task id"
 );
+// A body's producers precede their consumers, so a fanin CSR row holds at most
+// task_count - 1 entries and the wake-scan cursor indexes one of them.
+static_assert(MAX_IN_GRAPH_TASKS - 1 < 0xFFFF, "a fanin CSR row index must fit ChipTaskSlotState::wake_scan_cursor");
 inline constexpr int32_t GRAPH_MATERIALIZE_SLICE_TASKS = 4;
 
 enum class GraphTensorSourceKind : uint8_t {
@@ -123,6 +126,13 @@ struct InGraphTaskDefinition {
     int32_t kernel_id[SUBTASK_SLOT_COUNT];
     uint8_t active_mask;
     uint8_t task_attrs;
+    // Early-dispatch verdicts (ED_FLAG_CANDIDATE / ED_FLAG_TRACKED), decided once
+    // per recorded shape rather than per execution: a body's structure is fixed by
+    // its Definition, so every execution of it qualifies the same tasks. Carries
+    // the same meaning as ChipTaskSlotState::ed_flags, against the Definition's
+    // fanin CSR instead of a payload fanin region.
+    uint8_t ed_flags;
+    uint8_t reserved;
     int16_t logical_block_num;
     int16_t total_required_subtasks;
     // One-based index into the Definition's predicate array; 0 means the task
@@ -231,6 +241,11 @@ static_assert(std::is_trivially_copyable_v<GraphScalarSourceRef>);
 static_assert(std::is_standard_layout_v<GraphScalarSourceRef>);
 static_assert(std::is_trivially_copyable_v<InGraphTaskDefinition>);
 static_assert(std::is_standard_layout_v<InGraphTaskDefinition>);
+// graph_fill_definition assigns this struct field by field, so its interior padding
+// is the one part of the in-graph task section no writer reaches. Nothing reads it
+// either, but pinning the size makes a new field's padding cost visible in the diff
+// that adds it rather than silently.
+static_assert(sizeof(InGraphTaskDefinition) == 80, "an InGraphTaskDefinition field changed the wire layout");
 static_assert(std::is_trivially_copyable_v<GraphPredicate>);
 static_assert(std::is_standard_layout_v<GraphPredicate>);
 static_assert(std::is_trivially_copyable_v<GraphBoundarySignature>);

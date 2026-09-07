@@ -627,7 +627,7 @@ struct SchedulerState {
         const int32_t start = s->wake_scan_cursor < p.fanin_count ? s->wake_scan_cursor : p.fanin_count - 1;
         for (int32_t i = start; i >= 0; i--) {
             if (!tasks.is_completed(fanin[i])) {
-                s->wake_scan_cursor = static_cast<uint8_t>(i);
+                s->wake_scan_cursor = static_cast<uint16_t>(i);
                 return i;
             }
         }
@@ -1130,18 +1130,46 @@ struct SchedulerState {
     // Orch owns dependency discovery and saves the immutable fanin wire.
     // Scheduler polling only chooses which already-wired producer a consumer
     // waits on at this instant; it never recomputes producer relationships.
-    int32_t graph_first_unmet_producer(const GraphExecution &execution, const ChipTaskSlotState &consumer) const {
+    //
+    // Returns -1 (every producer complete -> route to ready) or the consumer's
+    // own CSR row index of an unmet producer, which graph_producer_at maps back
+    // to that producer. Hanging on the producer that completes last minimises
+    // wake-list transfers (a consumer re-registered onto a second producer once
+    // its first one completes) and the CAS traffic those transfers put on the
+    // lists, so the scan walks the row from its tail.
+    //
+    // What the tail names depends on the row. A row holds the consumer's
+    // deduplicated operand order, which is a declaration order and carries no
+    // relation to producer depth. Only an early-dispatch candidate's row is
+    // sorted by producer index (graph_fill_definition), and a producer is
+    // emitted before its consumers, so there the tail is the deepest producer
+    // and the bet is exact. On an unsorted row the tail is the last-declared
+    // operand and the scan is a heuristic, no worse-founded than picking the
+    // head.
+    //
+    // Resumes at the wake-scan cursor: entries above it were complete at the
+    // last classification and completion is monotonic, so re-walking them
+    // cannot change the verdict.
+    int32_t graph_first_unmet_producer(const GraphExecution &execution, ChipTaskSlotState &consumer) const {
         const int32_t task_index = consumer.in_graph_local_id;
         const int32_t begin = execution.fanin_offsets[task_index];
-        const int32_t end = execution.fanin_offsets[task_index + 1];
-        for (int32_t edge = begin; edge < end; ++edge) {
-            const uint16_t producer_index = execution.fanin_indices[edge];
-            const ChipTaskSlotState &producer = execution.task_at(producer_index).slot;
+        const int32_t count = execution.fanin_offsets[task_index + 1] - begin;
+        const int32_t start = consumer.wake_scan_cursor < count ? consumer.wake_scan_cursor : count - 1;
+        for (int32_t row = start; row >= 0; --row) {
+            const ChipTaskSlotState &producer = execution.task_at(execution.fanin_indices[begin + row]).slot;
             if (producer.task_state.load(std::memory_order_acquire) != CHIP_TASK_COMPLETED) {
-                return static_cast<int32_t>(producer_index);
+                consumer.wake_scan_cursor = static_cast<uint16_t>(row);
+                return row;
             }
         }
         return -1;
+    }
+
+    // The producer a graph_first_unmet_producer row index names.
+    ChipTaskSlotState &
+    graph_producer_at(const GraphExecution &execution, const ChipTaskSlotState &consumer, int32_t row) const {
+        const int32_t begin = execution.fanin_offsets[consumer.in_graph_local_id];
+        return execution.task_at(execution.fanin_indices[begin + row]).slot;
     }
 
     void register_graph_wake(GraphExecution &execution, ChipTaskSlotState *producer, ChipTaskSlotState *consumer) {
@@ -1164,25 +1192,32 @@ struct SchedulerState {
                 push_ready_routed(consumer);
                 return;
             }
-            producer = &execution.task_at(unmet_producer).slot;
+            producer = &graph_producer_at(execution, *consumer, unmet_producer);
         }
     }
 
     uint32_t drain_graph_wake_list(GraphExecution &execution, ChipTaskSlotState &producer) {
-        uint32_t consumers_rescanned = 0;
+        uint32_t consumers_resolved = 0;
         ChipTaskSlotState *waiter = producer.wake_list_head.exchange(WAKE_LIST_SENTINEL, std::memory_order_acq_rel);
         while (waiter != nullptr && waiter != WAKE_LIST_SENTINEL) {
             ChipTaskSlotState *next = waiter->next_in_wake_list;
+            const int32_t local_id = waiter->in_graph_local_id;
+            if (execution.fanin_offsets[local_id + 1] - execution.fanin_offsets[local_id] == 1) {
+                push_ready_routed(waiter);  // single-producer waiter was waiting only on us
+                consumers_resolved++;
+                waiter = next;
+                continue;
+            }
             const int32_t unmet_producer = graph_first_unmet_producer(execution, *waiter);
             if (unmet_producer < 0) {
                 push_ready_routed(waiter);
             } else {
-                register_graph_wake(execution, &execution.task_at(unmet_producer).slot, waiter);
+                register_graph_wake(execution, &graph_producer_at(execution, *waiter, unmet_producer), waiter);
             }
-            consumers_rescanned++;
+            consumers_resolved++;
             waiter = next;
         }
-        return consumers_rescanned;
+        return consumers_resolved;
     }
 
     // Push every materialized-and-published root that has not been routed yet,
@@ -1227,7 +1262,7 @@ struct SchedulerState {
             if (unmet < 0) {
                 push_ready_routed(&task);
             } else {
-                register_graph_wake(execution, &execution.task_at(unmet).slot, &task);
+                register_graph_wake(execution, &graph_producer_at(execution, task, unmet), &task);
             }
         }
         execution.published_tasks.store(last, std::memory_order_release);

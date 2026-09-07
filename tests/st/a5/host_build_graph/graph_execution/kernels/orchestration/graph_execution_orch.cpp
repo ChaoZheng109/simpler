@@ -57,6 +57,11 @@ void layer(const GraphTaskArgs &args, int variant) {
     right_args.add_input(sum);
     right_args.add_output(intermediate);
     right_args.add_scalar(args.scalar(variant == 0 ? 1 : 0));
+    // Flagged alongside left so mul qualifies as an early-dispatch candidate on
+    // both its producers, which is what puts a sorted multi-entry fanin row and
+    // a pair of tracked producers on the device path. left and right are not
+    // themselves candidates: the fence dummy is an unflagged producer of both.
+    right_args.set_allow_early_resolve(true);
     TaskOutputTensors right_outputs = rt_submit_aiv_task(FUNC_ADD_SCALAR, right_args);
     simpler::hbg::Tensor right = right_outputs.get_ref(0);
 
