@@ -42,18 +42,65 @@ Multiple in-flight graph executions are not required for this race. Nor does
 an asynchronous error reported at a later native operator prove that the
 native operator caused it.
 
-## Two-phase retirement
+## Why the race is reachable
 
-Normal shutdown uses the existing all-AICPU-thread completion rendezvous:
-the last participant retires the entire worker group. Retirement proceeds in
-separate passes:
+The AICPU program and the AICore kernel are **two ops on two independent
+streams**. `DeviceRunnerBase` creates `stream_aicpu_` and `stream_aicore_`
+separately, and `DeviceRunner::launch_run` submits one kernel to each. Stream
+order constrains only the ops within a stream, and the launch path inserts no
+cross-stream event — it states outright that it "intentionally performs no
+stream synchronization". The launch and reap halves are also separable, and a
+prepared successor is allowed to overlap its predecessor's execution
+(`allow_prepared_successor`).
 
-1. Send EXIT to every initialized core before waiting for any ACK.
-2. Collect EXITED from the group, using one shared deadline.
-3. Reset dispatch to IDLE and close every acknowledged window. Read back the
+So a worker that returns early makes its AICore-stream op complete early, while
+the AICPU-stream op of the same round is still writing that core's window. The
+AICore stream is then free to start the next round's kernel. That is what the
+return gate closes: it makes "the AICore op finished" imply "the AICPU closed
+every window it owned".
+
+The neighbouring hazard already has a guard: `launch_run` clears each worker's
+`aicore_done` before the AICore kernel launches, because a prior run's report
+would otherwise "open a window on that run's physical_core_id". That guard
+covers a stale *report* being read by the new AICPU; the return gate covers the
+other direction, a stale *window write* landing on the new worker.
+
+## Retirement
+
+Each AICPU thread retires the cores it owns as it leaves the dispatch loop,
+before it reaches the completion latch. Core ownership is a partition —
+`assign_cores_to_threads` hands every cluster to exactly one scheduler thread —
+so those retirements run concurrently and never name the same core.
+
+Retirement must not hang off the completion latch. `ThreadCompletionGate` is a
+last-one-out counter, not a barrier: no participant waits, and a thread that
+returns early simply never arrives. Before this handoff existed, missing the
+latch cost a leaked runtime context; with workers blocked on gates, it would
+cost every core on the chip.
+
+`platform_retire_aicore_group` retires one claimed set in passes:
+
+1. Send EXIT to every core in the set before waiting for any ACK.
+2. Collect EXITED, using one shared deadline.
+3. Re-read the still-silent cores once. The shared deadline bounds the all-dead
+   case to a single timeout, but a core whose turn came after it expired never
+   got a wait of its own; this second read decides such a core on its own
+   evidence rather than on a peer's timeout.
+4. Reset dispatch to IDLE and close every acknowledged window. Read back the
    MMIO window and complete that read before publishing a GM return gate.
-4. Release-store `AICORE_POST_CLOSE_RELEASE` to each closed core's control word.
-5. AICore observes that word and only then returns.
+5. Release-store `AICORE_POST_CLOSE_RELEASE` to each closed core's gate.
+6. AICore observes that word and only then returns.
+
+The AICore wait is unbounded on purpose. A bounded wait cannot help: below the
+45 s op-execute timeout it would return while the AICPU may still be writing —
+reopening exactly this race — and at or above it, STARS reaps the op first and
+the timeout is unreachable. The guarantee is instead that the release always
+happens, which is why retirement sits on every thread's exit path rather than
+behind a latch. An AICore has no logging path, so the AICPU device log is the
+only place a blocked worker is named: grep for
+`AICore retirement: core N not released`. The host's `print_handshake_results`
+covers `workers[]` only and does not read `teardown_gates[]`, so there is no
+host-side view of the gate today.
 
 The A2/A3 onboard worker uses `ld_dev` for an uncached/bypass read and
 `dsb(DSB_DDR)` before return. The simulation uses an atomic acquire load.
@@ -71,29 +118,32 @@ This patch does not introduce a new reset operation or recovery policy.
 
 ## Cache-line and generation ownership
 
-`Handshake` contains two separately aligned 64-byte lines:
+The return gate lives in `teardown_gates[]`, a separate array beside
+`workers[]` in the device-copied image — not inside `Handshake`:
 
-| Line | Writer/access | Purpose |
-| ---- | ------------- | ------- |
-| First | Existing cached report/task publication protocol | Startup identity, ready report, dispatch-payload pointer |
-| Second | AICPU atomic stores; AICore bypass reads | Post-close permission to return |
+| Storage | Writer/access | Purpose |
+| ------- | ------------- | ------- |
+| `workers[i]` — one 64-byte line | Existing cached report/task publication protocol; the AICore flushes the whole line with `dcci(..., CACHELINE_OUT)` | Startup identity, ready report, dispatch-payload pointer |
+| `teardown_gates[i]` — one 64-byte line | AICPU atomic stores; AICore bypass reads | Post-close permission to return |
 
-The return gate must not share the line flushed by the AICore's startup or
-exit report. Otherwise a stale cached report writeback could overwrite the
-AICPU's release. No cached writes or cache maintenance may target the gate
-line while it is active. Compile-time layout and trivial-copy assertions
-guard the shared host/AICPU/AICore image.
+The gate must not sit in a line the AICore writes back, or a stale cached
+report writeback would overwrite the AICPU's release. Keeping the two in
+separate arrays makes that hold by construction rather than by field offset:
+no cached write or cache maintenance targeting `workers[i]` can reach the
+gate line. `static_assert(sizeof(Handshake) == 64)` pins the report line, and
+`AicoreTeardownControl` is `alignas(64)` with its own size assertion.
+
+`Handshake` therefore keeps its 64-byte layout and stride. HBG shares that
+definition with A5, and A5 is unaffected: its handshake image is byte-for-byte
+what it was, and its execution protocol and the public Python API are
+unchanged. A5 does link the `teardown_gates[]` array — it grows the device
+image by one cache line per worker — but never reads or writes it.
 
 The boot leader atomically resets the gate before publishing handshake setup
 and before any register window opens. Thus the preceding launch's value of
 1 cannot release a new launch. Reuse assumes the existing runtime lifecycle:
 the previous launch has completed before the same storage is re-armed. This
 is not a claim that one runtime image supports concurrent independent runs.
-
-HBG shares its `Handshake` definition with A5, so that internal image also
-grows from 64 to 128 bytes per worker on A5; the second line remains unused
-there. Host and device binaries must be rebuilt together. The public Python
-API and the A5 execution protocol are unchanged.
 
 ## Evidence and reproduction boundaries
 

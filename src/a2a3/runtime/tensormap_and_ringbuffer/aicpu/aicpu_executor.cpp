@@ -869,14 +869,23 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
         }
     }
 
+    // This thread has stopped dispatching, so it can retire the cores it owns
+    // without waiting for its peers. Retirement stays ahead of the completion
+    // count below because that count is a last-one-out latch, not a barrier: a
+    // thread that returns early never reaches it, and a worker whose gate was
+    // never released would spin until the op-execute timeout.
+    // platform_retire_aicore_group claims per core, so a concurrent
+    // emergency_shutdown sweep and this call retire each core exactly once.
+    int32_t shutdown_rc = sched_ctx_.shutdown(thread_idx, runtime);
+    if (shutdown_rc != 0 && run_rc == 0) {
+        run_rc = shutdown_rc;
+    }
+
     LOG_INFO("Thread %d: Completed", thread_idx);
 
     // Check if this is the last thread to finish
     int32_t prev_finished = finished_count_.fetch_add(1, std::memory_order_acq_rel);
     if (prev_finished + 1 == aicpu_thread_num_) {
-        // No participant can still dispatch when the group begins retirement.
-        const int32_t shutdown_rc = sched_ctx_.shutdown(runtime);
-        if (shutdown_rc != 0 && run_rc == 0) run_rc = shutdown_rc;
         aicpu_publish_task_timing_tail_usage(aicpu_thread_num_);
         finished_.store(true, std::memory_order_release);
         // Destroy the runtime context. sm_handle / rt are recreated every run so we

@@ -97,11 +97,14 @@ struct Handshake {
     volatile uint64_t task;         // DispatchPayload* published before register window-open
     volatile CoreType core_type;    // Core type: CoreType::AIC or CoreType::AIV (reported by AICore with aicore_done)
     volatile uint32_t physical_core_id;  // Physical core ID (reported by AICore with aicore_done)
-    AicoreTeardownControl teardown;      // A2/A3 post-close release; unused on A5
 } __attribute__((aligned(64)));
 
-static_assert(offsetof(Handshake, teardown) == 64);
-static_assert(sizeof(Handshake) == 128);
+// The AICore owns this line's writeback: it flushes the whole line with
+// dcci(..., CACHELINE_OUT) on its report and again on exit. A word the AICPU
+// must publish independently cannot live here — a stale line writeback would
+// overwrite it. The A2/A3 post-close return gates live in
+// Runtime::teardown_gates, one isolated line each; A5 leaves them unused.
+static_assert(sizeof(Handshake) == 64);
 static_assert(std::is_standard_layout_v<Handshake> && std::is_trivially_copyable_v<Handshake>);
 
 /**
@@ -145,7 +148,13 @@ class Runtime {
 public:
     // Handshake buffers for AICPU-AICore communication
     Handshake workers[RUNTIME_MAX_WORKER];  // Worker (AICore) handshake buffers
-    int worker_count;                       // Number of active workers
+    // A2/A3 post-close return gates, one isolated cache line per worker. The
+    // AICPU stores here only after that worker's register window is closed;
+    // the AICore bypass-loads its own entry and returns once it reads RELEASE.
+    // Separate from workers[] because the AICore flushes its whole Handshake
+    // line, which would overwrite a gate sharing it. Unused on A5.
+    AicoreTeardownControl teardown_gates[RUNTIME_MAX_WORKER];
+    int worker_count;  // Number of active workers
 
     // Execution parameters for AICPU scheduling.
     //
@@ -228,6 +237,7 @@ public:
     int get_aicpu_thread_num() const { return aicpu_thread_num; }
     void set_aicpu_thread_num(int n) { aicpu_thread_num = n; }
     Handshake *get_workers() { return workers; }
+    AicoreTeardownControl *get_teardown_gates() { return teardown_gates; }
     int32_t get_aicpu_allowed_cpu_count() const { return aicpu_allowed_cpu_count; }
     void set_aicpu_allowed_cpu_count(int32_t n) { aicpu_allowed_cpu_count = n; }
     int32_t get_aicpu_launch_count() const { return aicpu_launch_count; }

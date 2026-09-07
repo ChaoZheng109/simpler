@@ -274,5 +274,8 @@ __aicore__ __attribute__((weak)) void aicore_execute(__gm__ Runtime *runtime, in
 
     // Flush all dirty cache lines to HBM before kernel exit.
     dcci(my_hank, SINGLE_CACHE_LINE, CACHELINE_OUT);
-    wait_for_post_close_release(&my_hank->teardown.post_close_release);
+    // EXITED acknowledges quiescence; the AICPU opens this gate only after it
+    // has closed this core's fast-path window. The gate is a line of its own,
+    // outside the Handshake the dcci above writes back.
+    wait_for_post_close_release(&runtime->dev.teardown_gates[block_idx].post_close_release);
 }

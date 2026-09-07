@@ -94,37 +94,54 @@ int32_t platform_deinit_aicore_regs(uint64_t reg_addr) {
     return platform_finish_aicore_exit(reg_addr, platform_aicore_exit_deadline());
 }
 
-int32_t platform_retire_aicore_group(const AicoreExitTarget *targets, size_t count, uint64_t deadline) {
+int32_t platform_retire_aicore_group(const AicoreExitTarget *targets, size_t count, uint64_t deadline, bool *released) {
     if (count > PLATFORM_MAX_CORES || (count != 0 && targets == nullptr)) return -1;
     for (size_t i = 0; i < count; ++i) {
         if (targets[i].reg_addr == 0 || targets[i].teardown == nullptr) return -1;
     }
+
+    // Broadcast to the whole group before waiting on any member, so the cores
+    // drain concurrently and a dead core's wait does not serialize behind the
+    // cores ahead of it.
     for (size_t i = 0; i < count; ++i) {
         platform_signal_aicore_exit(targets[i].reg_addr);
     }
     wmb();
 
     bool acknowledged[PLATFORM_MAX_CORES] = {};
-    int32_t rc = 0;
     for (size_t i = 0; i < count; ++i) {
         while (read_reg(targets[i].reg_addr, RegId::COND) != AICORE_EXITED_VALUE) {
-            if (get_sys_cnt_aicpu() > deadline) {
-                rc = -1;
-                break;
-            }
+            if (get_sys_cnt_aicpu() > deadline) break;
         }
         acknowledged[i] = read_reg(targets[i].reg_addr, RegId::COND) == AICORE_EXITED_VALUE;
     }
+    // One shared deadline bounds the all-dead case to a single timeout, but it
+    // also means a core whose turn came after it expired never got a wait of
+    // its own. Such a core has had the rest of the pass to acknowledge; a
+    // second read decides it on its own evidence rather than on a peer's
+    // timeout, and costs one register read per still-silent core.
+    for (size_t i = 0; i < count; ++i) {
+        if (!acknowledged[i]) {
+            acknowledged[i] = read_reg(targets[i].reg_addr, RegId::COND) == AICORE_EXITED_VALUE;
+        }
+    }
+
+    int32_t rc = 0;
     for (size_t i = 0; i < count; ++i) {
         if (acknowledged[i]) {
             acknowledged[i] = platform_finish_aicore_exit(targets[i].reg_addr, deadline) == 0;
-            if (!acknowledged[i]) rc = -1;
         }
+        if (!acknowledged[i]) rc = -1;
     }
+    // An open return gate is only ever paired with a closed window: releasing a
+    // core whose window is still open is the ordering violation this protocol
+    // exists to prevent. Unreleased cores are reported through `released` so
+    // the caller can name them; the host recovery path owns them from here.
     for (size_t i = 0; i < count; ++i) {
         if (acknowledged[i]) {
             __atomic_store_n(&targets[i].teardown->post_close_release, AICORE_POST_CLOSE_RELEASE, __ATOMIC_RELEASE);
         }
+        if (released != nullptr) released[i] = acknowledged[i];
     }
     return rc;
 }

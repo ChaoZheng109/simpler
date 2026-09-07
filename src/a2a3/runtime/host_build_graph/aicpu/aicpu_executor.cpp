@@ -221,13 +221,13 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
         // A boot failure falls through to the common teardown at the end of
         // run() — it must NOT return early. This thread owns a core slice
         // (handshake_partition assigns [lo, total) to the last thread), so an
-        // early return would skip shutdown(thread_idx) — leaving its AICore
-        // cores spinning on an unclosed register window — and the completion
-        // gate never opens, so the host hangs into the op-execute
-        // timeout (507018) instead of seeing the failure. On failure: record it
-        // in run_rc, leave rt null so the dispatch block below skips, and still
-        // publish runtime_init_ready_ (single point at the block's end) so the
-        // peer threads stop spinning.
+        // early return would skip its shutdown() and leave those workers
+        // blocked on return gates no one will open, and the completion gate
+        // never opens, so the host hangs into the op-execute timeout (507018)
+        // instead of seeing the failure. On failure: record it in run_rc,
+        // leave rt null so the dispatch block below skips, and still publish
+        // runtime_init_ready_ (single point at the block's end) so the peer
+        // threads stop spinning.
         bool boot_ok = (prebuilt_arena != nullptr);
         if (!boot_ok) {
             LOG_ERROR("Thread %d: host-orch: prebuilt_arena_base is null", thread_idx);
@@ -352,12 +352,21 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
         }
     }
 
+    // This thread has stopped dispatching, so it can retire the cores it owns
+    // without waiting for its peers. Retirement stays ahead of the completion
+    // gate below because that gate is a last-one-out latch, not a barrier: a
+    // thread that returns early never reaches it, and a worker whose gate was
+    // never released would spin until the op-execute timeout.
+    // platform_retire_aicore_group claims per core, so a concurrent
+    // emergency_shutdown sweep and this call retire each core exactly once.
+    int32_t shutdown_rc = sched_ctx_.shutdown(thread_idx, runtime);
+    if (shutdown_rc != 0 && run_rc == 0) {
+        run_rc = shutdown_rc;
+    }
+
     LOG_INFO("Thread %d: Completed", thread_idx);
 
     completion_gate_.arrive_and_finalize_if_last(aicpu_thread_num_, [&] {
-        // No participant can still dispatch when the group begins retirement.
-        const int32_t shutdown_rc = sched_ctx_.shutdown(runtime);
-        if (shutdown_rc != 0 && run_rc == 0) run_rc = shutdown_rc;
         aicpu_publish_task_timing_tail_usage(aicpu_thread_num_);
         // Destroy the host_build_graph runtime. sm_handle / rt are recreated
         // every run, so always tear them down here.

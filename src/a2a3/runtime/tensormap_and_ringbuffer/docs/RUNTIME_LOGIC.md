@@ -603,7 +603,7 @@ Public surface (called from `AicpuExecutor::init/run/deinit`):
 | `init(runtime, aicpu_thread_num, sched_thread_num, regs_base)` | once per run | Handshake + assign cores, reset counters, latch `regs_base`, bind `func_id_to_addr_` |
 | `bind_runtime(rt)` | device-orch only | Wire `sched_` to `rt->scheduler` once the orchestrator thread creates `rt` |
 | `resolve_and_dispatch(runtime, thread_idx)` | per scheduler thread | Main dispatch loop |
-| `shutdown(runtime)` | last AICPU thread on exit | Group-wide EXIT / ACK / CLOSE / post-close release; PMU finalize when enabled. No-op after emergency retirement has claimed the handoff. See [worker retirement](../../../../../docs/troubleshooting/a2a3-worker-retirement.md) |
+| `shutdown(thread_idx, runtime)` | per thread on exit, before the completion count | EXIT / ACK / CLOSE / post-close release for this thread's own cores; PMU finalize when enabled. Orchestrator threads own none and no-op. Claims per core, so cores an emergency retirement already took are skipped. See [worker retirement](../../../../../docs/troubleshooting/a2a3-worker-retirement.md) |
 | `on_orchestration_done(runtime, rt, thread_idx, total_tasks)` | orchestrator thread | Publish core assignments, latch task count, fold inline-completed tasks, flip `orchestrator_done_` (or `emergency_shutdown` on fatal) |
 | `deinit()` | once per run | Reset every scheduler-owned field to its post-construction default |
 | Read-only accessors | various | `aic_count()` / `aiv_count()` / `is_completed()` / `completed_tasks_count()` |

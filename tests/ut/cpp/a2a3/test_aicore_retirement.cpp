@@ -84,7 +84,7 @@ TEST(AicoreRetirementDeathTest, AicCannotReturnBeforeFastPathClose) {
 
 void check_repeated_retirement(CoreType core_type) {
     Runtime runtime;
-    auto &control = runtime.get_workers()[0].teardown;
+    auto &control = runtime.get_teardown_gates()[0];
     for (int generation = 0; generation < 32; ++generation) {
         registers.fill(0);
         __atomic_store_n(&control.post_close_release, 0U, __ATOMIC_RELEASE);
@@ -187,6 +187,32 @@ TEST(AicoreRetirement, MissingAckDoesNotCloseOrReleaseThatCore) {
     EXPECT_EQ(__atomic_load_n(&controls[1].post_close_release, __ATOMIC_ACQUIRE), AICORE_POST_CLOSE_RELEASE);
 }
 
+// An unreleased worker blocks on a gate it cannot log about, so the caller's
+// only way to name it is this per-target report.
+TEST(AicoreRetirement, ReportsWhichTargetsWereReleased) {
+    alignas(64) std::array<uint32_t, 0x500 / sizeof(uint32_t)> peer_registers{};
+    AicoreTeardownControl controls[2]{};
+    const AicoreExitTarget targets[] = {
+        {reinterpret_cast<uint64_t>(registers.data()), &controls[0]},
+        {reinterpret_cast<uint64_t>(peer_registers.data()), &controls[1]},
+    };
+    registers.fill(0);
+    for (const auto &target : targets)
+        platform_init_aicore_regs(target.reg_addr);
+    write_reg(targets[1].reg_addr, RegId::COND, AICORE_EXITED_VALUE);
+
+    bool released[2] = {true, false};
+    EXPECT_EQ(platform_retire_aicore_group(targets, 2, 0, released), -1);
+    EXPECT_FALSE(released[0]);
+    EXPECT_TRUE(released[1]);
+
+    write_reg(targets[0].reg_addr, RegId::COND, AICORE_EXITED_VALUE);
+    bool all_released[2] = {};
+    EXPECT_EQ(platform_retire_aicore_group(targets, 2, platform_aicore_exit_deadline(), all_released), 0);
+    EXPECT_TRUE(all_released[0]);
+    EXPECT_TRUE(all_released[1]);
+}
+
 TEST(AicoreRetirement, RejectsInvalidGroupBeforeTouchingRegisters) {
     AicoreTeardownControl control{};
     registers.fill(0);
@@ -204,7 +230,10 @@ TEST(AicoreRetirement, RejectsInvalidGroupBeforeTouchingRegisters) {
 
 // Only handshake storage is used by these idle-worker tests. Keep host-side
 // orchestration and the profiling service out of this executor-level fixture.
-Runtime::Runtime() { std::memset(get_workers(), 0, sizeof(Handshake) * RUNTIME_MAX_WORKER); }
+Runtime::Runtime() {
+    std::memset(get_workers(), 0, sizeof(Handshake) * RUNTIME_MAX_WORKER);
+    std::memset(get_teardown_gates(), 0, sizeof(AicoreTeardownControl) * RUNTIME_MAX_WORKER);
+}
 
 volatile uint8_t *sim_get_reg_base() { return reinterpret_cast<volatile uint8_t *>(registers.data()); }
 uint32_t sim_get_physical_core_id() { return 0; }

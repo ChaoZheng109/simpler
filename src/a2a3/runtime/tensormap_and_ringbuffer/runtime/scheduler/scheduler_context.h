@@ -102,8 +102,10 @@ public:
     // Main scheduler thread entry: poll completion + dispatch ready tasks.
     int32_t resolve_and_dispatch(Runtime *runtime, int32_t thread_idx);
 
-    // Retire all cores after every AICPU participant has stopped dispatching.
-    int32_t shutdown(Runtime *runtime);
+    // Retire the cores this thread owns, on its way out of resolve_and_dispatch.
+    // Orchestrator threads own none and no-op. Runs before the completion
+    // latch, so no run() exit path can leave a worker blocked on its gate.
+    int32_t shutdown(int32_t thread_idx, Runtime *runtime);
 
     // Run all post-orchestration scheduler bookkeeping:
     //  - publishes core assignments to the perf collector (SIMPLER_DFX)
@@ -177,7 +179,10 @@ private:
     std::atomic<bool> orchestrator_done_{false};
     std::atomic<bool> completed_{false};
     std::atomic<bool> fatal_shutdown_started_{false};
-    std::atomic<bool> retirement_started_{false};
+    // Per-core retirement claim. The winner owns that core's register window
+    // and return gate for the rest of the run; every other path leaves both
+    // alone. Indexed by core id, reset in pre_handshake_init.
+    std::atomic<bool> core_retired_[PLATFORM_MAX_CORES];
     uint64_t *func_id_to_addr_{nullptr};
 
     // --- Thread/core configuration ---
@@ -223,7 +228,10 @@ private:
     // exit to every handshake'd core. Idempotent.
     bool begin_emergency_shutdown();
     void signal_emergency_shutdown(Runtime *runtime);
-    int32_t retire_cores(Runtime *runtime);
+    // Claim and retire the named cores. Cores already claimed elsewhere are
+    // skipped, so callers may name overlapping sets.
+    int32_t retire_cores(Runtime *runtime, const int32_t *core_ids, int32_t core_num);
+    int32_t retire_all_cores(Runtime *runtime);
     void emergency_shutdown(Runtime *runtime);
 
     // =========================================================================

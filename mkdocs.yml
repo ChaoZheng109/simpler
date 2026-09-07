@@ -174,4 +174,5 @@ nav:
       - macOS build: troubleshooting/macos-build.md
       - macOS libomp collision: troubleshooting/macos-libomp-collision.md
       - cpput gtest ABI: troubleshooting/ut-cpp-gtest-abi.md
+      - a2a3 worker retirement: troubleshooting/a2a3-worker-retirement.md
   - Investigations: investigations/README.md

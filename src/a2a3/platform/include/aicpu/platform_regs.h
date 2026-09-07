@@ -179,11 +179,19 @@ struct AicoreExitTarget {
     AicoreTeardownControl *teardown;
 };
 
-// One caller owns the group after dispatch has stopped. Signal every core,
-// collect every ACK, close every responsive window, then release the workers.
-// Unacknowledged cores retain a closed return gate for host recovery.
-// Returns 0 on success, -1 on timeout or invalid targets; uses one deadline.
-int32_t platform_retire_aicore_group(const AicoreExitTarget *targets, size_t count, uint64_t deadline);
+// Retires one exclusively-claimed set of cores: signal every member, collect
+// every ACK against one shared deadline, close every acknowledged window, then
+// release those workers. Callers claim their targets first, so concurrent
+// callers never name the same core and the set need not be the whole chip.
+// An unacknowledged core is neither closed nor released and stays the host
+// recovery path's responsibility.
+//
+// `released`, when non-null, receives one flag per target and lets the caller
+// name the cores it failed to retire; this layer takes no logging dependency.
+// Returns 0 when every target was released, -1 on timeout or invalid targets.
+int32_t platform_retire_aicore_group(
+    const AicoreExitTarget *targets, size_t count, uint64_t deadline, bool *released = nullptr
+);
 
 /**
  * Variant-specific AICore deinit wait timeout, in ticks of get_sys_cnt_aicpu.
