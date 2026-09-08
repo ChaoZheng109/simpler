@@ -380,8 +380,10 @@ directly, so boundary metadata does not need to expand to full `ChipTensor`
 records on either side of H2D.
 
 In-graph tasks consume no task-table slots. Their descriptor, payload, slot
-state, and argument pools live in the tail of the outer `GRAPH` task's own heap block,
-past `required_heap`: `[GraphExecution][ChipTaskStorage...][tensor pool][scalar pool]`. One
+state, argument pools, and completion states live in the tail of the outer `GRAPH` task's
+own heap block, past `required_heap`:
+`[GraphExecution][ChipTaskStorage...][tensor pool][scalar pool][task_states]`. The state
+array is last because a byte needs no alignment, so appending it moves no other region. One
 `TaskAllocator::alloc` covers both the packed outputs and this execution storage,
 so they are reclaimed together without a separate device allocation or release path.
 
@@ -448,8 +450,9 @@ dependency wiring remains an Orchestrator responsibility:
   operand order, so the tail is exactly the deepest producer only on an
   early-dispatch candidate's row, which recording sorts by producer index;
   elsewhere the direction is a heuristic;
-- an in-graph task's release/acquire `task_state` is its Graph-local completion truth, so
-  such tasks need neither a shared-memory `task_states` byte nor a task-table slot;
+- an in-graph task's completion truth is its execution's own `task_states` byte,
+  the same shape the task header gives a GLOBAL task, so such tasks need neither
+  a task-table slot nor a byte in the shared-memory array;
 - producer completion closes and drains only its current wake-list rather than
   traversing the saved fanout CSR;
 - a woken consumer with a single producer enters its shape queue directly; any

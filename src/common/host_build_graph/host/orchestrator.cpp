@@ -1519,10 +1519,8 @@ static bool prepare_task(
     // Fields already zeroed by the reset_for_reuse() above:
     //   wake_list_head=nullptr, next_in_wake_list=nullptr,
     //   any_subtask_deferred=false, completed_subtasks=0, next_block_idx=0
-    // task_state is set to PENDING here as the orchestrator populates the slot
     // (host_build_graph does not recycle slots at runtime, so there is no
     // post-CONSUMED reset path).
-    out->slot_state->task_state.store(CHIP_TASK_PENDING, std::memory_order_relaxed);
     out->slot_state->total_required_subtasks = static_cast<int16_t>(total_required_subtasks);
     out->slot_state->logical_block_num = block_num;
     out->slot_state->active_mask = active_mask;
@@ -2098,7 +2096,6 @@ bool graph_submit_outer(
     );
     orch->tensor_pool_cursor += tensor_slots;
     orch->scalar_pool_cursor += scalar_span;
-    slot.task_state.store(CHIP_TASK_PENDING, std::memory_order_relaxed);
     slot.active_mask = ActiveMask{};
     slot.task_attrs = TaskAttrs{};
     slot.total_required_subtasks = 0;
@@ -3042,9 +3039,8 @@ TaskOutputTensors OrchestratorState::alloc_tensors(const CoreTaskArgs &args) {
         // subtasks to retire. Running the full on_task_complete path
         // would only pay unnecessary fanout_lock / traversal overhead here.
         // The generic slot initialization done in prepare_task() is still
-        // required — a consumer reads this slot's task_attrs and completion
-        // mirror, both set below — but worker dispatch fields are never
-        // observed for hidden alloc tasks.
+        // required — a consumer reads this slot's task_attrs, set below — but
+        // worker dispatch fields are never observed for hidden alloc tasks.
         //
         // Flag the creator so it does NOT suppress its consumers' early-dispatch.
         // Under the direct-only model an unflagged producer disqualifies its
@@ -3053,12 +3049,11 @@ TaskOutputTensors OrchestratorState::alloc_tensors(const CoreTaskArgs &args) {
         // codegen task there is no Arg-driven hint to honor here, so mark it
         // unconditionally.
         prepared.slot_state->task_attrs.set_early_resolve(true);
-        prepared.slot_state->mark_completed();  // GLOBAL task, so task_state is only the completion mirror
         // Polling: pre-set the device-visible task_states byte in the H2D
-        // image. Consumers poll task_states (not the slot's task_state), so a
-        // hidden-alloc producer completed here on the host must publish its byte
-        // too — otherwise every consumer register_wakes on a producer that never
-        // runs on device and the run hangs.
+        // image. That byte is the only completion a consumer polls, so a
+        // hidden-alloc producer completed here on the host must publish it —
+        // otherwise every consumer register_wakes on a producer that never runs
+        // on device and the run hangs.
         SharedMemoryTaskHeader &done_tasks = orch->sm_header->tasks;
         int32_t done_local = prepared.task_id.local_id();
         done_tasks.store_completed(done_local);

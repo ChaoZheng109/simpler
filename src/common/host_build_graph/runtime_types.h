@@ -253,7 +253,7 @@ struct TaskPayload;        // Forward declaration (defined below)
  *
  * Stored in the TaskDescriptor table in shared memory.
  * Contains static identification and buffer pointers only.
- * Dynamic scheduling state (fanin/fanout/task_state) is in ChipTaskSlotState.
+ * Dynamic scheduling state (fanin/fanout/wake list) is in ChipTaskSlotState.
  *
  * Fields set by Orchestrator at submission, read by Scheduler for dispatch.
  */
@@ -577,21 +577,11 @@ static_assert(sizeof(simpler::hbg::Tensor) == 128, "simpler::hbg::Tensor must be
  * is published by marking this task complete + draining its wake list. There is
  * no fanout adjacency, refcount, or per-task lock here.
  *
- * Which field carries that completion state depends on which task table the slot
- * belongs to, and both are load-bearing:
- *
- *   - A GLOBAL task holds a slot in the SM task table, so its readiness truth is
- *     `task_states[local_id]` — a byte-per-slot array, which is what lets a
- *     fanin scan read many producers out of one cache line. `task_state` is then
- *     a mirror, read only by the cold-path stall dump.
- *   - An IN_GRAPH task lives in its Graph's own storage and has no slot in that
- *     table, hence no byte there. `task_state` IS its readiness truth, read on
- *     the device by graph_first_unmet_producer; only the outer Graph shell (a
- *     GLOBAL task) gets its byte advanced when the body finishes.
- *
- * So a completion publishes both for a GLOBAL task and `task_state` alone for an
- * IN_GRAPH one. `task_state` itself only ever holds PENDING or COMPLETED; the
- * PUBLISHED middle value exists in the task_states array alone.
+ * Completion state is not here. It lives in a byte-per-task array — the shared
+ * memory task header's for a GLOBAL task, the GraphExecution's for an IN_GRAPH
+ * one — because a fanin scan reads many producers' states at once, which a
+ * cache line of that array answers and would take one line per producer inside
+ * this struct's stride.
  */
 struct alignas(64) ChipTaskSlotState {
     // --- Wake list: last-fanin notification (intrusive, lock-free) ---
@@ -660,14 +650,6 @@ struct alignas(64) ChipTaskSlotState {
     // what makes this wider than its early-dispatch twin below.
     uint16_t wake_scan_cursor{0xFFFF};
 
-    // Completion state, PENDING or COMPLETED only (never PUBLISHED). PENDING at
-    // submit; COMPLETED at whichever completion path owns this slot. For an
-    // IN_GRAPH task this is the readiness truth the device itself polls
-    // (graph_first_unmet_producer); for a GLOBAL task it mirrors
-    // task_states[slot], which is what the device reads instead. Also read by
-    // the cold-path stall dump.
-    std::atomic<ChipTaskState> task_state;
-
     // --- Set per-submit (depend on task inputs) ---
     ActiveMask active_mask;  // Bitmask of active subtask slots (set once)
     // Single per-task attributes byte (early-dispatch hint, sync_start,
@@ -705,7 +687,7 @@ struct alignas(64) ChipTaskSlotState {
 
     // Keeps the record at one cache line. Members run widest-first up to the
     // byte block above, so their sizes sum to exactly the bytes this leaves.
-    uint8_t reserved[3];
+    uint8_t reserved[4];
 
     int32_t claim_block_range(int32_t block_limit, int32_t max_count, int32_t &start) {
         int16_t current = next_block_idx.load(std::memory_order_relaxed);
@@ -724,12 +706,6 @@ struct alignas(64) ChipTaskSlotState {
         return 0;
     }
 
-    // Publishes completion. For an IN_GRAPH task this store is the whole
-    // publication — that task has no task_states byte. For a GLOBAL task it
-    // accompanies the task_states[slot] store that on_mixed_task_complete
-    // makes, and is the copy the cold-path stall dump reads.
-    void mark_completed() { task_state.store(CHIP_TASK_COMPLETED, std::memory_order_release); }
-
     void mark_any_subtask_deferred() { any_subtask_deferred.store(true, std::memory_order_release); }
 
     bool has_any_subtask_deferred() const { return any_subtask_deferred.load(std::memory_order_acquire); }
@@ -738,8 +714,8 @@ struct alignas(64) ChipTaskSlotState {
      * Reset dynamic scheduling fields to their pristine values. Called once per
      * slot as the orchestrator claims it in prepare_task, and again as an
      * in-graph task's storage is materialized — whole-graph-resident hbg has no
-     * execution-time slot recycle. Skips task_state (the orchestrator sets PENDING
-     * when it populates the slot).
+     * execution-time slot recycle. The task's completion state is not here; its
+     * owning array is cleared alongside this call.
      * wake_list_head starts nullptr (open for registration), NOT SENTINEL.
      */
     void reset_for_reuse() {
@@ -780,7 +756,7 @@ static_assert(sizeof(ChipTaskSlotState) == 64);
 static_assert(
     offsetof(ChipTaskSlotState, ed_publish_list_head) == 16, "the ED publish pair sits right after its wake-list twin"
 );
-static_assert(offsetof(ChipTaskSlotState, reserved) == 61, "ChipTaskSlotState grew interior padding");
+static_assert(offsetof(ChipTaskSlotState, reserved) == 60, "ChipTaskSlotState grew interior padding");
 
 // =============================================================================
 // Per-Task Storage

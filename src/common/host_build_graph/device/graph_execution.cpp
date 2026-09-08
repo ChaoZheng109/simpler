@@ -37,6 +37,7 @@ GraphExecution *acquire_execution_storage(
     execution->task_storage = reinterpret_cast<ChipTaskStorage *>(base + layout.tasks_offset);
     execution->task_tensor_pool = reinterpret_cast<simpler::hbg::Tensor *>(base + layout.tensors_offset);
     execution->task_scalar_pool = reinterpret_cast<uint64_t *>(base + layout.scalars_offset);
+    execution->task_states = reinterpret_cast<std::atomic<ChipTaskState> *>(base + layout.states_offset);
     return execution;
 }
 
@@ -412,7 +413,10 @@ GraphMaterializeResult graph_execution_materialize_slice(
         task.packed_buffer_end = reinterpret_cast<void *>(outer_base + task_offset + output_bytes);
 
         slot.reset_for_reuse();
-        slot.task_state.store(CHIP_TASK_PENDING, std::memory_order_relaxed);
+        // The readiness a consumer polls, cleared before this task becomes
+        // visible to one: materialization publishes tasks incrementally, so a
+        // peer may scan this index as soon as published_tasks passes it.
+        execution.reset_task_state(i);
         slot.active_mask = ActiveMask(source.active_mask);
         slot.task_attrs = TaskAttrs(source.task_attrs);
         slot.total_required_subtasks = source.total_required_subtasks;

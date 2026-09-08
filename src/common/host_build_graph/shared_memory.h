@@ -72,17 +72,17 @@ struct alignas(64) SharedMemoryTaskHeader {
     // (is_completed) and the ED publish scan (is_published). Reset per-slot in
     // orch::prepare_task as each slot is claimed. Indexed by local task id, like
     // the storage array — so it covers GLOBAL tasks only. An IN_GRAPH task holds
-    // no slot here and publishes completion through its own
-    // ChipTaskSlotState::task_state instead; the Graph's outer shell is the GLOBAL
-    // task that carries the byte for the whole body.
+    // no slot here and publishes completion through its GraphExecution's array
+    // of the same shape; the Graph's outer shell is the GLOBAL task that carries
+    // the byte for the whole body.
     //
     // A byte array of its own rather than a field of ChipTaskStorage: a fanin scan
     // reads many producers' states at once, which one cache line answers here and
     // would take one line per producer inside the storage stride.
     //
     // A hidden-alloc task is the one byte the host presets to COMPLETED: it
-    // completes during orchestration, and a consumer polls this array rather than
-    // task_state.
+    // completes during orchestration rather than on device, and a consumer polls
+    // this array to see it.
     //
     // Reads are only meaningful under the init-on-write discipline above, and
     // the ordered comparisons make that stricter than a bit test would: an

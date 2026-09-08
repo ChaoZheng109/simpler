@@ -219,7 +219,7 @@ void SchedulerContext::log_stall_diagnostics(
         // below it was claimed by the host orchestrator, and no slot above it was.
         for (int32_t si = 0; si < task_count; si++) {
             ChipTaskSlotState &slot_state = tasks.get_slot_state_by_task_id(si);
-            ChipTaskState st = slot_state.task_state.load(std::memory_order_relaxed);
+            const bool completed = tasks.is_completed(si, std::memory_order_relaxed);
             // Polling: no fanin_refcount. Recompute met/total from the inline
             // fanin ids vs the task_states array (rc = satisfied producers,
             // fi = raw producer count) so the stall dump still shows readiness.
@@ -235,10 +235,10 @@ void SchedulerContext::log_stall_diagnostics(
             int32_t kid_aiv0 = slot_state.to_descriptor().kernel_id[1];
             int32_t kid_aiv1 = slot_state.to_descriptor().kernel_id[2];
             int64_t task_id = static_cast<int64_t>(slot_state.to_descriptor().task_id.raw);
-            if (st >= CHIP_TASK_COMPLETED) continue;
-            // The slot mirror has no intermediate ready/running value — it
-            // stays PENDING until the worker stores COMPLETED (PUBLISHED
-            // lives in the task_states array, not here). Classify
+            if (completed) continue;
+            // The state byte has no intermediate ready/running value — a task
+            // stays PENDING until it publishes PUBLISHED or COMPLETED, neither
+            // of which distinguishes queued from running. Classify
             // by the ground truth instead: a slot is RUNNING iff some
             // core has it as running_slot_state. A task occupies at most
             // 3 cores (one cluster), all under the same owner thread by

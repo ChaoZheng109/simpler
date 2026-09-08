@@ -975,25 +975,29 @@ bool create_scheduler_state(
     uint64_t aic_worker_demand = 0;
     uint64_t aiv_worker_demand = 0;
     int64_t legacy_shape_task_id = -1;
+    // The progress byte is PENDING or COMPLETED throughout this walk, never
+    // PUBLISHED: that value is stored only by the device dispatch path, which
+    // has not run yet, and orch::prepare_task resets every claimed slot this
+    // bind. So `is_completed` and its negation partition the tasks here, and a
+    // future host-side publication would silently change what these tests mean.
     for (int64_t task_id = 0; task_id < total_tasks; ++task_id) {
         ChipTaskSlotState &slot = host_sm_handle.header->tasks.get_slot_state_by_task_id(task_id);
         SchedulerTaskShape shape{};
         SchedulerGraphResult status = scheduler_classify_task_shape(host_graph, task_id, &shape);
         bool inline_dispatch_task = false;
         if (status != SchedulerGraphResult::OK) {
-            bool inline_completed_task = status == SchedulerGraphResult::UNSUPPORTED_SHAPE &&
-                                         slot.active_mask.raw() == 0 && slot.logical_block_num == 1 &&
-                                         slot.total_required_subtasks == 0 &&
-                                         slot.task_state.load(std::memory_order_acquire) == CHIP_TASK_COMPLETED &&
-                                         slot.task_attrs.allow_early_resolve() &&
-                                         !slot.task_attrs.requires_sync_start() && !slot.task_attrs.has_predicate();
+            bool inline_completed_task =
+                status == SchedulerGraphResult::UNSUPPORTED_SHAPE && slot.active_mask.raw() == 0 &&
+                slot.logical_block_num == 1 && slot.total_required_subtasks == 0 &&
+                host_sm_handle.header->tasks.is_completed(task_id) && slot.task_attrs.allow_early_resolve() &&
+                !slot.task_attrs.requires_sync_start() && !slot.task_attrs.has_predicate();
             if (inline_completed_task) {
                 inline_completed_task_ids.push_back(task_id);
                 continue;
             }
             inline_dispatch_task = status == SchedulerGraphResult::UNSUPPORTED_SHAPE && slot.active_mask.raw() == 0 &&
                                    slot.logical_block_num == 1 && slot.total_required_subtasks == 0 &&
-                                   slot.task_state.load(std::memory_order_acquire) == CHIP_TASK_PENDING &&
+                                   !host_sm_handle.header->tasks.is_completed(task_id) &&
                                    !slot.task_attrs.requires_sync_start() && !slot.task_attrs.has_predicate();
             if (!inline_dispatch_task) {
                 LOG_ERROR(
@@ -1030,7 +1034,7 @@ bool create_scheduler_state(
         const uint32_t expected_subtasks = logical_block_num * active_subtasks;
         if ((!inline_dispatch_task && (slot.active_mask.raw() != classified_active_mask ||
                                        static_cast<uint32_t>(slot.total_required_subtasks) != expected_subtasks)) ||
-            expected_subtasks > UINT16_MAX || slot.task_state.load(std::memory_order_acquire) != CHIP_TASK_PENDING ||
+            expected_subtasks > UINT16_MAX || host_sm_handle.header->tasks.is_completed(task_id) ||
             (slot.task_attrs.has_predicate() && (active_subtasks != 1 || logical_block_num != 1))) {
             LOG_ERROR(
                 "A5 HBG AICore scheduler: task id=%" PRId64

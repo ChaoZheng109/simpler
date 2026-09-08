@@ -389,6 +389,19 @@ struct GraphExecution {
     ChipTaskSlotState *outer_slot{nullptr};
     ChipTaskStorage *tasks{nullptr};
     ChipTaskStorage *task_storage{nullptr};
+    // Polling-progress state, one ChipTaskState byte per in-graph task, in the
+    // storage tail. Carries the same PENDING -> PUBLISHED -> COMPLETED meaning
+    // as the shared-memory task_states array a GLOBAL task uses, against
+    // in-graph local ids instead of task-table slots, so both cohorts answer
+    // readiness the same way.
+    //
+    // A byte array of its own rather than a field of ChipTaskStorage, for the
+    // reason the top-level array gives: a fanin scan reads many producers'
+    // states at once, which a couple of cache lines answer here and would take
+    // one line per producer inside the ChipTaskStorage stride. It is also
+    // read-mostly — each byte is written once per execution at completion —
+    // so concurrent scanners share those lines rather than contend for them.
+    std::atomic<ChipTaskState> *task_states{nullptr};
     // This execution's task argument pools, in the storage tail past task_storage.
     // Every task payload's tensor and scalar deltas point here; its pool position is
     // the Definition's tensor_offset / scalar_offset.
@@ -403,6 +416,21 @@ struct GraphExecution {
     int32_t boundary_scalar_count{0};
 
     ChipTaskStorage &task_at(int32_t index) const { return task_storage[index]; }
+
+    // Readiness accessors, named and ordered as SharedMemoryTaskHeader's so a
+    // reader of one cohort reads the other the same way. The byte only ever
+    // advances, so an index a scan has already cleared stays cleared.
+    bool is_completed(int32_t index, std::memory_order order = std::memory_order_acquire) const {
+        return task_states[index].load(order) >= CHIP_TASK_COMPLETED;
+    }
+
+    void store_completed(int32_t index, std::memory_order order = std::memory_order_release) const {
+        task_states[index].store(CHIP_TASK_COMPLETED, order);
+    }
+
+    void reset_task_state(int32_t index) const {
+        task_states[index].store(CHIP_TASK_PENDING, std::memory_order_relaxed);
+    }
 };
 
 static_assert(std::is_trivially_destructible_v<ChipTaskStorage>);
@@ -444,6 +472,7 @@ struct GraphExecutionStorageLayout {
     size_t tasks_offset;
     size_t tensors_offset;
     size_t scalars_offset;
+    size_t states_offset;
     size_t total_bytes;
 };
 
@@ -458,7 +487,12 @@ inline bool graph_execution_storage_layout(
     out->tasks_offset = (sizeof(GraphExecution) + ALIGNMENT - 1) & ~(ALIGNMENT - 1);
     out->tensors_offset = out->tasks_offset + static_cast<size_t>(task_count) * sizeof(ChipTaskStorage);
     out->scalars_offset = out->tensors_offset + static_cast<size_t>(tensor_arg_count) * sizeof(simpler::hbg::Tensor);
-    out->total_bytes = out->scalars_offset + static_cast<size_t>(scalar_arg_count) * sizeof(uint64_t);
+    // The state array is last because it is the one region with no alignment of
+    // its own: a byte needs none, so appending it disturbs no other section's
+    // offset. Every other region is entered through a typed pointer whose
+    // alignment the base already guarantees.
+    out->states_offset = out->scalars_offset + static_cast<size_t>(scalar_arg_count) * sizeof(uint64_t);
+    out->total_bytes = out->states_offset + static_cast<size_t>(task_count) * sizeof(std::atomic<ChipTaskState>);
     return true;
 }
 

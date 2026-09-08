@@ -277,6 +277,8 @@ protected:
     // ChipTaskStorage holds atomics, so it is neither copyable nor movable and
     // cannot back a vector; this constructs each element in place.
     std::unique_ptr<ChipTaskStorage[]> storage;
+    // The execution's readiness array, allocated with the storage it indexes.
+    std::unique_ptr<std::atomic<ChipTaskState>[]> states;
     std::vector<int32_t> fanin_offsets;
     std::vector<uint16_t> fanin_indices;
 
@@ -300,6 +302,8 @@ protected:
     // pending AIV leaf, the state materialization leaves it in.
     void build(const std::vector<std::vector<uint16_t>> &rows) {
         storage = std::make_unique<ChipTaskStorage[]>(rows.size());
+        states = std::make_unique<std::atomic<ChipTaskState>[]>(rows.size());
+        execution.task_states = states.get();
         fanin_offsets.assign(1, 0);
         for (size_t i = 0; i < rows.size(); ++i) {
             fanin_indices.insert(fanin_indices.end(), rows[i].begin(), rows[i].end());
@@ -309,7 +313,7 @@ protected:
             s.in_graph_local_id = static_cast<int32_t>(i);
             s.active_mask = ActiveMask(SUBTASK_MASK_AIV0);
             s.graph_context = &execution;
-            s.task_state.store(CHIP_TASK_PENDING, std::memory_order_relaxed);
+            execution.reset_task_state(static_cast<int32_t>(i));
         }
         execution.task_count = static_cast<int32_t>(rows.size());
         execution.task_storage = storage.get();
@@ -340,16 +344,16 @@ TEST_F(HbgGraphWakeScanTest, CursorResumesAndNeverRewalks) {
 
     // The hung-at producer completes: the rescan resumes at the cursor and walks
     // down to the next unmet row entry.
-    slot(2).mark_completed();
+    execution.store_completed(2);
     EXPECT_EQ(sched.graph_first_unmet_producer(execution, consumer), 1);
     EXPECT_EQ(consumer.wake_scan_cursor, 1);
 
     // An entry above the cursor completing does not move it — nothing re-walks
     // that tail — and clearing the rest yields the ready verdict.
-    slot(0).mark_completed();
+    execution.store_completed(0);
     EXPECT_EQ(sched.graph_first_unmet_producer(execution, consumer), 1);
     EXPECT_EQ(consumer.wake_scan_cursor, 1);
-    slot(1).mark_completed();
+    execution.store_completed(1);
     EXPECT_EQ(sched.graph_first_unmet_producer(execution, consumer), -1);
 }
 
@@ -374,7 +378,7 @@ TEST_F(HbgGraphWakeScanTest, SingleProducerWaiterIsRoutedByTheDrain) {
     sched.register_graph_wake(execution, &producer, &consumer);
     ASSERT_EQ(producer.wake_list_head.load(std::memory_order_relaxed), &consumer);
 
-    producer.mark_completed();
+    execution.store_completed(0);
     EXPECT_EQ(sched.drain_graph_wake_list(execution, producer), 1u);
     EXPECT_EQ(pop_ready(), &consumer);
     // Decided from the row's length alone, so the never-hung sentinel stands.
@@ -388,7 +392,7 @@ TEST_F(HbgGraphWakeScanTest, MultiProducerWaiterReRegistersUntilItsRowClears) {
     ChipTaskSlotState &consumer = slot(2);
 
     sched.register_graph_wake(execution, &slot(1), &consumer);
-    slot(1).mark_completed();
+    execution.store_completed(1);
     EXPECT_EQ(sched.drain_graph_wake_list(execution, slot(1)), 1u);
 
     // Producer 0 is still pending, so the waiter moved rather than became ready.
@@ -396,7 +400,7 @@ TEST_F(HbgGraphWakeScanTest, MultiProducerWaiterReRegistersUntilItsRowClears) {
     EXPECT_EQ(slot(0).wake_list_head.load(std::memory_order_relaxed), &consumer);
     EXPECT_EQ(consumer.wake_scan_cursor, 0);
 
-    slot(0).mark_completed();
+    execution.store_completed(0);
     EXPECT_EQ(sched.drain_graph_wake_list(execution, slot(0)), 1u);
     EXPECT_EQ(pop_ready(), &consumer);
 }

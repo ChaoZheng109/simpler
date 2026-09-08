@@ -15,8 +15,8 @@
  * whole GRAPH task is materialized, so a producer can complete while a later
  * consumer is still being registered. Scene tests hit that interleaving only
  * probabilistically; these host-side tests force it, exercising the exact path
- * (graph_first_unmet_producer re-reading task_state) that keeps the consumer from
- * being lost on a producer's already-drained wake list.
+ * (graph_first_unmet_producer re-reading the execution's task_states) that keeps the
+ * consumer from being lost on a producer's already-drained wake list.
  */
 
 #include <gtest/gtest.h>
@@ -59,9 +59,11 @@ protected:
     // One in-graph task whose slot is a routable single-block KERNEL/AIC
     // task in the given completion state, with its payload wired the way
     // materialization leaves it for the wake/route path.
-    static void init_in_graph_task(ChipTaskStorage &task, int32_t task_index, ChipTaskState state) {
+    static void init_in_graph_task(
+        ChipTaskStorage &task, std::atomic<ChipTaskState> *states, int32_t task_index, ChipTaskState state
+    ) {
         memset(&task, 0, sizeof(ChipTaskStorage));
-        task.slot.task_state.store(state);
+        states[task_index].store(state);
         task.slot.in_graph_local_id = task_index;
         task.slot.active_mask = ActiveMask(SUBTASK_MASK_AIC);
         task.slot.task_kind = TaskKind::KERNEL;
@@ -71,18 +73,20 @@ protected:
 };
 
 // A consumer registered after its only producer has completed and drained (head
-// == SENTINEL) reaches graph_first_unmet_producer, which reads task_state and
+// == SENTINEL) reaches graph_first_unmet_producer, which reads the state array and
 // routes it — it is never lost on the closed wake list.
 TEST_F(GraphActivationTest, WakeRoutesConsumerWhenProducerCompletedBeforeRegister) {
     auto tasks = std::make_unique<ChipTaskStorage[]>(2);
-    init_in_graph_task(tasks[0], 0, CHIP_TASK_COMPLETED);    // producer, already completed
-    init_in_graph_task(tasks[1], 1, CHIP_TASK_PENDING);      // consumer of task 0
-    tasks[0].slot.wake_list_head.store(WAKE_LIST_SENTINEL);  // its wake list already drained
+    auto states = std::make_unique<std::atomic<ChipTaskState>[]>(2);
+    init_in_graph_task(tasks[0], states.get(), 0, CHIP_TASK_COMPLETED);  // producer, already completed
+    init_in_graph_task(tasks[1], states.get(), 1, CHIP_TASK_PENDING);    // consumer of task 0
+    tasks[0].slot.wake_list_head.store(WAKE_LIST_SENTINEL);              // its wake list already drained
 
     std::vector<int32_t> fanin_offsets{0, 0, 1};  // task 0 is a root; task 1 <- {0}
     std::vector<uint16_t> fanin_indices{0};
     GraphExecution exec{};
     exec.tasks = exec.task_storage = tasks.get();
+    exec.task_states = states.get();
     exec.fanin_offsets = fanin_offsets.data();
     exec.fanin_indices = fanin_indices.data();
 
@@ -99,15 +103,17 @@ TEST_F(GraphActivationTest, WakeRoutesConsumerWhenProducerCompletedBeforeRegiste
 // routes exactly once that producer completes and drains its wake list.
 TEST_F(GraphActivationTest, IncrementalPublishRoutesCompletedDepsAndWakeChainsPending) {
     auto tasks = std::make_unique<ChipTaskStorage[]>(4);
-    init_in_graph_task(tasks[0], 0, CHIP_TASK_COMPLETED);  // root, completed
-    init_in_graph_task(tasks[1], 1, CHIP_TASK_PENDING);    // root, pending
-    init_in_graph_task(tasks[2], 2, CHIP_TASK_PENDING);    // consumer of task 0 (completed)
-    init_in_graph_task(tasks[3], 3, CHIP_TASK_PENDING);    // consumer of task 1 (pending)
+    auto states = std::make_unique<std::atomic<ChipTaskState>[]>(4);
+    init_in_graph_task(tasks[0], states.get(), 0, CHIP_TASK_COMPLETED);  // root, completed
+    init_in_graph_task(tasks[1], states.get(), 1, CHIP_TASK_PENDING);    // root, pending
+    init_in_graph_task(tasks[2], states.get(), 2, CHIP_TASK_PENDING);    // consumer of task 0 (completed)
+    init_in_graph_task(tasks[3], states.get(), 3, CHIP_TASK_PENDING);    // consumer of task 1 (pending)
 
     std::vector<int32_t> fanin_offsets{0, 0, 0, 1, 2};  // task 2 <- {0}, task 3 <- {1}
     std::vector<uint16_t> fanin_indices{0, 1};
     GraphExecution exec{};
     exec.tasks = exec.task_storage = tasks.get();
+    exec.task_states = states.get();
     exec.fanin_offsets = fanin_offsets.data();
     exec.fanin_indices = fanin_indices.data();
 
@@ -119,7 +125,7 @@ TEST_F(GraphActivationTest, IncrementalPublishRoutesCompletedDepsAndWakeChainsPe
         << "only the consumer whose producers are all COMPLETED routes at publish time";
     EXPECT_EQ(out[0], &tasks[2].slot);
 
-    tasks[1].slot.task_state.store(CHIP_TASK_COMPLETED);
+    states[1].store(CHIP_TASK_COMPLETED);
     sched.drain_graph_wake_list(exec, tasks[1].slot);
     ASSERT_EQ(sched.get_ready_tasks_batch(sched.ready_queues, ResourceShape::AIC, out, 4), 1)
         << "the wake-chained consumer must route once its pending producer completes";
@@ -134,6 +140,7 @@ TEST_F(GraphActivationTest, CompleteTaskAcceptsCompletionBeforeActive) {
     GraphDefinition definition{};
     auto complete_in_state = [&](GraphExecutionState state) {
         auto task = std::make_unique<ChipTaskStorage[]>(1);
+        auto states = std::make_unique<std::atomic<ChipTaskState>[]>(1);
         memset(task.get(), 0, sizeof(ChipTaskStorage));
         task[0].slot.in_graph_local_id = 0;
         task[0].slot.total_required_subtasks = 1;
@@ -141,6 +148,7 @@ TEST_F(GraphActivationTest, CompleteTaskAcceptsCompletionBeforeActive) {
         GraphExecution exec{};
         exec.definition = &definition;
         exec.tasks = exec.task_storage = task.get();
+        exec.task_states = states.get();
         exec.task_count = 1;
         exec.remaining_tasks.store(1);
         exec.outer_slot = nullptr;
@@ -186,5 +194,5 @@ TEST_F(GraphActivationTest, CompleteTaskTakesTheOrdinaryPathForTheOuterGraphTask
 
     EXPECT_EQ(outcome.error_code, SIMPLER_ERROR_NONE);
     EXPECT_EQ(outcome.stream_tasks_completed, 1) << "the outer Graph task is one completed task of the run";
-    EXPECT_EQ(slot.task_state.load(std::memory_order_relaxed), CHIP_TASK_COMPLETED);
+    EXPECT_TRUE(sm_handle->header->tasks.is_completed(slot.to_descriptor().task_id.local_id()));
 }

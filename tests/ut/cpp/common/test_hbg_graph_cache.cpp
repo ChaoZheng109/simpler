@@ -321,7 +321,10 @@ TEST(GraphExecutionStorage, ComputesAlignedExactSize) {
     EXPECT_EQ(layout.tensors_offset, layout.tasks_offset + TASK_COUNT * sizeof(ChipTaskStorage));
     EXPECT_EQ(layout.tensors_offset % alignof(simpler::hbg::Tensor), 0U);
     EXPECT_EQ(layout.scalars_offset, layout.tensors_offset + TENSOR_ARGS * sizeof(simpler::hbg::Tensor));
-    EXPECT_EQ(layout.total_bytes, layout.scalars_offset + SCALAR_ARGS * sizeof(uint64_t));
+    // The state array is last and byte-aligned, so it starts exactly where the
+    // scalar pool ends and closes the image.
+    EXPECT_EQ(layout.states_offset, layout.scalars_offset + SCALAR_ARGS * sizeof(uint64_t));
+    EXPECT_EQ(layout.total_bytes, layout.states_offset + TASK_COUNT * sizeof(std::atomic<ChipTaskState>));
 }
 
 // The outer Graph payload's tensor region is counted in simpler::hbg::Tensor pool slots but
@@ -711,10 +714,12 @@ TEST(GraphExecutionProgress, InGraphTaskResolutionIsNotAHostCompletion) {
     SchedulerState scheduler{};
     GraphDefinition definition{};
     ChipTaskStorage task{};
+    std::atomic<ChipTaskState> states[1]{};
     GraphExecution execution{};
     execution.definition = &definition;
     execution.tasks = &task;
     execution.task_storage = &task;
+    execution.task_states = states;
     execution.task_count = 1;
     execution.remaining_tasks.store(1, std::memory_order_relaxed);
     graph_execution_set_state(execution, GraphExecutionState::ACTIVE, std::memory_order_relaxed);
@@ -766,7 +771,7 @@ TEST(GraphExecutionMaterialize, DirtyStorageYieldsValidExecution) {
     // values only the device side wrote.
     for (int32_t i = 0; i < execution->task_count; ++i) {
         const ChipTaskStorage &storage = execution->task_at(i);
-        ASSERT_EQ(storage.slot.task_state.load(std::memory_order_relaxed), CHIP_TASK_PENDING);
+        ASSERT_EQ(execution->task_states[i].load(std::memory_order_relaxed), CHIP_TASK_PENDING);
         ASSERT_EQ(storage.slot.task_kind, TaskKind::KERNEL);
         ASSERT_EQ(storage.slot.completed_subtasks.load(std::memory_order_relaxed), 0);
         ASSERT_EQ(storage.payload.published_block_count.load(std::memory_order_relaxed), 0);

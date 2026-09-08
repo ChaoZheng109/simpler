@@ -16,10 +16,10 @@
  * 1. Maintaining per-resource-shape ready queues
  * 2. Polling-completion dependency resolution: a GLOBAL task is ready when every
  *    producer named in its inline fanin has a COMPLETED task_states byte, an
- *    IN_GRAPH one when every producer in its Graph's fanin wire has reached
- *    task_state == COMPLETED (that table has no flag bytes); a producer publishes
- *    completion + drains its wake list on finish
- * 3. Publishing completion (task_state PENDING -> COMPLETED, task_states byte)
+ *    IN_GRAPH one when every producer in its Graph's fanin wire does — the same
+ *    array shape, held by the GraphExecution instead of the task header; a
+ *    producer publishes completion + drains its wake list on finish
+ * 3. Publishing completion (task_states byte PENDING -> COMPLETED)
  * 4. Two-stage mixed-task completion (subtask done bits -> mixed-task complete)
  *
  * The Scheduler runs on Device AI_CPU. host_build_graph is scheduler-only (the
@@ -670,15 +670,14 @@ struct SchedulerState {
         }
     }
 
-    // Producer completion under polling: publish the task_state completion
-    // mirror + the device-visible task_states byte, then drain the wake list
+    // Producer completion under polling: publish the device-visible task_states
+    // byte, then drain the wake list
     // (route/re-register each waiter). Whole-graph-resident hbg
     // has no device slot reclaim, so nothing advances a reclaim cursor here.
     void on_mixed_task_complete(ChipTaskSlotState &slot_state) {
         const int32_t task_id = slot_state.to_descriptor().task_id.local_id();
         SharedMemoryTaskHeader &tasks = *task_view.tasks;
 
-        slot_state.mark_completed();  // completion mirror (task_state = COMPLETED)
         tasks.store_completed(task_id);
         // COMPLETED >= PUBLISHED, so a tracked producer that never published
         // (DUMMY, predicate-retired) still releases its publish-list waiters
@@ -1167,8 +1166,7 @@ struct SchedulerState {
         const int32_t count = execution.fanin_offsets[task_index + 1] - begin;
         const int32_t start = consumer.wake_scan_cursor < count ? consumer.wake_scan_cursor : count - 1;
         for (int32_t row = start; row >= 0; --row) {
-            const ChipTaskSlotState &producer = execution.task_at(execution.fanin_indices[begin + row]).slot;
-            if (producer.task_state.load(std::memory_order_acquire) != CHIP_TASK_COMPLETED) {
+            if (!execution.is_completed(execution.fanin_indices[begin + row])) {
                 consumer.wake_scan_cursor = static_cast<uint16_t>(row);
                 return row;
             }
@@ -1366,7 +1364,7 @@ struct SchedulerState {
         // Publish completion before closing the wake list. A consumer that
         // loses registration to the sentinel acquires this state when it
         // rescans the Orch-built fanin wire, so no wakeup can be lost.
-        slot_state.mark_completed();
+        execution->store_completed(task_index);
         outcome.fanout_edges = drain_graph_wake_list(*execution, slot_state);
 
         const bool graph_completed = graph_execution_complete_in_graph_task(*execution);
@@ -1421,8 +1419,8 @@ struct SchedulerState {
         int thread_idx
 #endif
     ) {
-        // Polling completion: publish the task_state completion mirror + the
-        // device-visible task_states byte and drain the wake list (route or
+        // Polling completion: publish the device-visible task_states
+        // byte and drain the wake list (route or
         // re-register each waiter). Replaces the
         // fanout-list walk + fanin_refcount decrements of the wiring model.
         on_mixed_task_complete(slot_state);

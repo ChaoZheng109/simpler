@@ -141,13 +141,9 @@ TEST_F(HbgSubmitPoisonTest, EveryDeviceReadFieldIsWrittenOverPoison) {
 
         // Descriptor: the task id is written to this exact local id.
         EXPECT_EQ(desc.task_id.local_id(), local);
-        // task_state is written at submit (reset_for_reuse skips it): PENDING for a
-        // dispatchable task, COMPLETED for a pre-completed hidden-alloc. Either way a
-        // real enum, never poison.
-        const ChipTaskState state = st.task_state.load(std::memory_order_relaxed);
-        EXPECT_TRUE(state == CHIP_TASK_PENDING || state == CHIP_TASK_COMPLETED);
-        // The progress byte is written to a real state (pending vs pre-completed),
-        // not a poison byte (0xAA).
+        // The progress byte is written to a real state at submit — PENDING for a
+        // dispatchable task, COMPLETED for a pre-completed hidden-alloc — never a
+        // poison byte (0xAA).
         const ChipTaskState sm_state = tasks.task_states[local].load(std::memory_order_relaxed);
         EXPECT_TRUE(sm_state == CHIP_TASK_PENDING || sm_state == CHIP_TASK_COMPLETED);
         // Payload counts are real, not the poison bit pattern.
@@ -158,7 +154,7 @@ TEST_F(HbgSubmitPoisonTest, EveryDeviceReadFieldIsWrittenOverPoison) {
         // predicate.op is a dispatch-time field, read only for tasks the device
         // actually dispatches. submit_task_common writes it (NONE when unset); a
         // pre-completed hidden-alloc is never dispatched, so it does not.
-        if (state == CHIP_TASK_PENDING) {
+        if (sm_state == CHIP_TASK_PENDING) {
             EXPECT_LE(static_cast<uint8_t>(pl.predicate.op), static_cast<uint8_t>(PredicateOp::LE));
         }
     }
