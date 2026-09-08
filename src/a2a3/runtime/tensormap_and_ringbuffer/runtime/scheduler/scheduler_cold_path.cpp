@@ -1154,11 +1154,12 @@ int32_t SchedulerContext::pre_handshake_init(
         LOG_ERROR("Invalid cores_total_num %d (expected 1-%d)", cores_total_num_, RUNTIME_MAX_WORKER);
         return -1;
     }
-    // The prior launch may have left RELEASE=1. Reset through the same atomic
-    // path before publishing hs_setup_done_ and opening any register window.
-    for (int32_t i = 0; i < cores_total_num_; ++i) {
-        __atomic_store_n(&runtime->get_teardown_gates()[i].post_close_release, 0U, __ATOMIC_RELEASE);
-    }
+    // The prior launch may have left RELEASE=1. The wmb() is what orders these
+    // resets before hs_setup_done_ and before any register window opens: a
+    // window is a plain Device-nGnRE store, so it carries no release semantics
+    // of its own. Per-cell release would order each store against what precedes
+    // it, which is the direction nothing here depends on.
+    memset(runtime->get_teardown_gates(), 0, sizeof(AicoreTeardownControl) * cores_total_num_);
     wmb();
     // The blocked 1 AIC : 2 AIV layout requires an exact multiple of 3: cluster ci
     // owns cores {ci, N/3+2ci, N/3+2ci+1}, so a non-zero remainder leaves the tail
