@@ -1075,8 +1075,9 @@ bool SchedulerContext::assign_cores_to_threads() {
 
 // =============================================================================
 // Emergency shutdown: elect one thread, broadcast exit to every handshake'd
-// core, then join them. Idempotent — the per-thread shutdown() path no-ops once
-// fatal shutdown has started, so cores are quiesced exactly once.
+// core, then join them. A core is retired exactly once because retire_cores
+// claims per core, not because the per-thread path stands down: shutdown()
+// runs on every thread regardless of whether a fatal shutdown has begun.
 // =============================================================================
 bool SchedulerContext::begin_emergency_shutdown() {
     return publish_fatal_shutdown(fatal_shutdown_started_, completed_);
