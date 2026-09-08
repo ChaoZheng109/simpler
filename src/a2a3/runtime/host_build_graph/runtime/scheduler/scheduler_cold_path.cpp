@@ -565,8 +565,8 @@ int32_t SchedulerContext::retire_cores(Runtime *runtime, const int32_t *core_ids
     }
     if (count == 0) return 0;
 
-    // platform_retire_aicore_group writes every entry it is given, so this
-    // needs no initializer: nothing reads an element it did not fill.
+    // platform_retire_aicore_group fills every entry on every path it returns
+    // from, so this needs no initializer.
     bool released[PLATFORM_MAX_CORES];
     const int32_t rc = platform_retire_aicore_group(targets, count, platform_aicore_exit_deadline(), released);
     if (rc != 0) {
@@ -866,9 +866,8 @@ int32_t SchedulerContext::pre_handshake_init(Runtime *runtime, int32_t aicpu_thr
     }
     // The prior launch may have left RELEASE=1. The wmb() is what orders these
     // resets before hs_setup_done_ and before any register window opens: a
-    // window is a plain Device-nGnRE store, so it carries no release semantics
-    // of its own. Per-cell release would order each store against what precedes
-    // it, which is the direction nothing here depends on.
+    // window is a plain Device-nGnRE store, carrying no release semantics of
+    // its own.
     memset(runtime->get_teardown_gates(), 0, sizeof(AicoreTeardownControl) * cores_total_num_);
     wmb();
     aic_count_ = 0;

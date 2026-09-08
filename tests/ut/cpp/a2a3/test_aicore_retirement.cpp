@@ -226,6 +226,25 @@ TEST(AicoreRetirement, RejectsInvalidGroupBeforeTouchingRegisters) {
     EXPECT_EQ(platform_retire_aicore_group(nullptr, 0, 0), 0);
     EXPECT_EQ(platform_retire_aicore_group(targets, PLATFORM_MAX_CORES + 1, 0), -1);
 }
+
+// The caller reads `released` whenever the call returns non-zero and leaves the
+// buffer uninitialized, so a rejection must still fill every entry.
+TEST(AicoreRetirement, FillsReleasedOnRejectedGroups) {
+    AicoreTeardownControl control{};
+    registers.fill(0);
+    const AicoreExitTarget targets[] = {
+        {reinterpret_cast<uint64_t>(registers.data()), &control},
+        {0, &control},
+    };
+    bool released[2] = {true, true};
+    EXPECT_EQ(platform_retire_aicore_group(targets, 2, 0, released), -1);
+    EXPECT_FALSE(released[0]);
+    EXPECT_FALSE(released[1]);
+
+    bool null_targets[1] = {true};
+    EXPECT_EQ(platform_retire_aicore_group(nullptr, 1, 0, null_targets), -1);
+    EXPECT_FALSE(null_targets[0]);
+}
 }  // namespace
 
 // Only handshake storage is used by these idle-worker tests. Keep host-side

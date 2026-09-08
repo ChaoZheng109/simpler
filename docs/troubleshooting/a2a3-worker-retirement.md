@@ -88,7 +88,9 @@ cost every core on the chip.
    evidence rather than on a peer's timeout.
 4. Reset dispatch to IDLE and close every acknowledged window. Read back the
    MMIO window and complete that read before publishing a GM return gate.
-5. Release-store `AICORE_POST_CLOSE_RELEASE` to each closed core's gate.
+5. Store `AICORE_POST_CLOSE_RELEASE` to each closed core's gate. The stores are
+   relaxed: step 4's drain is what orders them after the CLOSE they belong to,
+   and the gates are independent of one another.
 6. AICore observes that word and only then returns.
 
 The AICore wait is unbounded on purpose. A bounded wait cannot help: below the
@@ -139,11 +141,14 @@ what it was, and its execution protocol and the public Python API are
 unchanged. A5 does link the `teardown_gates[]` array — it grows the device
 image by one cache line per worker — but never reads or writes it.
 
-The boot leader atomically resets the gate before publishing handshake setup
-and before any register window opens. Thus the preceding launch's value of
-1 cannot release a new launch. Reuse assumes the existing runtime lifecycle:
-the previous launch has completed before the same storage is re-armed. This
-is not a claim that one runtime image supports concurrent independent runs.
+The boot leader zeroes the whole gate array before publishing handshake setup
+and before any register window opens; the write barrier that follows is what
+orders the reset ahead of both, so the preceding launch's value of 1 cannot
+release a new launch. Each cell is 4 bytes inside a 64-byte-aligned block, so a
+straggler still bypass-loading its gate cannot read a torn value. Reuse assumes
+the existing runtime lifecycle: the previous launch has completed before the
+same storage is re-armed. This is not a claim that one runtime image supports
+concurrent independent runs.
 
 ## Evidence and reproduction boundaries
 

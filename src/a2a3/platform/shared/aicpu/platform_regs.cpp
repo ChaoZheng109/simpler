@@ -79,26 +79,16 @@ void platform_close_aicore_window(uint64_t reg_addr) {
     (void)read_reg(reg_addr, RegId::FAST_PATH_ENABLE);
 }
 
-int32_t platform_finish_aicore_exit(uint64_t reg_addr, uint64_t deadline) {
-    // Wait for AICore to acknowledge exit, until the caller's deadline. On
-    // timeout, skip register cleanup (AICore is unresponsive; host will
-    // aclrtResetDevice to clear all hardware state).
-    while (read_reg(reg_addr, RegId::COND) != AICORE_EXITED_VALUE) {
-        if (get_sys_cnt_aicpu() > deadline) {
-            return -1;
-        }
-    }
-    platform_close_aicore_window(reg_addr);
-    rmb();
-    return 0;
-}
-
-int32_t platform_deinit_aicore_regs(uint64_t reg_addr) {
-    platform_signal_aicore_exit(reg_addr);
-    return platform_finish_aicore_exit(reg_addr, platform_aicore_exit_deadline());
-}
-
 int32_t platform_retire_aicore_group(const AicoreExitTarget *targets, size_t count, uint64_t deadline, bool *released) {
+    // `released` is filled before anything can return, rejection included, so a
+    // caller may read it without initializing the buffer. An over-large `count`
+    // says nothing about how big that buffer is, so the fill stops at the one
+    // size the contract guarantees.
+    if (released != nullptr) {
+        const size_t reportable = count < PLATFORM_MAX_CORES ? count : PLATFORM_MAX_CORES;
+        for (size_t i = 0; i < reportable; ++i)
+            released[i] = false;
+    }
     if (count > PLATFORM_MAX_CORES || (count != 0 && targets == nullptr)) return -1;
     for (size_t i = 0; i < count; ++i) {
         if (targets[i].reg_addr == 0 || targets[i].teardown == nullptr) return -1;
@@ -117,9 +107,8 @@ int32_t platform_retire_aicore_group(const AicoreExitTarget *targets, size_t cou
     // core behind it is then judged on a peer's timeout instead of its own.
     // Sweeping non-blockingly gives each core the whole budget: a core is only
     // abandoned once the deadline passes with it still silent.
-    // Only the first `count` entries are ever read, and the sweep below reads
-    // one before it writes it, so those must start false — but zeroing the
-    // whole PLATFORM_MAX_CORES array would clear three times what is used.
+    // The sweep below reads an entry before it writes it, so the first `count`
+    // must start false. Entries past `count` are never read.
     bool acknowledged[PLATFORM_MAX_CORES];
     for (size_t i = 0; i < count; ++i)
         acknowledged[i] = false;
@@ -149,8 +138,7 @@ int32_t platform_retire_aicore_group(const AicoreExitTarget *targets, size_t cou
     // One drain covers every readback the close pass issued, and it is what
     // orders every store below after the CLOSE it belongs to: a dsb blocks
     // every later instruction until it completes, so the relaxed stores cannot
-    // move ahead of it. Draining per window instead costs a dsb apiece and
-    // measured ~45% of the close pass.
+    // move ahead of it.
     rmb();
     // An open return gate is only ever paired with a closed window: releasing a
     // core whose window is still open is the ordering violation this protocol
