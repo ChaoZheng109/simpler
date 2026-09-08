@@ -146,9 +146,11 @@ int32_t platform_retire_aicore_group(const AicoreExitTarget *targets, size_t cou
             rc = -1;
         }
     }
-    // One drain covers every readback the close pass issued, so each release
-    // store below is ordered after the CLOSE it belongs to. Draining per window
-    // instead costs a dsb apiece and measured ~45% of the close pass.
+    // One drain covers every readback the close pass issued, and it is what
+    // orders every store below after the CLOSE it belongs to: a dsb blocks
+    // every later instruction until it completes, so the relaxed stores cannot
+    // move ahead of it. Draining per window instead costs a dsb apiece and
+    // measured ~45% of the close pass.
     rmb();
     // An open return gate is only ever paired with a closed window: releasing a
     // core whose window is still open is the ordering violation this protocol
@@ -156,7 +158,7 @@ int32_t platform_retire_aicore_group(const AicoreExitTarget *targets, size_t cou
     // the caller can name them; the host recovery path owns them from here.
     for (size_t i = 0; i < count; ++i) {
         if (acknowledged[i]) {
-            __atomic_store_n(&targets[i].teardown->post_close_release, AICORE_POST_CLOSE_RELEASE, __ATOMIC_RELEASE);
+            __atomic_store_n(&targets[i].teardown->post_close_release, AICORE_POST_CLOSE_RELEASE, __ATOMIC_RELAXED);
         }
         if (released != nullptr) released[i] = acknowledged[i];
     }
