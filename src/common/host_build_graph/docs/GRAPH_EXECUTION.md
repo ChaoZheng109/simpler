@@ -376,9 +376,13 @@ Definition. It contains:
   dispatchable shape and at least one internal producer; `ED_FLAG_TRACKED` when
   some candidate names it as a producer). A candidate's fanin CSR row is stored
   sorted by producer index, so its tail names its deepest producer; every other
-  row keeps record order. `bind_graph_topology` validates these flags but
-  nothing propagates them to a task slot, so they steer no dispatch yet — the
-  sorted row is the only part of the verdict the device acts on;
+  row keeps record order. `bind_graph_topology` validates these flags and
+  materialization replays them onto each task's slot, where the publish chain
+  reads them: a candidate registers on its producers' chains and pre-stages
+  once they have all published. The verdict covers non-root tasks only —
+  qualification needs a producer to bet on, and a body root has none inside the
+  body — so a root's verdict is not recorded here but decided at
+  materialization;
 - one packed-heap offset per in-graph task;
 - each in-graph task's ChipTensor source:
   `BOUNDARY_EXACT`, `BOUNDARY_VIEW`, `INTERNAL`, or `OWN_OUTPUT`;
@@ -504,6 +508,32 @@ dependency wiring remains an Orchestrator responsibility:
   monotonic, so rows above the cursor stay complete and are never re-walked;
 - `WAKE_LIST_SENTINEL` closes the completion/registration race: a failed
   registration observes completion and immediately rescans.
+
+Early dispatch enters a body from two directions, and each is decided by a
+different party:
+
+- **Into the body.** The outer shell qualifies at submit, by the top-level rule
+  minus the terms that describe dispatching to cores: a shell carries no
+  predicate, has no resource shape and occupies no core, so its producers alone
+  decide it. A qualified shell that its producers release early does not stage
+  itself — it has nothing of its own to place — but stages the body's roots,
+  each an ordinary AICore task. They ring on the ordinary route, when the
+  shell's producers complete and `activate_graph_task` opens the external gate.
+  A Graph as a *producer* is the direction not supported: a shell publishes no
+  placement of its own for a consumer to bet on.
+- **A root's own verdict.** Materialization, not recording, decides it, and the
+  decision is three terms rather than the recorded conjunction: the shell must
+  itself be a candidate, since staging a root can only ever happen on a shell
+  release; and the root must be neither `DUMMY` (no dispatchable shape to index
+  a per-shape early-dispatch queue with) nor predicated (an early release
+  returns before the predicate test). Deciding it at materialization is what
+  keeps the flag off a slot a reader can already see.
+
+Which early-dispatch queue a released candidate enters is chosen by the task's
+own `sync_start` attribute, never by its cohort: a `sync_start` candidate needs
+an all-or-nothing stage and parks in the single shape-agnostic queue, every
+other candidate in its per-shape one. An in-graph task reaches that fork by the
+same path a top-level one does.
 
 The runtime wake-list registration is a transient polling subscription, not
 dependency discovery or Graph rewiring. Fanout CSR remains in the Definition

@@ -2108,6 +2108,12 @@ bool graph_submit_outer(
     slot.active_mask = ActiveMask{};
     slot.task_attrs = TaskAttrs{};
     slot.total_required_subtasks = 0;
+    // A shell places no block, but this must stay positive: an early-released
+    // shell sits in EARLY_DISPATCH_STAGING, so its readiness runs through
+    // try_early_dispatch_release, which returns next_block_idx >= this. At zero
+    // that is true for a shell's never-advanced cursor, push_ready_routed
+    // returns before graph_ready_queue, and the Graph silently never activates —
+    // visible only as SIMPLER_ERROR_SCHEDULER_TIMEOUT.
     slot.logical_block_num = 1;
     slot.task_kind = TaskKind::GRAPH;
 
@@ -2167,6 +2173,32 @@ bool graph_submit_outer(
     // region, which is what makes the deferred advance safe.
     debug_assert(orch->fanin_pool_cursor == static_cast<int32_t>(payload.fanin_data() - orch->fanin_pool));
     orch->fanin_pool_cursor += CHIP_ALIGN_UP(payload.fanin_count, ARG_POOL_ALIGN / (int32_t)sizeof(int32_t));
+
+    // Early-dispatch qualification for the shell. Its fanin is an ordinary
+    // inline row of GLOBAL producers, so the rule is the top-level one, minus
+    // the terms that describe dispatching a task to cores: a shell has no
+    // predicate, no resource shape, and never occupies a core itself. What its
+    // release does instead is admit the body's roots, which is why a shell
+    // qualifies on producers alone.
+    //
+    // A GRAPH producer still disqualifies, as it does at top level: a shell
+    // publishes no placement of its own, so there is nothing for a consumer to
+    // bet on. That is the graph-as-producer direction, deliberately left out.
+    int32_t *const shell_fanin = payload.fanin_data();
+    bool shell_candidate = payload.fanin_count > 0;
+    for (int32_t i = 0; shell_candidate && i < payload.fanin_count; i++) {
+        const ChipTaskSlotState &producer = orch->sm_header->tasks.get_slot_state_by_task_id(shell_fanin[i]);
+        if (producer.task_kind == TaskKind::GRAPH || !producer.task_attrs.allow_early_resolve()) {
+            shell_candidate = false;
+        }
+    }
+    if (shell_candidate) {
+        std::sort(shell_fanin, shell_fanin + payload.fanin_count);
+        slot.ed_flags |= ED_FLAG_CANDIDATE;
+        for (int32_t i = 0; i < payload.fanin_count; i++) {
+            orch->sm_header->tasks.get_slot_state_by_task_id(shell_fanin[i]).ed_flags |= ED_FLAG_TRACKED;
+        }
+    }
 
     pending.outer_slot = &slot;
     state->pending_uploads.push_back(pending);

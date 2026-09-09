@@ -129,6 +129,18 @@ bool bind_graph_topology(GraphExecution &execution) {
         const int32_t end = fanin_offsets[consumer + 1];
         if (begin > end || end > definition.edge_count) return false;
         if (begin == end) observed_roots++;
+        // ED_FLAG_CANDIDATE steers dispatch from materialization onward, so the
+        // image must carry the whole conjunction the recorder decided it by, not
+        // merely a known bit: a candidate with no producer has nothing to bet on,
+        // a DUMMY one would index early_dispatch_queues[] one past its last
+        // shape, and a predicated one would be released before its predicate is
+        // ever tested. graph_fill_definition is the only writer of this field and
+        // holds all three, so a violation means the image is not one it produced.
+        if ((tasks[consumer].ed_flags & ED_FLAG_CANDIDATE) != 0 &&
+            (begin == end || tasks[consumer].predicate_slot != 0 ||
+             ActiveMask(tasks[consumer].active_mask).to_shape() == ResourceShape::DUMMY)) {
+            return false;
+        }
         for (int32_t edge = begin; edge < end; ++edge) {
             if (fanin_indices[edge] >= consumer) return false;
         }
@@ -393,6 +405,12 @@ GraphMaterializeResult graph_execution_materialize_slice(
     const int32_t first = execution.materialized_tasks;
     const int32_t last = std::min(execution.task_count, first + max_tasks);
     const uintptr_t outer_base = reinterpret_cast<uintptr_t>(outer_slot.to_descriptor().packed_buffer_base);
+    // stage_graph_roots_early is the only path that gives a body root a staging
+    // claim, and it runs only when the shell itself is released early, so under
+    // a shell the host did not qualify no root can ever be staged. The shell's
+    // verdict is written by the host before upload and never changes, so this is
+    // loop-invariant for the whole execution.
+    const bool shell_stages_roots = (outer_slot.ed_flags & ED_FLAG_CANDIDATE) != 0;
     for (int32_t i = first; i < last; ++i) {
         ChipTaskStorage *storage = &execution.task_at(i);
         if (i >= execution.constructed_tasks) {
@@ -419,12 +437,36 @@ GraphMaterializeResult graph_execution_materialize_slice(
         execution.reset_task_state(i);
         slot.active_mask = ActiveMask(source.active_mask);
         slot.task_attrs = TaskAttrs(source.task_attrs);
+        // Recording decided these once for the whole body; every execution of the
+        // same Definition qualifies the same tasks, so materialization only
+        // replays the verdict.
+        slot.ed_flags = source.ed_flags;
         slot.total_required_subtasks = source.total_required_subtasks;
         slot.logical_block_num = source.logical_block_num;
         slot.in_graph_local_id = i;
         // A task in a Graph body is an ordinary leaf, classified by the same rule as
         // one submitted outside a Graph. Its membership is carried by graph_context.
         slot.task_kind = slot.active_mask.is_dummy() ? TaskKind::DUMMY : TaskKind::KERNEL;
+        // A root carries no recorded verdict — qualification needs a producer to
+        // bet on and a root has none inside the body — but an early-released
+        // shell stages roots on the body's behalf, and push_ready_routed reads
+        // this flag to decide whether a task may hold a staging claim. The two
+        // per-task terms are the ones the recorded conjunction applies to the
+        // task itself, and both are load-bearing rather than defensive: a DUMMY
+        // task has no dispatchable shape to index a per-shape queue with, and a
+        // predicated task must reach the predicate test in push_ready_routed,
+        // which an early release returns before. The shell term keeps the flag
+        // off a root nothing can stage, which would otherwise pay a seq_cst CAS
+        // on every route for a claim it can never hold.
+        //
+        // Deciding it here rather than at staging time is what makes it safe:
+        // materialization owns this slot exclusively and runs strictly before
+        // any path can route the root, so the flag is never written beside a
+        // reader.
+        const bool root_stageable = shell_stages_roots &&
+                                    execution.fanin_offsets[i] == execution.fanin_offsets[i + 1] &&
+                                    !slot.task_attrs.has_predicate() && slot.task_kind != TaskKind::DUMMY;
+        if (root_stageable) slot.ed_flags |= ED_FLAG_CANDIDATE;
         slot.graph_context = &execution;
         payload.tensor_count = source.tensor_count;
         payload.scalar_count = source.scalar_count;

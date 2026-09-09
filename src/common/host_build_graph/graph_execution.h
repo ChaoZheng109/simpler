@@ -28,8 +28,15 @@ static_assert(
     "an in-graph local id must fit the low field of an IN_GRAPH task id"
 );
 // A body's producers precede their consumers, so a fanin CSR row holds at most
-// task_count - 1 entries and the wake-scan cursor indexes one of them.
+// task_count - 1 entries, and both of the slot's row cursors index one of them.
+// An in-graph row has no cap of its own — unlike a GLOBAL task's inline row,
+// which append_fanin_or_fail holds to CHIP_MAX_FANIN — so this is what bounds
+// them, and a cursor too narrow for it would report a row scanned that was not.
 static_assert(MAX_IN_GRAPH_TASKS - 1 < 0xFFFF, "a fanin CSR row index must fit ChipTaskSlotState::wake_scan_cursor");
+static_assert(
+    MAX_IN_GRAPH_TASKS - 1 < 0xFFFF && CHIP_MAX_FANIN - 1 < 0xFFFF,
+    "a fanin row index from either cohort must fit ChipTaskSlotState::ed_publish_scan_cursor"
+);
 inline constexpr int32_t GRAPH_MATERIALIZE_SLICE_TASKS = 4;
 
 enum class GraphTensorSourceKind : uint8_t {
@@ -453,6 +460,14 @@ struct GraphExecution {
 
     void store_completed(int32_t index, std::memory_order order = std::memory_order_release) const {
         task_states[index].store(CHIP_TASK_COMPLETED, order);
+    }
+
+    bool is_published(int32_t index, std::memory_order order = std::memory_order_acquire) const {
+        return task_states[index].load(order) >= CHIP_TASK_PUBLISHED;
+    }
+
+    void store_published(int32_t index, std::memory_order order = std::memory_order_release) const {
+        task_states[index].store(CHIP_TASK_PUBLISHED, order);
     }
 
     void reset_task_state(int32_t index) const {

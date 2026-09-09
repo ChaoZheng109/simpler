@@ -54,8 +54,20 @@ GraphTensor make_test_tensor(uint64_t address) {
     return tensor;
 }
 
-std::vector<std::byte>
-make_test_definition(uint64_t graph_key, uint64_t boundary_address, uint32_t boundary_scalar_count = 1) {
+// What task 0 — this body's only root — is shaped like. Materialization decides
+// a root's staging verdict from the root itself, so each variant is one term of
+// that decision.
+enum class TestRoot { ORDINARY, PREDICATED, DUMMY };
+
+// Ways an image can carry ED_FLAG_CANDIDATE without the conjunction the recorder
+// decides it by. graph_fill_definition produces none of these; bind_graph_topology
+// is what has to say so.
+enum class TestEdDefect { NONE, CANDIDATE_ON_ROOT, CANDIDATE_WITH_PREDICATE, CANDIDATE_ON_DUMMY };
+
+std::vector<std::byte> make_test_definition(
+    uint64_t graph_key, uint64_t boundary_address, uint32_t boundary_scalar_count = 1,
+    TestRoot root_variant = TestRoot::ORDINARY, TestEdDefect ed_defect = TestEdDefect::NONE
+) {
     std::vector<std::byte> image(sizeof(GraphDefinition));
 
     std::vector<int32_t> fanin_offsets{0, 0, 1};
@@ -81,6 +93,52 @@ make_test_definition(uint64_t graph_key, uint64_t boundary_address, uint32_t bou
     tasks[1].dump_metadata.scalar_dtypes[0] = static_cast<uint8_t>(DataType::INT32);
     tasks[1].tensor_offset = 1;
     tasks[1].scalar_offset = 1;
+    std::vector<GraphPredicate> predicates;
+    if (root_variant == TestRoot::PREDICATED) {
+        // The attribute bit and the one-based slot are written together; a
+        // Definition where they disagree is rejected before the verdict is read.
+        TaskAttrs root_attrs{};
+        root_attrs.set_predicate();
+        tasks[0].task_attrs = root_attrs.raw();
+        tasks[0].predicate_slot = 1;
+        GraphPredicate predicate{};
+        predicate.operand = make_test_tensor(boundary_address);
+        predicate.operand_source.source_kind = static_cast<uint8_t>(GraphTensorSourceKind::BOUNDARY_EXACT);
+        predicate.elem_size = static_cast<uint8_t>(get_element_size(DataType::FLOAT32));
+        predicate.op = static_cast<uint8_t>(PredicateOp::EQ);
+        predicates.push_back(predicate);
+    } else if (root_variant == TestRoot::DUMMY) {
+        // A dependency-only task: no core mask, and therefore no subtask to
+        // require and no kernel on any slot — bind_graph_topology pairs each
+        // mask bit with its slot's kernel id. active_mask is what
+        // ChipTaskSlotState::task_kind is read from.
+        tasks[0].active_mask = 0;
+        tasks[0].total_required_subtasks = 0;
+        std::fill(std::begin(tasks[0].kernel_id), std::end(tasks[0].kernel_id), INVALID_KERNEL_ID);
+    }
+    // Task 0 is this body's root (empty CSR row); task 1 has one producer.
+    if (ed_defect == TestEdDefect::CANDIDATE_ON_ROOT) {
+        tasks[0].ed_flags |= ED_FLAG_CANDIDATE;
+    } else if (ed_defect == TestEdDefect::CANDIDATE_WITH_PREDICATE) {
+        tasks[1].ed_flags |= ED_FLAG_CANDIDATE;
+        TaskAttrs attrs{};
+        attrs.set_predicate();
+        tasks[1].task_attrs = attrs.raw();
+        tasks[1].predicate_slot = static_cast<uint16_t>(predicates.size() + 1);
+        GraphPredicate predicate{};
+        predicate.operand = make_test_tensor(boundary_address);
+        predicate.operand_source.source_kind = static_cast<uint8_t>(GraphTensorSourceKind::BOUNDARY_EXACT);
+        predicate.elem_size = static_cast<uint8_t>(get_element_size(DataType::FLOAT32));
+        predicate.op = static_cast<uint8_t>(PredicateOp::EQ);
+        predicates.push_back(predicate);
+    } else if (ed_defect == TestEdDefect::CANDIDATE_ON_DUMMY) {
+        // Cleared kernel ids keep the mask/kernel pairing check from rejecting
+        // this image first, so only the flag conjunction can.
+        tasks[1].ed_flags |= ED_FLAG_CANDIDATE;
+        tasks[1].active_mask = 0;
+        tasks[1].total_required_subtasks = 0;
+        std::fill(std::begin(tasks[1].kernel_id), std::end(tasks[1].kernel_id), INVALID_KERNEL_ID);
+    }
     std::vector<GraphTensor> tensors{make_test_tensor(boundary_address), make_test_tensor(boundary_address)};
     tensors[1].buffer_size = 32;
     std::vector<GraphTensorSourceRef> tensor_sources(2);
@@ -114,6 +172,10 @@ make_test_definition(uint64_t graph_key, uint64_t boundary_address, uint32_t bou
     definition.off_tensor_sources = append_section(image, tensor_sources);
     definition.off_scalars = append_section(image, scalars);
     definition.off_scalar_inheritance = append_section(image, scalar_inheritance);
+    if (!predicates.empty()) {
+        definition.predicate_count = static_cast<uint32_t>(predicates.size());
+        definition.off_predicates = append_section(image, predicates);
+    }
     size_t execution_storage_bytes = 0;
     graph_execution_storage_bytes(
         definition.task_count, definition.tensor_arg_count, definition.scalar_arg_count, &execution_storage_bytes
@@ -553,11 +615,20 @@ TEST(GraphExecutionReplay, ResubmissionRebuildsFromDefinition) {
     ChipTaskSlotState &outer_slot = outer.slot;
     outer_slot.task_kind = TaskKind::GRAPH;
     outer_slot.graph_context = execution;
+    // Only a shell the host qualified can stage its body's roots, so this is
+    // what makes the root verdict below reachable at all.
+    outer_slot.ed_flags = ED_FLAG_CANDIDATE;
 
     // The execution and in-graph task storage both occupy the outer heap tail after
     // required_heap.
     EXPECT_EQ(static_cast<void *>(execution), heap.execution());
     EXPECT_EQ(graph_execution_materialize_slice(outer_slot, *execution, 2), GraphMaterializeResult::PREPARED);
+    // A shell released early stages its body's roots, and materialization is what
+    // decides which roots it may stage. Task 0 is this body's root and is an
+    // ordinary dispatchable task, so it qualifies; task 1 has a producer, so its
+    // verdict is the recorded one instead, which this Definition leaves clear.
+    EXPECT_NE(execution->task_at(0).slot.ed_flags & ED_FLAG_CANDIDATE, 0);
+    EXPECT_EQ(execution->task_at(1).slot.ed_flags & ED_FLAG_CANDIDATE, 0);
     ChipTaskStorage &storage = execution->task_at(0);
     ASSERT_EQ(storage.payload.scalar_count, 1);
     ASSERT_EQ(storage.payload.tensor_count, 1);
@@ -601,6 +672,95 @@ TEST(GraphExecutionReplay, ResubmissionRebuildsFromDefinition) {
     EXPECT_EQ(storage.slot.completed_subtasks.load(std::memory_order_relaxed), 0);
     EXPECT_EQ(storage.payload.published_block_count.load(std::memory_order_relaxed), 0);
     EXPECT_EQ(storage.payload.dump_metadata.dump_arg_mask, uint64_t{1} << 0);
+}
+
+// Each term that withholds ED_FLAG_CANDIDATE from a body root, one per case.
+// ResubmissionRebuildsFromDefinition covers the conjunction's true side; these
+// are the three ways it comes out false, and each is load-bearing: a shell the
+// host did not qualify never stages anything, a predicated task must reach the
+// predicate test an early release returns before, and a DUMMY task has no
+// dispatchable shape to index a per-shape early-dispatch queue with.
+TEST(GraphExecutionReplay, RootStagingVerdictWithholdsCandidate) {
+    constexpr uint64_t GRAPH_KEY_VALUE = 0x1234;
+
+    struct Case {
+        const char *name;
+        TestRoot root_variant;
+        uint8_t shell_ed_flags;
+    };
+    const Case cases[] = {
+        {"shell the host did not qualify", TestRoot::ORDINARY, 0},
+        {"predicated root", TestRoot::PREDICATED, ED_FLAG_CANDIDATE},
+        {"dummy root", TestRoot::DUMMY, ED_FLAG_CANDIDATE},
+    };
+
+    for (const Case &test_case : cases) {
+        SCOPED_TRACE(test_case.name);
+        std::array<uint8_t, 64> boundary{};
+        const std::vector<std::byte> definition = make_test_definition(
+            GRAPH_KEY_VALUE, reinterpret_cast<uint64_t>(boundary.data()), 1, test_case.root_variant
+        );
+        const TestDefinitionObject definition_object(definition);
+        OuterHeap heap(definition, 0xAA);
+        GraphExecution *execution =
+            heap.initialize_execution(definition_object, reinterpret_cast<uint64_t>(boundary.data()), 17);
+        ASSERT_NE(execution, nullptr);
+
+        ChipTaskStorage outer{};
+        outer.task.task_id = TaskId::make_global(7);
+        outer.task.packed_buffer_base = heap.base();
+        outer.task.packed_buffer_end = heap.end();
+        outer.slot.task_kind = TaskKind::GRAPH;
+        outer.slot.graph_context = execution;
+        outer.slot.ed_flags = test_case.shell_ed_flags;
+
+        ASSERT_EQ(graph_execution_materialize_slice(outer.slot, *execution, 2), GraphMaterializeResult::PREPARED);
+        EXPECT_EQ(execution->task_at(0).slot.ed_flags & ED_FLAG_CANDIDATE, 0);
+    }
+}
+
+// ED_FLAG_CANDIDATE stopped being inert once materialization began replaying it
+// onto a slot, so the image reader has to hold the conjunction that decides it
+// rather than only rejecting unknown bits. None of these images is one
+// graph_fill_definition can produce; each would otherwise reach dispatch, and
+// the DUMMY one would index early_dispatch_queues[] one past its last shape.
+TEST(GraphExecutionReplay, RejectsCandidateFlagWithoutItsConjunction) {
+    constexpr uint64_t GRAPH_KEY_VALUE = 0x1234;
+
+    struct Case {
+        const char *name;
+        TestEdDefect defect;
+    };
+    const Case cases[] = {
+        {"candidate with no producer", TestEdDefect::CANDIDATE_ON_ROOT},
+        {"candidate carrying a predicate", TestEdDefect::CANDIDATE_WITH_PREDICATE},
+        {"candidate with no dispatchable shape", TestEdDefect::CANDIDATE_ON_DUMMY},
+    };
+
+    for (const Case &test_case : cases) {
+        SCOPED_TRACE(test_case.name);
+        std::array<uint8_t, 64> boundary{};
+        const std::vector<std::byte> definition = make_test_definition(
+            GRAPH_KEY_VALUE, reinterpret_cast<uint64_t>(boundary.data()), 1, TestRoot::ORDINARY, test_case.defect
+        );
+        const TestDefinitionObject definition_object(definition);
+        OuterHeap heap(definition, 0xAA);
+        EXPECT_EQ(
+            heap.initialize_execution(definition_object, reinterpret_cast<uint64_t>(boundary.data()), 17), nullptr
+        );
+    }
+}
+
+// The same builder without a defect must still localize, so the test above
+// rejects on the flag conjunction and not on something it broke in passing.
+TEST(GraphExecutionReplay, AcceptsTheSameImageWithoutTheDefect) {
+    constexpr uint64_t GRAPH_KEY_VALUE = 0x1234;
+    std::array<uint8_t, 64> boundary{};
+    const std::vector<std::byte> definition =
+        make_test_definition(GRAPH_KEY_VALUE, reinterpret_cast<uint64_t>(boundary.data()));
+    const TestDefinitionObject definition_object(definition);
+    OuterHeap heap(definition, 0xAA);
+    EXPECT_NE(heap.initialize_execution(definition_object, reinterpret_cast<uint64_t>(boundary.data()), 17), nullptr);
 }
 
 // The boundary scalar pool is bounded by the Graph boundary contract
