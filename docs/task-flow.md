@@ -431,22 +431,23 @@ long run; a finite control timeout includes this deferral interval, and expiry
 poisons the local endpoint because the pending command's completion is
 uncertain.
 
-#### TRB temporary buffer
+#### Retained temporary buffer
 
-`tensormap_and_ringbuffer` copies ordinary non-child tensor arguments in through a
+Both host runtimes copy ordinary non-child tensor arguments in through a
 retained temporary buffer owned per pipeline slot, instead of a per-run `device_malloc()` /
-`device_free()` pair. This is always on for TRB — an internal allocation
+`device_free()` pair. This is always on — an internal allocation
 optimization with no user-facing switch. It is not serialized in task mailboxes
 and does not change `TaskArgs`, `CallConfig`, child-memory tensors, or public
 `Worker.malloc()` / `Worker.free()` semantics.
 
-On each TRB bind the host runtime sizes the retained buffer from the run's
+On each bind the host runtime sizes the retained buffer from the run's
 non-child tensors, growing it (free old + malloc new) only when a run needs
 more than is currently retained, and bump-slices each tensor from it. The
 buffer lives on the `DeviceRunner` across runs (freed once at finalize); the
 platform only stores its `{addr, size}` slot. If a grow allocation fails the
-run fails before the device arguments are copied in. See the runtime's `RUNTIME_LOGIC.md`
-§2.4 for the grow/reuse mechanics.
+run fails before the device arguments are copied in. The grow/slice logic is
+`RetainedTempBump` in `src/common/utils/retained_temp_bump.h`; see
+`tensormap_and_ringbuffer`'s `RUNTIME_LOGIC.md` §2.4 for the mechanics.
 
 ### SUB-type child loop (Python callable leaf)
 

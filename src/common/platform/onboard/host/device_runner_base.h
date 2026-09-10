@@ -1339,10 +1339,10 @@ protected:
     // base and dropped by that allocation's free, which is what keeps a cached
     // host VA from outliving its pages.
     ChildMemoryHostViewCache child_memory_host_views_;
-    // Retained temporary buffer for TRB device-arg staging, one per pipeline
-    // slot (see HostApi get/set_retained_temp_buffer). Just a remembered
+    // Retained temporary buffer for device arguments, one per pipeline slot
+    // (see HostApi get/set_retained_temp_buffer). Just a remembered
     // {addr, size} that the slot reuses across its runs and finalize frees;
-    // the grow/pack logic lives in trb bind.
+    // the grow/slice logic lives in utils/retained_temp_bump.h.
     std::array<void *, PTO_PIPELINE_MAX_DEPTH> retained_temp_addrs_{};
     std::array<std::size_t, PTO_PIPELINE_MAX_DEPTH> retained_temp_sizes_{};
     // Graph Definition storage, one retained block per pipeline slot — see

@@ -51,16 +51,17 @@ struct HostApiOps {
     // Set a device buffer to a byte value (device-side, no PCIe). Used to
     // zero-init pure OUTPUT buffers in lieu of an H2D copy-in.
     int (*device_memset)(void *runner_ctx, void *dev_ptr, int value, size_t size);
-    // Runner-scoped retained temporary buffer for TRB device-arg staging.
-    // This is NOT an allocator — it is a single {addr, size} slot that lives
-    // across runs on the DeviceRunner. trb bind reads the slot, and if the
-    // retained buffer is too small for this run's packed temporary size it
-    // device_free's the old one, device_malloc's a bigger one, and writes the
-    // new {addr, size} back. The grow/pack/slice logic lives in trb bind
-    // (runtime_maker); the platform only remembers the slot so it can be reused
-    // by later runs and freed at finalize. The slot is per pipeline slot, so
-    // two runs in different slots never share a staging buffer. `get` returns
-    // {nullptr, 0} when nothing is retained yet.
+    // Runner-scoped retained temporary buffer for device arguments, used by
+    // every host runtime that gives caller tensors a device buffer. This is NOT an allocator —
+    // it is a single {addr, size} slot that lives across runs on the
+    // DeviceRunner. A bind reads the slot, and if the retained buffer is too
+    // small for this run's packed temporary size it device_free's the old one,
+    // device_malloc's a bigger one, and writes the new {addr, size} back. The
+    // grow/slice logic lives in utils/retained_temp_bump.h; the platform only
+    // remembers the slot so it can be reused by later runs and freed at
+    // finalize. The slot is per pipeline slot, so two runs in different slots
+    // never share a staging buffer. `get` returns {nullptr, 0} when nothing is
+    // retained yet.
     void (*get_retained_temp_buffer)(void *runner_ctx, uint32_t pipeline_slot, void **addr, size_t *size);
     void (*set_retained_temp_buffer)(void *runner_ctx, uint32_t pipeline_slot, void *addr, size_t size);
     // Runner-owned Graph Definition storage: one device block per pipeline slot
