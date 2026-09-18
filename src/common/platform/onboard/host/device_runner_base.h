@@ -957,6 +957,13 @@ public:
     virtual int fill_persistent_arch_fields(KernelArgs *args, uint64_t device_id) = 0;
 
     /**
+     * Fill the `InitArgs` fields only one architecture defines, before the init
+     * entry uploads them. Default: nothing, which is what an architecture whose
+     * `InitArgs` carries no such field needs — the base fills the common ones.
+     */
+    virtual void fill_init_arch_fields(InitArgs & /*init_args*/) {}
+
+    /**
      * Arm or disarm this thread's host-side dep_gen capture, from the run's own
      * config, before it binds.
      *

@@ -874,6 +874,19 @@ int DeviceRunnerBase::prepare_kernel_callable(int32_t callable_id) {
     return kernel_exec_state_.mark_ready_enqueued();
 }
 
+/**
+ * Distance from a GM address to its nocache alias on `device_id`, or 0.
+ *
+ * The device maps each page twice, once cached and once not, and the driver owns
+ * that layout — so the distance is a per-device value only it can report, never a
+ * constant a caller may bake in. A kernel adds it to a base address to reach the
+ * uncached mapping.
+ *
+ * Every failure yields 0, which is the value that leaves loads cached, because
+ * the kernel's `addr + 0` is the ordinary address. A device without the alias
+ * answers ACL_ERROR_RT_FEATURE_NOT_SUPPORT, and that is not a defect: the alias
+ * is an L2 optimization, so its absence costs bandwidth, not correctness.
+ */
 int DeviceRunnerBase::ensure_aicpu_init_launched(rtStream_t control_stream) {
     if (aicpu_init_launched_) {
         return 0;
@@ -896,6 +909,7 @@ int DeviceRunnerBase::ensure_aicpu_init_launched(rtStream_t control_stream) {
     for (int kind = 0; kind < DMA_WORKSPACE_KIND_COUNT; ++kind) {
         init_args.dma_workspace_addr[kind] = dma_workspace_addr_[kind];
     }
+    fill_init_arch_fields(init_args);
 
     LOG_INFO("=== launch_aicpu_payload %s ===", host::KernelNames::InitName);
     int rc = launch_aicpu_payload(

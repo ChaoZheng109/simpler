@@ -1441,6 +1441,9 @@ target_sources(test_hbg_stall_dump_level PRIVATE
     ${HBG_RUNTIME_DIR}/scheduler/scheduler_completion.cpp
     ${CMAKE_SOURCE_DIR}/../../../src/a2a3/platform/shared/aicpu/pmu_collector_aicpu.cpp
     ${CMAKE_SOURCE_DIR}/../../../src/a2a3/platform/sim/aicpu/inner_platform_regs.cpp
+    # Defines get_dev_l2_cache_offset(), which the cold path reads to seed every
+    # core's GlobalContext.
+    ${CMAKE_SOURCE_DIR}/../../../src/common/platform/shared/aicpu/aicpu_device_config.cpp
     ${CMAKE_SOURCE_DIR}/../../../src/common/platform/shared/aicpu/args_dump_aicpu.cpp
     ${CMAKE_SOURCE_DIR}/../../../src/common/platform/shared/aicpu/chip_swimlane_collector_aicpu.cpp
     ${CMAKE_SOURCE_DIR}/../../../src/common/platform/shared/aicpu/device_phase_aicpu.cpp

@@ -149,6 +149,16 @@ public:
      */
     int fill_persistent_arch_fields(KernelArgs *args, uint64_t device_id) override;
 
+    /**
+     * Fill `InitArgs.l2_cache_offset` from the driver's per-device report.
+     *
+     * a2a3-only, for the same reason `kernel_args_init_ffts_base_addr` is: a5's
+     * `InitArgs` has no such field, because only a2a3 reaches an uncached
+     * mapping by offsetting the address. Every failure yields 0, the value that
+     * leaves loads cached.
+     */
+    void fill_init_arch_fields(InitArgs &init_args) override;
+
     // `upload_chip_callable_buffer` is inherited from `DeviceRunnerBase`.
 
     /**

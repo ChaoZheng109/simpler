@@ -34,9 +34,12 @@
 #include <thread>
 #include <vector>
 #include "acl/acl.h"
+#include "acl/error_codes/rt_error_codes.h"
 #include "host/acl_error_log.h"
 #include "platform_comm/comm.h"
 #include "runtime_c_api.h"
+// rt.h does not pull this in; it declares rtGetL2CacheOffset.
+#include "runtime/rt_preload_task.h"
 
 // Include HAL constants from CANN (header only, library loaded dynamically)
 #include "ascend_hal.h"
@@ -121,6 +124,26 @@ HalHostUnregisterFn get_halHostUnregister() {
 // =============================================================================
 // a2a3-only KernelArgsHelper extension
 // =============================================================================
+
+void DeviceRunner::fill_init_arch_fields(InitArgs &init_args) {
+    uint64_t offset = 0;
+    const int rc = rtGetL2CacheOffset(static_cast<uint32_t>(device_id_), &offset);
+    if (rc == ACL_ERROR_RT_FEATURE_NOT_SUPPORT) {
+        LOG_INFO("fill_init_arch_fields: device %d has no nocache alias; L2 bypass stays a no-op", device_id_);
+        offset = 0;
+    } else if (rc != RT_ERROR_NONE) {
+        LOG_WARN(
+            "fill_init_arch_fields: rtGetL2CacheOffset failed: %d (device_id=%d); L2 bypass stays a no-op", rc,
+            device_id_
+        );
+        offset = 0;
+    } else {
+        LOG_INFO(
+            "fill_init_arch_fields: device %d nocache alias offset=0x%llx", device_id_, (unsigned long long)offset
+        );
+    }
+    init_args.l2_cache_offset = offset;
+}
 
 int kernel_args_init_ffts_base_addr(KernelArgsHelper &helper) {
     uint64_t ffts_base_addr{0};
