@@ -10,6 +10,7 @@
  */
 
 #include <gtest/gtest.h>
+#include <unistd.h>
 
 #include <atomic>
 #include <cstddef>
@@ -268,7 +269,10 @@ TEST(HostPhaseRecords, APassIsWrittenAtMostOnceAndTheNextPassAppends) {
     // Both the device-run teardown and a run that stops before launch write the
     // artifact unconditionally, so the store -- not its callers -- is what keeps a
     // pass from appearing twice.
-    const std::string path = std::string(testing::TempDir()) + "/host_phase_records_write_once.jsonl";
+    // This test source is compiled into one executable per runtime, and ctest
+    // runs them concurrently; the pid keeps their scratch files from colliding.
+    const std::string path =
+        std::string(testing::TempDir()) + "/host_phase_records_write_once." + std::to_string(getpid()) + ".jsonl";
     std::remove(path.c_str());
 
     HostPhaseRecordStore store;
