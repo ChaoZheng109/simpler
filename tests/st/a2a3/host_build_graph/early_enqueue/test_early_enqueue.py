@@ -28,8 +28,8 @@ the runs the case submitted.
              Each run records two passive device-timestamp markers: one on its AICore stream
              after any cross-run wait and before its kernel launch, one on its AICPU stream
              behind the wait on its *own* AICore boundary. So a successor's
-             `aicore_start > predecessor.whole_operator_end` says its AICore stream was released
-             only after the predecessor's AICore kernel had returned. Both are
+             `aicore_start >= predecessor.whole_operator_end` says its AICore stream was not
+             released before the predecessor's AICore kernel had returned. Both are
              `aclrtEventGetTimestamp` readings — "syscnt when event recorded", one chip-wide
              counter — which is what makes a reading on one stream comparable with one on
              another. The AICPU run wall is kept alongside as bounded supporting evidence.
@@ -72,10 +72,13 @@ Every counted edge belongs entirely to the case that counted it. Three independe
 * the four span families are joined on the invocation id every span of one run shares.
 
 **What is not claimed.** The timestamp unit is device-uptime microseconds on a2a3, so a pair whose
-two readings land in the same tick is counted separately and never as ordered: the ordering held
-to the resolution available, and no sub-microsecond exclusion follows from a 1 MHz reading. A
-position this run did not record, or whose reading could not be attributed to it, is *unmeasured*
-and can never make a case pass.
+two readings land in the same tick is counted separately: the ordering held to the resolution
+available, and no sub-microsecond exclusion follows from a 1 MHz reading. It still counts towards
+the serialization claim, because the predecessor's marker is ahead of the boundary event consumed
+by the successor's wait, while the 1 µs clock can assign both records the same tick. A missing wait
+releases the successor while the predecessor's long-running kernel is still executing, which is
+visible as overlap at this resolution. A position this run did not record, or whose reading could
+not be attributed to it, is *unmeasured* and can never make a case pass.
 
 The depth-one class below runs the same sequence with the key absent. It is the control for both
 the "admitted" observation and the records: neither may appear there.
@@ -502,10 +505,12 @@ def _whole_operator_order(trace, records, case_runs):
       constructs, measured rather than inferred.
     * **overlapping** — the successor was released before that instant. A real failure of the
       ordering edge, whichever tier it happened on.
-    * **within_tick** — the two readings are the same tick. The ordering held to the resolution
-      available and is *not* an exclusion below it, so it is counted separately and never as
-      ordered. On a2a3 the timestamp unit is device-uptime microseconds, so a tick is 1 µs; no
-      sub-microsecond claim is made from it.
+    * **within_tick** — the two readings are the same tick. The predecessor's marker is queued
+      ahead of the boundary event consumed by the successor's wait, but the 1 µs device clock can
+      assign those distinct operations the same value. This shows no measurable overlap, not
+      strict ordering below one tick. A missing wait instead releases the successor while the
+      predecessor's long-running kernel is still executing and lands in ``overlapping``. The
+      cases therefore hold the serialization claim against ``ordered | within_tick``.
     * **unmeasured** — a position was unavailable, the two runs report different devices, or the
       two readings are on different tick rates. Never a pass.
 
@@ -548,6 +553,12 @@ def _whole_operator_order(trace, records, case_runs):
         if not decided:
             unmeasured.add(pair)
     return ordered, overlapping, within_tick, unmeasured
+
+
+def _non_overlapping_whole_operator_pairs(trace, records, case_runs):
+    """Pairs whose markers show no overlap at the device clock's resolution."""
+    ordered, _, within_tick, _ = _whole_operator_order(trace, records, case_runs)
+    return ordered | within_tick
 
 
 def _boundary_detail(trace, pairs):
@@ -789,7 +800,7 @@ class TestEarlyEnqueueDepthTwo(_EarlyEnqueueBase):
                 trace,
                 records,
                 _EVIDENCE_BUDGET_S,
-                lambda seen: bool(_whole_operator_order(trace, seen, case_runs)[0]),
+                lambda seen: bool(_non_overlapping_whole_operator_pairs(trace, seen, case_runs)),
             )
 
         assert len(case_runs) <= 2, (
@@ -810,15 +821,15 @@ class TestEarlyEnqueueDepthTwo(_EarlyEnqueueBase):
         # whole-operator relation: the successor's AICore stream was released only after the
         # predecessor's own AICore kernel had returned.
         ordered, overlapping, within_tick, unmeasured = _whole_operator_order(trace, records, case_runs)
+        non_overlapping = ordered | within_tick
         assert not overlapping, (
             f"a joined successor's AICore stream was released before its predecessor's whole "
             f"operator had finished, so the queued ordering edge did not hold: {sorted(overlapping)}; "
             f"{_boundary_detail(trace, overlapping)}"
         )
-        assert ordered, (
-            f"whole-operator device order is not established for any pair this case submitted. "
-            f"within one timestamp tick={sorted(within_tick)}, unmeasured={sorted(unmeasured)}; "
-            f"{_boundary_detail(trace, established)}"
+        assert non_overlapping, (
+            f"no pair this case submitted has comparable whole-operator boundary readings: "
+            f"unmeasured={sorted(unmeasured)}; {_boundary_detail(trace, established)}"
         )
 
         # The AICPU walls, as bounded supporting evidence: an overlap there is a failure too.
@@ -883,7 +894,7 @@ class TestEarlyEnqueueDepthTwo(_EarlyEnqueueBase):
                     trace,
                     records,
                     _EVIDENCE_BUDGET_S,
-                    lambda seen: _chained(_whole_operator_order(trace, seen, case_runs)[0]),
+                    lambda seen: _chained(_non_overlapping_whole_operator_pairs(trace, seen, case_runs)),
                 )
         finally:
             stop.set()
@@ -917,20 +928,20 @@ class TestEarlyEnqueueDepthTwo(_EarlyEnqueueBase):
         # Each of those overlaps still executed serially on the device, whole operator against
         # whole operator — and the *measured* edges must themselves chain. Requiring a chain of
         # the established edges and separately two measured ones is not the same claim: with
-        # established = {N->S, S->T, T->R} and S->T unmeasured, ordered = {N->S, T->R} satisfies
-        # both and contains no two consecutive measured edges. So the chain is required of
-        # `ordered`, which subsumes the count.
+        # established = {N->S, S->T, T->R} and S->T unmeasured,
+        # non_overlapping = {N->S, T->R} satisfies both and contains no two consecutive measured
+        # edges. So the chain is required of `non_overlapping`, which subsumes the count.
         ordered, overlapping, within_tick, unmeasured = _whole_operator_order(trace, records, case_runs)
+        non_overlapping = ordered | within_tick
         assert not overlapping, (
             f"a joined successor's AICore stream was released before its predecessor's whole "
             f"operator had finished, so the queued ordering edge did not hold: {sorted(overlapping)}; "
             f"{_boundary_detail(trace, overlapping)}"
         )
-        assert _chained(ordered), (
+        assert _chained(non_overlapping), (
             f"the measured whole-operator edges are not consecutive, so sustained refill is not "
-            f"established on the device: ordered={sorted(ordered)}, "
-            f"within one timestamp tick={sorted(within_tick)}, unmeasured={sorted(unmeasured)}; "
-            f"{_boundary_detail(trace, established)}"
+            f"established on the device: non_overlapping={sorted(non_overlapping)}, "
+            f"unmeasured={sorted(unmeasured)}; {_boundary_detail(trace, established)}"
         )
 
         # The AICPU walls, as bounded supporting evidence: an overlap there is a failure too.
