@@ -288,7 +288,8 @@ layers to be aware of:**
     "host_timestamp_quantization_ns": 0, // monotonic clock; nothing is binned
     "host_orchestration_origin_ns": <int>,  // earliest Host submit or upload
     "timeline_relation": "host_orchestration_precedes_device",
-    "host_clock_domain_id": "<string>",  // omitted when the boot ID is unreadable
+    "host_clock_domain_id": "<string>",  // omitted when the boot ID is unreadable;
+                                         // a merge then warns and assumes one Host clock
     "host_capture": {                    // completeness of the Host projection
       "status": "complete"|"dropped"|"incomplete",
       "expected_records": <int>,         // tasks the Host phase submitted
@@ -721,8 +722,9 @@ microseconds, and that offset enters a cross-Rank difference as a sender row
 plus a receiver column — the same shape a receive-side latency
 asymmetry would have and is indistinguishable from one in the result alone. The
 merge described here is the only supported way to place two Ranks on one axis. A
-quantity built from two timestamps taken on the *same* device carries no offset
-and needs no correction.
+quantity built from two timestamps taken on the *same* device and within one
+counter epoch carries no per-device-origin offset and needs no correction; a
+device reset starts a new epoch and ends that comparability.
 
 **Placement is by containment, and the bound is published.** A Rank's device
 records are drawn at the earliest Host ns its window allows. The complete Device
