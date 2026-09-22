@@ -189,9 +189,8 @@ RunCompletionFence::DeviceEventOps make_acl_event_ops() {
  * `ACL_EVENT_TIME_LINE` (0x8), not the completion-only `ACL_EVENT_SYNC` (0x1) the fences use:
  * only the timeline flag carries a timestamp, which `aclrtEventGetTimestamp` documents as "get
  * syscnt when event recorded" — the device's own system counter at the instant the stream reached
- * the record, not a host clock. `clock_correlation.cpp` already creates and re-records an event of
- * this flavour in production, which is where the re-record-without-reset behaviour these markers
- * rely on comes from.
+ * the record, not a host clock. These markers re-record one event per run with no intervening
+ * `aclrtResetEvent`: `aclrtRecordEvent` overwrites the prior timestamp in place.
  *
  * Retrieval is `aclrtSynchronizeEventWithTimeout` on the marker itself, then
  * `aclrtEventGetTimestamp`: the device having passed the record does not by itself make the

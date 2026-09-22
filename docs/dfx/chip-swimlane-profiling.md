@@ -267,9 +267,37 @@ layers to be aware of:**
                                        // which TaskId layout every task_id in
                                        // this document carries; see below.
     "clock_freq_hz": <int>,            // cycle→µs factor. a2a3=50e6, a5=1e9.
+                                       // Yields this device's own uptime µs;
+                                       // not comparable across devices.
     "num_cores": <int>,                // == len(core_types)
     "core_types": ["aic"|"aiv", ...],  // indexed by core_id
     "core_to_thread": [<int>, ...],    // optional; level >= 3 only
+
+    // The block below is present only on a capture carrying Host orchestration
+    // records. The two *_clock_domain fields name the KIND of clock each side
+    // stamps — they are constants, and two captures agreeing on them says
+    // nothing about whether their timestamps may be compared. Only
+    // `host_clock_domain_id` identifies an instance: it is the Linux boot ID,
+    // and a merge refuses Ranks that disagree on it. Device counters have no
+    // such field, which is why cross-device comparison is unsupported rather
+    // than merely unchecked.
+    "orchestrator_source": "host",
+    "orchestrator_clock_domain": "host_monotonic_ns",
+    "device_clock_domain": "device_syscnt_cycles",
+    "host_timestamp_resolution_ns": 1,   // records come straight from the Host
+    "host_timestamp_quantization_ns": 0, // monotonic clock; nothing is binned
+    "host_orchestration_origin_ns": <int>,  // earliest Host submit or upload
+    "timeline_relation": "host_orchestration_precedes_device",
+    "host_clock_domain_id": "<string>",  // omitted when the boot ID is unreadable
+    "host_capture": {                    // completeness of the Host projection
+      "status": "complete"|"dropped"|"incomplete",
+      "expected_records": <int>,         // tasks the Host phase submitted
+      "recorded_records": <int>,         // submit records this file carries
+      "pool_records": <int>,             // every timed Host operation in the pool
+      "dropped_records": <int>,
+      "error": null|"pool_overflow"|"record_count_mismatch"
+    },
+
     // Optional postprocessed HBG Host/Device mapping. Raw cycles stay unchanged.
     "clock_alignment": {
       "status": "bounded",
@@ -650,7 +678,7 @@ the capture, without Host logs or another tool invocation:
 ```text
 host_ns = host_anchor_ns
         + (device_cycles - device_anchor_cycles) * 1e9 / metadata.clock_freq_hz
-display_us = (host_ns - chosen_host_timeline_origin_ns) / 1000
+display_us = (host_ns - chosen_display_origin_ns) / 1000
 ```
 
 Host records use that same display origin directly. The selected Host anchor is
@@ -684,6 +712,17 @@ converter preserves the Host windows' relative positions, adds Rank-specific
 PID/name/flow namespaces, and reports each Rank's placement `slack_ns` plus the
 summed `cross_rank_uncertainty_ns` in trace metadata. The displayed Device start
 skew is a bounded placement, not a measurement of the exact Device start skew.
+
+**Device timestamps are per-device and must not be subtracted across Ranks.**
+Each is a cycle count on that device's own counter, whose origin is that
+device's power-on instant; runtime initialization aligns no two of them. Two
+Ranks' counters therefore differ by a stable per-device offset, on the order of
+microseconds, and that offset enters a cross-Rank difference as a sender row
+plus a receiver column — the same shape a receive-side latency
+asymmetry would have and is indistinguishable from one in the result alone. The
+merge described here is the only supported way to place two Ranks on one axis. A
+quantity built from two timestamps taken on the *same* device carries no offset
+and needs no correction.
 
 **Placement is by containment, and the bound is published.** A Rank's device
 records are drawn at the earliest Host ns its window allows. The complete Device
