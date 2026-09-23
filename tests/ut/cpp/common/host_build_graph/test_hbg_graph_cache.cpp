@@ -943,8 +943,10 @@ TEST(GraphExecutionErrors, ReadyQueueOverflowHasTriageText) {
 }
 
 // A shell's readiness is acted on inline, so it reaches no queue and cannot be
-// dropped by one. The queue below holds two entries and three shells arrive: a
-// routing that queued them would overflow it and latch a named error.
+// dropped by one. The queue wired below is the one a shell would land in if the
+// GRAPH branch stopped acting inline — a shell places no block, so its empty
+// active_mask shapes as DUMMY — and it holds two entries while three shells
+// arrive: a routing that queued them would overflow it and latch a named error.
 TEST(GraphExecutionActivationState, ShellReadinessOpensTheGateInsteadOfQueueing) {
     SharedMemoryHeader header{};
     SchedulerState scheduler{};
@@ -952,11 +954,11 @@ TEST(GraphExecutionActivationState, ShellReadinessOpensTheGateInsteadOfQueueing)
     ChipReadyQueueSlot queue_slots[2]{};
     queue_slots[0].sequence.store(0, std::memory_order_relaxed);
     queue_slots[1].sequence.store(1, std::memory_order_relaxed);
-    scheduler.graph_ready_queue.slots = queue_slots;
-    scheduler.graph_ready_queue.capacity = 2;
-    scheduler.graph_ready_queue.mask = 1;
-    scheduler.graph_ready_queue.enqueue_pos.store(0, std::memory_order_relaxed);
-    scheduler.graph_ready_queue.dequeue_pos.store(0, std::memory_order_relaxed);
+    scheduler.dummy_ready_queue.slots = queue_slots;
+    scheduler.dummy_ready_queue.capacity = 2;
+    scheduler.dummy_ready_queue.mask = 1;
+    scheduler.dummy_ready_queue.enqueue_pos.store(0, std::memory_order_relaxed);
+    scheduler.dummy_ready_queue.dequeue_pos.store(0, std::memory_order_relaxed);
     GraphExecution executions[3]{};
     ChipTaskSlotState graph_slots[3]{};
     for (int32_t i = 0; i < 3; ++i) {
@@ -972,7 +974,7 @@ TEST(GraphExecutionActivationState, ShellReadinessOpensTheGateInsteadOfQueueing)
     for (const GraphExecution &execution : executions) {
         EXPECT_TRUE(graph_execution_external_ready(execution));
     }
-    EXPECT_EQ(scheduler.graph_ready_queue.enqueue_pos.load(std::memory_order_acquire), uint64_t{0});
+    EXPECT_EQ(scheduler.dummy_ready_queue.enqueue_pos.load(std::memory_order_acquire), uint64_t{0});
     EXPECT_EQ(header.sched_error_code.load(std::memory_order_acquire), SIMPLER_ERROR_NONE);
 }
 

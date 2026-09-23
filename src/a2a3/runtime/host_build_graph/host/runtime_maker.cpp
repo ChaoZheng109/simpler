@@ -849,11 +849,11 @@ int32_t run_host_orchestration(
     if (ready_queue_status != 0) {
         LOG_ERROR(
             "host-orch: ready queue reachable population exceeds %" PRIu64 " (ready=%" PRIu64 "/%" PRIu64 "/%" PRIu64
-            ", sync=%" PRIu64 "/%" PRIu64 "/%" PRIu64 ", dummy=%" PRIu64 ", graph=%" PRIu64 "/%" PRIu64 ")",
+            ", sync=%" PRIu64 "/%" PRIu64 "/%" PRIu64 ", dummy=%" PRIu64 ", graph_prepare=%" PRIu64 ")",
             READY_QUEUE_CAPACITY_LIMIT, ready_queue_populations.ready[0], ready_queue_populations.ready[1],
             ready_queue_populations.ready[2], ready_queue_populations.ready_sync[0],
             ready_queue_populations.ready_sync[1], ready_queue_populations.ready_sync[2], ready_queue_populations.dummy,
-            ready_queue_populations.graph_ready, ready_queue_populations.graph_prepare
+            ready_queue_populations.graph_prepare
         );
         LOG_RUNTIME_FAILURE(SIMPLER_ERROR_NONE, SIMPLER_ERROR_READY_QUEUE_OVERFLOW, ready_queue_status);
         return ready_queue_status;

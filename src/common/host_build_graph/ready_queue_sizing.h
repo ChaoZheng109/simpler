@@ -19,7 +19,6 @@ struct ReadyQueuePopulations {
     uint64_t ready[NUM_RESOURCE_SHAPES]{};
     uint64_t ready_sync[NUM_RESOURCE_SHAPES]{};
     uint64_t dummy{0};
-    uint64_t graph_ready{0};
     uint64_t graph_prepare{0};
 
     void add_task(ActiveMask active_mask, TaskAttrs task_attrs, TaskKind task_kind, uint64_t count = 1);

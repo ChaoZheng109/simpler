@@ -163,7 +163,6 @@ TEST(HbgReadyQueueSizing, DerivesCapacityForEachReachablePopulation) {
     EXPECT_EQ(capacities.ready[static_cast<int32_t>(ResourceShape::MIX)], 8);
     EXPECT_EQ(capacities.ready_sync[static_cast<int32_t>(ResourceShape::AIV)], 8);
     EXPECT_EQ(capacities.dummy, 16);
-    EXPECT_EQ(capacities.graph_ready, 8);
     EXPECT_EQ(capacities.graph_prepare, 8);
 }
 
@@ -210,7 +209,6 @@ TEST(HbgReadyQueueSizing, InitializesEveryLogicalQueueCapacityFromLayout) {
     layout.capacities.ready_sync[1] = 32;
     layout.capacities.ready_sync[2] = 64;
     layout.capacities.dummy = 128;
-    layout.capacities.graph_ready = 256;
     layout.capacities.graph_prepare = 512;
     SchedulerState scheduler{};
 
@@ -221,6 +219,5 @@ TEST(HbgReadyQueueSizing, InitializesEveryLogicalQueueCapacityFromLayout) {
         EXPECT_EQ(scheduler.ready_sync_queues[i].capacity, layout.capacities.ready_sync[i]);
     }
     EXPECT_EQ(scheduler.dummy_ready_queue.capacity, layout.capacities.dummy);
-    EXPECT_EQ(scheduler.graph_ready_queue.capacity, layout.capacities.graph_ready);
     EXPECT_EQ(scheduler.graph_prepare_queue.capacity, layout.capacities.graph_prepare);
 }

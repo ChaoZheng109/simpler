@@ -97,12 +97,9 @@ void SchedulerState::print_queues() {
         );
     }
     LOG_TIMING(
-        "QPROBE dummy pushes=%llu maxocc=%llu | graph_rq pushes=%llu maxocc=%llu | graph_pq pushes=%llu maxocc=%llu | "
-        "ess pushes=%llu maxocc=%llu",
+        "QPROBE dummy pushes=%llu maxocc=%llu | graph_pq pushes=%llu maxocc=%llu | ess pushes=%llu maxocc=%llu",
         (unsigned long long)sched->dummy_ready_queue.enqueue_pos.load(std::memory_order_relaxed),
         (unsigned long long)sched->dummy_ready_queue.max_occupancy.load(std::memory_order_relaxed),
-        (unsigned long long)sched->graph_ready_queue.enqueue_pos.load(std::memory_order_relaxed),
-        (unsigned long long)sched->graph_ready_queue.max_occupancy.load(std::memory_order_relaxed),
         (unsigned long long)sched->graph_prepare_queue.enqueue_pos.load(std::memory_order_relaxed),
         (unsigned long long)sched->graph_prepare_queue.max_occupancy.load(std::memory_order_relaxed),
         (unsigned long long)sched->early_sync_start_queue.enqueue_pos.load(std::memory_order_relaxed),

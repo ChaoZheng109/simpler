@@ -459,7 +459,6 @@ struct ReadyQueueCapacities {
     uint64_t ready[NUM_RESOURCE_SHAPES]{};
     uint64_t ready_sync[NUM_RESOURCE_SHAPES]{};
     uint64_t dummy{0};
-    uint64_t graph_ready{0};
     uint64_t graph_prepare{0};
 };
 
@@ -482,7 +481,6 @@ struct SchedulerLayout {
     size_t off_ready_queue_slots[NUM_RESOURCE_SHAPES];
     size_t off_ready_sync_queue_slots[NUM_RESOURCE_SHAPES];
     size_t off_dummy_ready_queue_slots;
-    size_t off_graph_ready_queue_slots;
     size_t off_graph_prepare_queue_slots;
     size_t off_early_dispatch_queue_slots[NUM_RESOURCE_SHAPES];
     size_t off_early_sync_start_queue_slots;
@@ -527,15 +525,12 @@ struct SchedulerState {
     // the dispatch loop and completed inline -- never goes to AICore.
     ChipReadyQueue dummy_ready_queue;
 
-    // An outer Graph is control work, never an AICore task. External dependency
-    // readiness and bounded materialization progress independently and meet at
-    // the submission's single atomic activation gate.
-    //
-    // graph_ready_queue is unused: a shell's readiness is acted on inline by
-    // push_ready_routed's GRAPH branch, on the completion path. Its allocation
-    // and its teardown occupancy line remain part of the arena layout and of the
-    // host-side capacity plan.
-    ChipReadyQueue graph_ready_queue;
+    // An outer Graph is control work, never an AICore task, and it occupies no
+    // ready queue of its own: a shell's readiness is acted on inline by
+    // push_ready_routed's GRAPH branch, on the completion path. External
+    // dependency readiness and bounded materialization progress independently and
+    // meet at the submission's single atomic activation gate; this queue carries
+    // the materialization half alone.
     ChipReadyQueue graph_prepare_queue;
 
     alignas(64) AsyncWaitList async_wait_list;
