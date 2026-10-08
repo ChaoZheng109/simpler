@@ -23,6 +23,10 @@ on:
         required: false
         default: false
         type: boolean
+      issue_2181_repro:
+        required: false
+        default: false
+        type: boolean
       manual_mode:
         description: exclude for Per-PR, include for the Daily full sweep.
         required: false
@@ -42,7 +46,7 @@ jobs:
   run:
     name: st-sim-a5sim
     runs-on: ${{ fromJSON(inputs.runs_on) }}
-    timeout-minutes: 30
+    timeout-minutes: ${{ inputs.issue_2181_repro && 180 || 30 }}
     env:
       MANUAL_MODE: ${{ inputs.manual_mode }}
       SIMPLER_SCHEDULER_TIMEOUT_MS: ${{ inputs.scheduler_timeout_ms }}
@@ -98,27 +102,28 @@ jobs:
           packages: "--no-build-isolation --config-settings=build.targets=build_package_a5sim .[test]"
 
       - name: Run pytest scene tests
+        if: ${{ !inputs.issue_2181_repro }}
         run: |
           .venv/bin/python -m pytest examples tests/st --platform a5sim --device 0-15 -v \
             --pto-session-timeout 600 --require-pto-isa \
             --manual "$MANUAL_MODE"
 
       - name: dep_gen smoke (a5)
-        if: inputs.include_dfx_smokes
+        if: inputs.include_dfx_smokes && !inputs.issue_2181_repro
         run: |
           .venv/bin/python -m pytest tests/st/a5/tensormap_and_ringbuffer/dfx/dep_gen/ \
             --platform a5sim --device 0-15 -p no:xdist --pto-session-timeout 600 \
             --require-pto-isa --manual "${{ inputs.manual_mode == 'only' && 'only' || 'include' }}" --enable-dep-gen
 
       - name: dep_gen smoke (a5 host_build_graph)
-        if: inputs.include_dfx_smokes
+        if: inputs.include_dfx_smokes && !inputs.issue_2181_repro
         run: |
           .venv/bin/python -m pytest tests/st/a5/host_build_graph/dfx/dep_gen/ \
             --platform a5sim --device 0-15 -p no:xdist --pto-session-timeout 600 \
             --require-pto-isa --manual "${{ inputs.manual_mode == 'only' && 'only' || 'include' }}" --enable-dep-gen
 
       - name: chip_swimlane smoke (a5)
-        if: inputs.include_dfx_smokes
+        if: inputs.include_dfx_smokes && !inputs.issue_2181_repro
         run: |
           .venv/bin/python -m pytest tests/st/a5/tensormap_and_ringbuffer/dfx/chip_swimlane/ \
             --platform a5sim --device 0-15 -p no:xdist --pto-session-timeout 600 \
@@ -126,7 +131,7 @@ jobs:
             --enable-chip-swimlane --enable-dep-gen
 
       - name: chip_swimlane smoke (a5 host_build_graph)
-        if: inputs.include_dfx_smokes
+        if: inputs.include_dfx_smokes && !inputs.issue_2181_repro
         run: |
           for level in 1 2; do
             .venv/bin/python -m pytest \
@@ -145,8 +150,41 @@ jobs:
             --require-pto-isa --manual "${{ inputs.manual_mode == 'only' && 'only' || 'include' }}" \
             --enable-chip-swimlane 3
 
+      - name: Reproduce issue 2181 on macOS a5sim
+        if: inputs.issue_2181_repro
+        run: |
+          mkdir -p issue-2181-artifacts
+          for attempt in $(seq 1 200); do
+            rm -rf outputs
+            echo "$attempt" > issue-2181-artifacts/attempt.txt
+            echo "::notice::issue 2181 reproduction attempt $attempt/200"
+            if .venv/bin/python -m pytest -s -vv --tb=long \
+              tests/st/a5/host_build_graph/dfx/chip_swimlane/test_scheduler_phases.py \
+              --case TestSchedulerPhases::resolve_dummy \
+              --platform a5sim --device 0-15 -p no:xdist --pto-session-timeout 600 \
+              --require-pto-isa --manual include --enable-chip-swimlane 2 \
+              2>&1 | tee issue-2181-artifacts/pytest.log; then
+              continue
+            else
+              status=$?
+              echo "::error::issue 2181 reproduced on attempt $attempt"
+              exit "$status"
+            fi
+          done
+
+      - name: Upload issue 2181 reproduction artifacts
+        if: failure() && inputs.issue_2181_repro
+        uses: actions/upload-artifact@v4
+        with:
+          name: issue-2181-macos-a5sim-${{ github.run_attempt }}
+          path: |
+            issue-2181-artifacts/
+            outputs/
+          if-no-files-found: warn
+          retention-days: 7
+
       - name: PMU smoke (a5)
-        if: inputs.include_dfx_smokes
+        if: inputs.include_dfx_smokes && !inputs.issue_2181_repro
         run: |
           .venv/bin/python -m pytest tests/st/a5/tensormap_and_ringbuffer/dfx/pmu/test_pmu.py \
             --platform a5sim --device 0-15 -p no:xdist --pto-session-timeout 600 \
@@ -160,7 +198,7 @@ jobs:
       # marked. This is also the mode simpler_setup.tools.core_swimlane replays
       # from, so it is the one whose producer must keep matching that consumer.
       - name: args_dump smoke (a5, hybrid)
-        if: inputs.include_dfx_smokes
+        if: inputs.include_dfx_smokes && !inputs.issue_2181_repro
         run: |
           .venv/bin/python -m pytest tests/st/a5/tensormap_and_ringbuffer/dfx/args_dump/test_args_dump.py \
             --platform a5sim --device 0-15 -p no:xdist --pto-session-timeout 600 \
@@ -168,7 +206,7 @@ jobs:
             --dump-args hybrid
 
       - name: scope_stats smoke (a5)
-        if: inputs.include_dfx_smokes
+        if: inputs.include_dfx_smokes && !inputs.issue_2181_repro
         run: |
           .venv/bin/python -m pytest tests/st/a5/tensormap_and_ringbuffer/dfx/scope_stats/ \
             --platform a5sim --device 0-15 -p no:xdist --pto-session-timeout 600 \
