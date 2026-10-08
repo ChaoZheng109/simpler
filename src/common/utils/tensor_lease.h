@@ -34,11 +34,15 @@
  * and the release in `utils/tensor_lease_release.h`.
  */
 enum class TensorReleaseKind {
-    // device_free at end of run — the site that made it owns this allocation.
+    // No production path records Free: both runtimes stage through retained
+    // slices. Kept for an owned per-tensor allocation that needs device_free
+    // at the end of the run.
     Free,
     // A slice of a buffer that outlives the run; releasing it is a no-op.
     BufferNoop,
-    // Owned by someone else entirely (caller device memory); never released here.
+    // No production path records ExternalNoop: caller-owned device tensors
+    // pass through without leases. Kept for an externally owned buffer that
+    // must never be freed here.
     ExternalNoop,
 };
 

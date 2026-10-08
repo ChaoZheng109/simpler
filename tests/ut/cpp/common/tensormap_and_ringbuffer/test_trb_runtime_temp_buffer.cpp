@@ -491,6 +491,34 @@ TEST_F(TrbRuntimeTempBufferTest, TemporaryBufferSlicesWithoutChangingCopies) {
     EXPECT_NE(fake_.retained_addr, nullptr);
 }
 
+TEST_F(TrbRuntimeTempBufferTest, MixedHostAndDeviceArgsOnlyLeaseHostSlices) {
+    fake_.reset();
+    Runtime runtime = make_runtime();
+    std::vector<uint8_t> host_input(64, 7);
+    std::vector<uint8_t> device_input(64, 9);
+    std::vector<uint8_t> host_output(64, 0);
+    ChipStorageTaskArgs args;
+    args.add_tensor(make_tensor(host_input));
+    args.add_tensor(make_tensor(device_input, true));
+    args.add_tensor(make_tensor(host_output));
+    ArgDirection signature[3] = {ArgDirection::IN, ArgDirection::IN, ArgDirection::OUT};
+
+    ASSERT_EQ(bind_runtime(runtime, api_, args, signature, 3), 0);
+    ASSERT_EQ(runtime.tensor_leases_.size(), 2u);
+    EXPECT_EQ(runtime.tensor_leases_[0].host_ptr, host_input.data());
+    EXPECT_EQ(runtime.tensor_leases_[0].release_kind, TensorReleaseKind::BufferNoop);
+    EXPECT_EQ(runtime.tensor_leases_[1].host_ptr, host_output.data());
+    EXPECT_EQ(runtime.tensor_leases_[1].release_kind, TensorReleaseKind::BufferNoop);
+    EXPECT_EQ(fake_.device_malloc_count, 1);
+    EXPECT_EQ(fake_.retained_size, align_up(64, kAlign) * 2 + kAlign - 1);
+
+    ASSERT_EQ(stage_inputs(runtime), 0);
+    EXPECT_EQ(fake_.copy_to_count, 2);
+    ASSERT_EQ(finish_run(runtime, 0), 0);
+    EXPECT_EQ(fake_.copy_from_count, 1);
+    EXPECT_EQ(fake_.device_free_count, 0);
+}
+
 TEST_F(TrbRuntimeTempBufferTest, SecondSameShapeRunReusesRetainedBuffer) {
     std::vector<uint8_t> input(64, 7);
     std::vector<uint8_t> output(64, 0);

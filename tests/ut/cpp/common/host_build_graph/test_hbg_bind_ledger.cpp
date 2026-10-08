@@ -733,6 +733,7 @@ TEST_F(HbgBindLedgerTest, AnEmptyTensorIsPassedThroughAndTakesNoSlice) {
     ASSERT_EQ(runtime.tensor_leases().size(), 1u);
     EXPECT_EQ(runtime.tensor_leases()[0].host_ptr, real.data());
     EXPECT_EQ(runtime.tensor_leases()[0].size, 64u);
+    EXPECT_EQ(runtime.tensor_leases()[0].release_kind, TensorReleaseKind::BufferNoop);
     EXPECT_EQ(release_run_bindings_impl(&runtime, &api_), 0);
 }
 

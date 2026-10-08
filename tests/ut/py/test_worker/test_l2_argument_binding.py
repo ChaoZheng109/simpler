@@ -170,6 +170,23 @@ def test_accepted_device_buffer_stays_live_through_finalization(l2):
     assert frees == [buffer.base]
 
 
+def test_mixed_host_and_device_args_keep_their_address_spaces_at_the_native_boundary(l2):
+    worker, calls, _ = l2
+    host = wrap_fork_inherited(0x1000, 64, worker._owner_instance_id, 99, access=AccessMode.READ)
+    device = register_buffer(worker)
+    args = TaskArgs()
+    args.add_tensor(Tensor(host, shapes=(4,), dtype=DataType.FLOAT32))
+    args.add_tensor(device.tensor((4,), DataType.FLOAT32))
+
+    handle = worker._submit_l2_locked(3, args, CallConfig())
+    assert len(calls) == 1
+    assert calls[0].tensor(0).data == 0x1000
+    assert calls[0].tensor(0).child_memory is False
+    assert calls[0].tensor(1).data == device.base
+    assert calls[0].tensor(1).child_memory is True
+    worker._finalize_run_handle(handle, handle._run_id, None)
+
+
 @pytest.mark.parametrize("second_offset, rejected", [(8, True), (16, False)])
 def test_direct_l2_uses_the_shared_writable_overlap_rule(l2, second_offset, rejected):
     worker, calls, _ = l2
