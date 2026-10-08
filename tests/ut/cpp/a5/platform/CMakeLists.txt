@@ -34,7 +34,7 @@ simpler_ut_add_target(NAME test_host_log_off
 # a5 CPU_TOPO fallback and affinity selection. Pure logic; packaged fallback
 # entries enforce their own verified SoC, host-architecture and OCCUPY constraints.
 a5_platform_case(test_aicpu_topology_fallback.cpp
-    SOURCES ${A5_ONBOARD_HOST_DIR}/aicpu_topology_probe.cpp
+    SOURCES ${A5_ONBOARD_HOST_DIR}/aicpu_affinity_select.cpp
     INCLUDES ${A5_ONBOARD_HOST_DIR}
     LINK ${CMAKE_DL_LIBS})
 # The probe reads this table from beside its own binary.

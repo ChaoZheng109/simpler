@@ -94,6 +94,7 @@ set(HOST_RUNTIME_SOURCES "")
 list(APPEND HOST_RUNTIME_SOURCES ${SIMPLER_HOST_LOG_SOURCES})
 list(APPEND HOST_RUNTIME_SOURCES
     "${CMAKE_CURRENT_SOURCE_DIR}/aicpu_topology_probe.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/aicpu_affinity_select.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/device_runner.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/memory_allocator.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/profiling_copy.cpp"
@@ -142,6 +143,8 @@ list(LENGTH HOST_RUNTIME_SOURCES NUM_HOST_RUNTIME_SOURCES)
 message(STATUS "Host runtime: ${NUM_HOST_RUNTIME_SOURCES} source files")
 message(VERBOSE "Host runtime sources: ${HOST_RUNTIME_SOURCES}")
 add_library(host_runtime SHARED ${HOST_RUNTIME_SOURCES})
+include("${SIMPLER_CMAKE_DIR}/aicpu_topology_driver.cmake")
+simpler_configure_aicpu_topology_driver(host_runtime)
 include("${SIMPLER_CMAKE_DIR}/profiling_config.cmake")
 simpler_configure_profiling(host_runtime)
 add_custom_command(TARGET host_runtime POST_BUILD

@@ -65,6 +65,76 @@ void set_device_occupy(AicpuTopology &topology, uint64_t occupy) {
     topology.device_occupancy.occupy_valid = true;
 }
 
+TEST(A5AicpuTopologyFallback, BuildsDriverTopologyWithOccupancyFiltering) {
+    pto::a5::detail::CpuTopologyData raw{};
+    raw.total_nums = 8;
+    for (uint32_t i = 0; i < raw.total_nums; ++i) {
+        const uint8_t id = static_cast<uint8_t>(raw.total_nums - 1 - i);
+        raw.cpus[i].cpu_id = id;
+        raw.cpus[i].phy_cpu_id = id / 2;
+        raw.cpus[i].hyperthread_id = id % 2;
+    }
+    pto::a5::AicpuDeviceOccupancy occupancy{};
+    occupancy.occupy_valid = true;
+    occupancy.occupy = (1ULL << 3) | (1ULL << 4) | (1ULL << 5);
+    AicpuTopology topology;
+    ASSERT_TRUE(pto::a5::detail::build_aicpu_topology(occupancy, "test-soc", true, raw, topology));
+    EXPECT_EQ(topology.source, AicpuTopologySource::kDriver);
+    EXPECT_EQ(topology.soc_name, "test-soc");
+    EXPECT_EQ(topology.logical_cpu_count, 8U);
+    EXPECT_EQ(topology.surviving_cluster_ids, (std::vector<int32_t>{0, 1}));
+    ASSERT_EQ(topology.os_schedulable_cpus.size(), 3U);
+    EXPECT_EQ(topology.os_schedulable_cpus[0].cpu_id, 3);
+    EXPECT_EQ(topology.os_schedulable_cpus[1].cpu_id, 4);
+    EXPECT_EQ(topology.os_schedulable_cpus[2].cpu_id, 5);
+    EXPECT_TRUE(topology.scheduler_smt_enabled);
+}
+
+TEST(A5AicpuTopologyFallback, BuildsOccupancyFallbackWithoutDriverMetadata) {
+    pto::a5::detail::CpuTopologyData raw{};
+    pto::a5::AicpuDeviceOccupancy occupancy{};
+    occupancy.occupy_valid = true;
+    occupancy.occupy = (1ULL << 2) | (1ULL << 63);
+    AicpuTopology topology;
+    ASSERT_TRUE(pto::a5::detail::build_aicpu_topology(occupancy, nullptr, false, raw, topology));
+    EXPECT_EQ(topology.source, AicpuTopologySource::kOccupyFallback);
+    EXPECT_EQ(topology.logical_cpu_count, 2U);
+    EXPECT_EQ(topology.scenario_type, AicpuScenarioType::kUnknown);
+    EXPECT_TRUE(topology.surviving_cluster_ids.empty());
+    ASSERT_EQ(topology.os_schedulable_cpus.size(), 2U);
+    EXPECT_EQ(topology.os_schedulable_cpus[0].cpu_id, 2);
+    EXPECT_EQ(topology.os_schedulable_cpus[1].cpu_id, 63);
+    EXPECT_EQ(topology.os_schedulable_cpus[0].phy_cpu_id, -1);
+    EXPECT_FALSE(topology.scheduler_smt_enabled);
+}
+
+TEST(A5AicpuTopologyFallback, RejectsDuplicateDriverCpuIdsAndClearsTopology) {
+    pto::a5::detail::CpuTopologyData raw{};
+    raw.total_nums = 2;
+    raw.cpus[0].cpu_id = 2;
+    raw.cpus[0].phy_cpu_id = 1;
+    raw.cpus[1] = raw.cpus[0];
+    pto::a5::AicpuDeviceOccupancy occupancy{};
+    occupancy.occupy_valid = true;
+    occupancy.occupy = 1ULL << 2;
+    AicpuTopology topology;
+    EXPECT_FALSE(pto::a5::detail::build_aicpu_topology(occupancy, "test-soc", true, raw, topology));
+    EXPECT_TRUE(topology.soc_name.empty());
+    EXPECT_TRUE(topology.os_schedulable_cpus.empty());
+    EXPECT_EQ(topology.logical_cpu_count, 0U);
+}
+
+TEST(A5AicpuTopologyFallback, RejectsDriverCountsOutsideBufferCapacity) {
+    pto::a5::detail::CpuTopologyData raw{};
+    pto::a5::AicpuDeviceOccupancy occupancy{};
+    occupancy.occupy_valid = true;
+    occupancy.occupy = 1ULL << 2;
+    AicpuTopology topology;
+    EXPECT_FALSE(pto::a5::detail::build_aicpu_topology(occupancy, nullptr, true, raw, topology));
+    raw.total_nums = pto::a5::detail::kCpuOccupancyBits + 1;
+    EXPECT_FALSE(pto::a5::detail::build_aicpu_topology(occupancy, nullptr, true, raw, topology));
+}
+
 TEST(A5AicpuTopologyFallback, EnumeratesBoundaryCpuIdsAndRejectsEmptyMask) {
     std::vector<AicpuLogicalCpu> cpus;
 
