@@ -90,8 +90,9 @@ Three things a name comparison cannot see, all of which the checks above caught:
 ### Why it regressed between #1897 and #1929
 
 Over that range `graph_begin` held **one recording slot for the whole
-orchestration**. A Graph whose `full_key` differed from the in-flight recording's
-got the default `GraphScopeResult` back — `execute_block=true, recording=false` —
+orchestration**. A Graph whose cache key (then named `full_key`) differed from
+the in-flight recording's got the default `GraphScopeResult` back —
+`execute_block=true, recording=false` —
 and `rt_submit_graph_impl` ran its body on the ordinary path, with no warning and
 no retry, even though the `rt_graph_commit()` on that same branch then waited for
 the recorder to go idle. So k distinct Definitions submitted back to back got
