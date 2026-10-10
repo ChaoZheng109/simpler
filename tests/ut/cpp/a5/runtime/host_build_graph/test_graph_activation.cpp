@@ -316,3 +316,41 @@ TEST_F(GraphRootRoutingTest, ConcurrentPublicationAndReadinessRouteEveryRootOnce
         expect_routed_range(0, 0);
     }
 }
+
+TEST_F(GraphRootRoutingTest, ConcurrentFinalPublicationAndReadinessRouteEveryRootOnce) {
+    constexpr int FIRST_SLICE_COUNT = 4;
+    for (int iteration = 0; iteration < 200; ++iteration) {
+        SCOPED_TRACE(iteration);
+        execution.state.store(static_cast<uint8_t>(GraphExecutionState::MATERIALIZING));
+        execution.published_tasks.store(0);
+        execution.route_cursor.store(0);
+        sched.graph_incremental_publish(execution, 0, FIRST_SLICE_COUNT);
+        ASSERT_EQ(execution.published_tasks.load(), FIRST_SLICE_COUNT);
+        ASSERT_FALSE(graph_execution_external_ready(execution));
+        ASSERT_EQ(execution.route_cursor.load(), 0);
+        expect_routed_range(0, 0);
+        graph_execution_set_state(execution, GraphExecutionState::PREPARED);
+
+        std::atomic<int> arrived{0};
+        auto rendezvous = [&] {
+            arrived.fetch_add(1, std::memory_order_release);
+            while (arrived.load(std::memory_order_acquire) != 2) {}
+        };
+        std::thread publisher([&] {
+            rendezvous();
+            sched.graph_incremental_publish(execution, FIRST_SLICE_COUNT, TASK_COUNT);
+        });
+        std::thread ready([&] {
+            rendezvous();
+            sched.activate_graph_task(shell);
+        });
+        publisher.join();
+        ready.join();
+
+        EXPECT_EQ(execution.published_tasks.load(), TASK_COUNT);
+        EXPECT_EQ(execution.route_cursor.load(), TASK_COUNT);
+        EXPECT_TRUE(graph_execution_external_ready(execution));
+        expect_routed_range(0, TASK_COUNT);
+        expect_routed_range(0, 0);
+    }
+}
