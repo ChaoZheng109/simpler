@@ -141,6 +141,7 @@ struct OwnershipFixture {
     }
 
     ~OwnershipFixture() {
+        collector.hold_retained_writer_for_test(false);
         collector.fail_arena_copy_for_test(false);
         set_dump_args_enabled(false);
         set_platform_dump_base(0);
@@ -258,6 +259,8 @@ TEST(ArgsDumpOwnership, ACloseProvesProcessingBeforeItDecidesALeftover) {
  */
 TEST(ArgsDumpOwnership, ACloseReturnsOnlyAfterEveryPublishedBufferIsReceived) {
     OwnershipFixture fx("processing-proof-multi");
+    // Open-epoch statistics remain available until the writer releases the epoch.
+    fx.collector.hold_retained_writer_for_test(true);
     // Two switches plus the end-of-run flush.
     constexpr int kRecords = 2 * PLATFORM_DUMP_RECORDS_PER_BUFFER + 88;
 
@@ -274,6 +277,7 @@ TEST(ArgsDumpOwnership, ACloseReturnsOnlyAfterEveryPublishedBufferIsReceived) {
     EXPECT_EQ(fx.stats().open_collected_records, static_cast<uint64_t>(kRecords))
         << "the close returned with published buffers still unreceived";
 
+    fx.collector.hold_retained_writer_for_test(false);
     std::string error;
     ASSERT_TRUE(fx.flush(&error)) << error;
     const std::string manifest = read_file(fx.root.manifest("run-a"));
