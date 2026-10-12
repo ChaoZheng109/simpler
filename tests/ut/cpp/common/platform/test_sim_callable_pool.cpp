@@ -170,7 +170,7 @@ make_chip(const std::vector<int32_t> &func_ids, const std::vector<uint8_t> &bina
     for (size_t i = 0; i < func_ids.size(); ++i)
         children.push_back(make_child(binary));
     const uint8_t orch[64] = {orch_tag};
-    return make_callable<CoreCallable, CHIP_MAX_TENSOR_ARGS, 2048>(
+    return make_chip_callable(
         nullptr, 0, "orch_entry", orch, sizeof(orch), func_ids.data(), children.data(),
         static_cast<int32_t>(func_ids.size()), "orch_config"
     );
@@ -239,7 +239,7 @@ TEST_F(SimCallablePoolTest, AFailedRegistrationPublishesNothing) {
 // A func_id the runtime's tables cannot address is refused before anything is
 // allocated, so it too publishes nothing.
 TEST_F(SimCallablePoolTest, AnUnaddressableFuncIdPublishesNothing) {
-    const std::vector<uint8_t> chip = make_chip({RUNTIME_MAX_FUNC_ID}, kernel_, 0x33);
+    const std::vector<uint8_t> chip = make_chip({CHIP_MAX_FUNC_ID}, kernel_, 0x33);
     EXPECT_EQ(runner_.upload_chip_callable_buffer(as_chip(chip)), 0u);
     EXPECT_EQ(runner_.pool_size(), 0u);
 }

@@ -31,7 +31,7 @@
  *
  * Type aliases:
  *   CoreCallable = Callable<void, CORE_MAX_TENSOR_ARGS, 0>       — leaf kernel binary
- *   ChipCallable = Callable<CoreCallable, CHIP_MAX_TENSOR_ARGS, 2048> — orchestration + child kernels
+ *   ChipCallable = Callable<CoreCallable, CHIP_MAX_TENSOR_ARGS, CHIP_MAX_CHILDREN> — orchestration + child kernels
  */
 
 #pragma once
@@ -44,6 +44,7 @@
 #include <vector>
 
 #include "arg_direction.h"
+#include "callable_limits.h"
 
 // signature contains sig_count validated entries.
 inline int32_t count_scalar_args(const ArgDirection *signature, int32_t sig_count) {
@@ -181,7 +182,7 @@ private:
 // ============================================================================
 
 using CoreCallable = Callable<void, CORE_MAX_TENSOR_ARGS, 0>;
-using ChipCallable = Callable<CoreCallable, CHIP_MAX_TENSOR_ARGS, 2048>;
+using ChipCallable = Callable<CoreCallable, CHIP_MAX_TENSOR_ARGS, CHIP_MAX_CHILDREN>;
 
 // storage_ holds CoreCallable children at CALLABLE_ALIGN-aligned offsets; the
 // child kernel binary's device address is offsetof(storage_) + child_offset +
@@ -199,10 +200,8 @@ static_assert(
 );
 
 // Callable bytes are shipped through L3/L4 IPC and the on-disk kernel cache,
-// so the header layout is wire ABI. The constants below encode
-// CHIP_MAX_TENSOR_ARGS = 256, CORE_MAX_TENSOR_ARGS = 32,
-// CALLABLE_FUNC_NAME_MAX = 64, and MaxChildren = 2048; a deliberate capacity
-// change updates them in the same commit.
+// so the header layout is wire ABI. These explicit size and offset assertions
+// pin the layout independently of the capacity constants.
 static_assert(
     std::is_trivially_copyable_v<ChipCallable> && std::is_standard_layout_v<ChipCallable>,
     "ChipCallable wire ABI: must stay memcpy-able POD"
@@ -342,4 +341,14 @@ std::vector<uint8_t> make_callable(
     obj->child_count_ = child_count;
 
     return buf;
+}
+
+inline std::vector<uint8_t> make_chip_callable(
+    const ArgDirection *sig, int32_t sig_count, const char *func_name, const void *binary, uint32_t binary_size,
+    const int32_t *child_func_ids, const std::vector<uint8_t> *child_buffers, int32_t child_count,
+    const char *config_name
+) {
+    return make_callable<CoreCallable, CHIP_MAX_TENSOR_ARGS, ChipCallable::MAX_CHILDREN>(
+        sig, sig_count, func_name, binary, binary_size, child_func_ids, child_buffers, child_count, config_name
+    );
 }

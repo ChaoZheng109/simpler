@@ -1394,8 +1394,8 @@ uint64_t SimDeviceRunnerBase::upload_chip_callable_buffer(const ChipCallable *ca
     // the registration rather than leaving a scratch behind.
     uint32_t table_len = 0;
     int32_t bad_func_id = 0;
-    if (!chip_callable_table_length(callable, RUNTIME_MAX_FUNC_ID, &table_len, &bad_func_id)) {
-        LOG_ERROR("Chip callable declares func_id=%d outside [0, %d)", bad_func_id, RUNTIME_MAX_FUNC_ID);
+    if (!chip_callable_table_length(callable, CHIP_MAX_FUNC_ID, &table_len, &bad_func_id)) {
+        LOG_ERROR("Chip callable declares func_id=%d outside [0, %d)", bad_func_id, CHIP_MAX_FUNC_ID);
         return 0;
     }
     const bool want_entry_table = table_len != 0 && runtime_uses_callable_entry_table_impl();

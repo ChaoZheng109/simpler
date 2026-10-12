@@ -2378,7 +2378,7 @@ protected:
         // The callable's func_id -> CoreCallable object address table, dense
         // over [0, table_len) and the host source the device copy was made
         // from. `table_len` is one past the callable's largest child func_id,
-        // never RUNTIME_MAX_FUNC_ID: the content hash covers the child func_ids
+        // never CHIP_MAX_FUNC_ID: the content hash covers the child func_ids
         // and offsets, so every cid sharing this entry has exactly this table.
         std::vector<uint64_t> object_table;
         uint64_t object_table_dev{0};

@@ -1563,7 +1563,7 @@ uint64_t DeviceRunnerBase::upload_chip_callable_buffer(const ChipCallable *calla
     // The arithmetic is 64-bit over sources the ChipCallable wire ABI caps at
     // 32 bits: `layout.total_size` is the header plus a `storage_used` bounded
     // by one `uint32_t` binary size plus one `uint32_t` child offset plus a
-    // CoreCallable header, the tables add at most `RUNTIME_MAX_FUNC_ID`
+    // CoreCallable header, the tables add at most `CHIP_MAX_FUNC_ID`
     // eight-byte entries each, and each alignment step adds less than one line.
     // The static_assert states that bound, so no checked addition is needed
     // here.
@@ -1571,14 +1571,14 @@ uint64_t DeviceRunnerBase::upload_chip_callable_buffer(const ChipCallable *calla
     static_assert(
         static_cast<uint64_t>(offsetof(ChipCallable, storage_)) + UINT32_MAX + UINT32_MAX +
                 CoreCallable::binary_data_offset() + 2 * CALLABLE_ALIGN +
-                2 * static_cast<uint64_t>(RUNTIME_MAX_FUNC_ID) * sizeof(uint64_t) <
+                2 * static_cast<uint64_t>(CHIP_MAX_FUNC_ID) * sizeof(uint64_t) <
             static_cast<uint64_t>(SIZE_MAX),
         "a ChipCallable plus both function tables must not be able to overflow size_t"
     );
     uint32_t table_len = 0;
     int32_t bad_func_id = 0;
-    if (!chip_callable_table_length(callable, RUNTIME_MAX_FUNC_ID, &table_len, &bad_func_id)) {
-        LOG_ERROR("Chip callable declares func_id=%d outside [0, %d)", bad_func_id, RUNTIME_MAX_FUNC_ID);
+    if (!chip_callable_table_length(callable, CHIP_MAX_FUNC_ID, &table_len, &bad_func_id)) {
+        LOG_ERROR("Chip callable declares func_id=%d outside [0, %d)", bad_func_id, CHIP_MAX_FUNC_ID);
         return 0;
     }
     const bool want_entry_table = table_len != 0 && runtime_uses_callable_entry_table_impl();

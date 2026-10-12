@@ -25,9 +25,12 @@
 
 #include "aicpu/device_run_result_base_aicpu.h"
 #include "aicpu/profiler_device_engine.h"
+#include "callable_limits.h"
 #include "common/memory_barrier.h"
 #include "common/platform_config.h"
 #include "common/unified_log.h"
+
+static_assert(CHIP_MAX_FUNC_ID <= UINT16_MAX, "function IDs must not collide with the args-dump unknown sentinel");
 
 // Cached pointers for hot-path access (set during init)
 static uint64_t g_platform_dump_base = 0;
@@ -762,8 +765,6 @@ int dump_arg_record(int thread_idx, const ArgsDumpInfo &info) {
     rec->scalar_value = is_scalar ? info.scalar_value : 0;
     rec->kind = info.kind;
     rec->flags = info.flags;
-    // kernel_id is bounded by RUNTIME_MAX_FUNC_ID (2048), far below the 0xFFFF
-    // "unknown" sentinel, so this narrowing is lossless and never collides.
     // func_ids carries the task's active-subtask set (its mix membership).
     rec->func_count = static_cast<uint8_t>(info.func_count);
     for (int32_t i = 0; i < info.func_count && i < ARGS_DUMP_MAX_FUNC_IDS; i++) {

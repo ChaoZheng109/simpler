@@ -36,10 +36,6 @@
 
 namespace {
 
-// Stands in for the runtime's own RUNTIME_MAX_FUNC_ID, which is the exclusive
-// bound registration validates a child's func_id against.
-constexpr uint32_t kFuncIdDomain = 2048;
-
 // A device base far from any host address, so an entry that came from the host
 // scratch instead of the patched device base is visible in the value.
 constexpr uint64_t kDeviceBase = 0x7000'0000'0000ull;
@@ -58,7 +54,7 @@ std::vector<uint8_t> make_chip_with_children(const std::vector<int32_t> &func_id
         children.push_back(make_core_child(static_cast<uint8_t>(0xB0 + i), 128));
     }
     const uint8_t orch[64] = {0x5a};
-    return make_callable<CoreCallable, CHIP_MAX_TENSOR_ARGS, 2048>(
+    return make_chip_callable(
         nullptr, 0, "orch_entry", orch, sizeof(orch), func_ids.data(), children.data(),
         static_cast<int32_t>(func_ids.size()), "orch_config"
     );
@@ -77,13 +73,13 @@ TEST(CallableFunctionTables, TheLengthIsOnePastTheLargestFuncId) {
         {{0, 1}, 2},
         {{7}, 8},
         {{3, 0, 9}, 10},
-        {{static_cast<int32_t>(kFuncIdDomain) - 1}, kFuncIdDomain},
+        {{static_cast<int32_t>(CHIP_MAX_FUNC_ID) - 1}, CHIP_MAX_FUNC_ID},
     };
     for (const Case &c : cases) {
         const std::vector<uint8_t> buffer = make_chip_with_children(c.func_ids);
         uint32_t length = 0;
         int32_t bad_func_id = -1;
-        ASSERT_TRUE(chip_callable_table_length(as_chip(buffer), kFuncIdDomain, &length, &bad_func_id));
+        ASSERT_TRUE(chip_callable_table_length(as_chip(buffer), CHIP_MAX_FUNC_ID, &length, &bad_func_id));
         EXPECT_EQ(length, c.expected) << "largest func_id decides the length, not the child count";
     }
 }
@@ -95,7 +91,7 @@ TEST(CallableFunctionTables, ACallableWithNoChildrenNeedsNoTable) {
     const std::vector<uint8_t> buffer = make_chip_with_children({});
     uint32_t length = 0xffffffffu;
     int32_t bad_func_id = -1;
-    ASSERT_TRUE(chip_callable_table_length(as_chip(buffer), kFuncIdDomain, &length, &bad_func_id));
+    ASSERT_TRUE(chip_callable_table_length(as_chip(buffer), CHIP_MAX_FUNC_ID, &length, &bad_func_id));
     EXPECT_EQ(length, 0u);
 }
 
@@ -103,18 +99,18 @@ TEST(CallableFunctionTables, ACallableWithNoChildrenNeedsNoTable) {
 // refused — and named, because the caller logs it and returns before it
 // allocates or copies anything.
 TEST(CallableFunctionTables, AFuncIdOutsideTheDomainIsRefusedAndNamed) {
-    const std::vector<uint8_t> buffer = make_chip_with_children({0, static_cast<int32_t>(kFuncIdDomain)});
+    const std::vector<uint8_t> buffer = make_chip_with_children({0, static_cast<int32_t>(CHIP_MAX_FUNC_ID)});
     uint32_t length = 0;
     int32_t bad_func_id = -1;
-    EXPECT_FALSE(chip_callable_table_length(as_chip(buffer), kFuncIdDomain, &length, &bad_func_id));
-    EXPECT_EQ(bad_func_id, static_cast<int32_t>(kFuncIdDomain));
+    EXPECT_FALSE(chip_callable_table_length(as_chip(buffer), CHIP_MAX_FUNC_ID, &length, &bad_func_id));
+    EXPECT_EQ(bad_func_id, static_cast<int32_t>(CHIP_MAX_FUNC_ID));
 }
 
 TEST(CallableFunctionTables, ANegativeFuncIdIsRefusedAndNamed) {
     const std::vector<uint8_t> buffer = make_chip_with_children({-1});
     uint32_t length = 0;
     int32_t bad_func_id = 0;
-    EXPECT_FALSE(chip_callable_table_length(as_chip(buffer), kFuncIdDomain, &length, &bad_func_id));
+    EXPECT_FALSE(chip_callable_table_length(as_chip(buffer), CHIP_MAX_FUNC_ID, &length, &bad_func_id));
     EXPECT_EQ(bad_func_id, -1);
 }
 
@@ -131,7 +127,7 @@ TEST(CallableFunctionTables, TheObjectAndEntryViewsComeFromOnePatchedScratch) {
 
     uint32_t length = 0;
     int32_t bad_func_id = -1;
-    ASSERT_TRUE(chip_callable_table_length(callable, kFuncIdDomain, &length, &bad_func_id));
+    ASSERT_TRUE(chip_callable_table_length(callable, CHIP_MAX_FUNC_ID, &length, &bad_func_id));
     ASSERT_EQ(length, 6u);
 
     std::vector<uint8_t> scratch(layout.total_size);

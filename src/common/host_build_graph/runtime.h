@@ -40,6 +40,7 @@
 #include "common/host_phase_kind.h"
 #include "common/platform_config.h"
 #include "aicpu/platform_aicpu_affinity.h"  // MAX_GATE_THREADS (aicpu_allowed_cpus bound)
+#include "callable_limits.h"
 #include "task_args.h"
 #include "aicore_teardown.h"
 #include "common/launch_entry_args.h"     // LaunchEntryArgsPlan
@@ -51,7 +52,6 @@
 // =============================================================================
 
 #define RUNTIME_MAX_WORKER PLATFORM_MAX_CORES
-#define RUNTIME_MAX_FUNC_ID 2048
 
 // The AICore compiler defines these; host and AICPU builds compile the same
 // declarations with them empty. Mirrors the guard in the a5 scheduler's

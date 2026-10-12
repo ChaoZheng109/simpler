@@ -1165,7 +1165,7 @@ bool create_scheduler_state(
         for (uint32_t subtask_slot = 0; subtask_slot < 3; ++subtask_slot) {
             if ((active_mask & (1U << subtask_slot)) == 0 || inline_dispatch_task) continue;
             const int32_t kernel_id = shape.kernel_ids[subtask_slot];
-            if (kernel_id < 0 || kernel_id >= RUNTIME_MAX_FUNC_ID || runtime->get_function_bin_addr(kernel_id) == 0) {
+            if (kernel_id < 0 || kernel_id >= CHIP_MAX_FUNC_ID || runtime->get_function_bin_addr(kernel_id) == 0) {
                 LOG_ERROR(
                     "A5 HBG AICore scheduler: task id=%" PRId64 " kernel id %d has no registered callable", task_id,
                     kernel_id
@@ -1782,8 +1782,8 @@ extern "C" int register_callable_impl(const ChipCallable *callable, const HostAp
         return PTO_RUNTIME_ERR_INTERNAL;
     }
     for (const ChildKernelAddr &c : out->kernel_addrs) {
-        if (c.func_id < 0 || c.func_id >= RUNTIME_MAX_FUNC_ID) {
-            LOG_ERROR("func_id=%d is out of range [0, %d)", c.func_id, RUNTIME_MAX_FUNC_ID);
+        if (c.func_id < 0 || c.func_id >= CHIP_MAX_FUNC_ID) {
+            LOG_ERROR("func_id=%d is out of range [0, %d)", c.func_id, CHIP_MAX_FUNC_ID);
             return PTO_RUNTIME_ERR_INTERNAL;
         }
     }

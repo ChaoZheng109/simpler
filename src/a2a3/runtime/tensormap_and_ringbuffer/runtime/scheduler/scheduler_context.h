@@ -21,14 +21,10 @@
 #include "aicore_completion_mailbox.h"
 #include "dispatch_payload.h"
 
-// These macros are defined in runtime.h, but we cannot include it here
-// (it pulls in Handshake which we only forward-declare).  Mirror the
-// authoritative values so the class layout compiles standalone.
+// runtime.h pulls in Handshake, which this header only forward-declares.
+// RUNTIME_MAX_WORKER derives from the same platform core count in both headers.
 #ifndef RUNTIME_MAX_WORKER
 #define RUNTIME_MAX_WORKER PLATFORM_MAX_CORES
-#endif
-#ifndef RUNTIME_MAX_FUNC_ID
-#define RUNTIME_MAX_FUNC_ID 2048
 #endif
 
 // Forward declarations — avoid pulling in full headers for pointer/reference params.

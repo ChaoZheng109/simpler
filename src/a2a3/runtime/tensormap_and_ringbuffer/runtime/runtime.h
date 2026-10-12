@@ -43,6 +43,7 @@
 #include "common/platform_config.h"
 #include "aicpu/platform_aicpu_affinity.h"  // MAX_GATE_THREADS (aicpu_allowed_cpus bound)
 #include "dispatch_payload.h"
+#include "callable_limits.h"
 #include "task_args.h"
 #include "aicore_teardown.h"
 #include "common/launch_entry_args.h"             // EntryArgsSource, LaunchEntryArgsPlan
@@ -54,7 +55,6 @@
 // =============================================================================
 
 #define RUNTIME_MAX_WORKER PLATFORM_MAX_CORES  // 24 AIC + 48 AIV cores
-#define RUNTIME_MAX_FUNC_ID 2048
 #define RUNTIME_MAX_ORCH_SYMBOL_NAME 64
 
 // =============================================================================

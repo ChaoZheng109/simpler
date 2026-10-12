@@ -26,12 +26,8 @@
 // runtime.h cannot be included here — it pulls in Handshake, which this header
 // only forward-declares. RUNTIME_MAX_WORKER therefore reaches the same platform
 // core count runtime.h defines it from, so both spellings carry one value.
-// RUNTIME_MAX_FUNC_ID has no platform-level source and stays a mirrored literal.
 #ifndef RUNTIME_MAX_WORKER
 #define RUNTIME_MAX_WORKER PLATFORM_MAX_CORES
-#endif
-#ifndef RUNTIME_MAX_FUNC_ID
-#define RUNTIME_MAX_FUNC_ID 2048
 #endif
 
 // Forward declarations — avoid pulling in full headers for pointer/reference params.

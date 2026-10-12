@@ -299,8 +299,8 @@ extern "C" int register_callable_impl(const ChipCallable *callable, const HostAp
         return PTO_RUNTIME_ERR_INTERNAL;
     }
     for (const ChildKernelAddr &c : out->kernel_addrs) {
-        if (c.func_id < 0 || c.func_id >= RUNTIME_MAX_FUNC_ID) {
-            LOG_ERROR("func_id=%d is out of range [0, %d)", c.func_id, RUNTIME_MAX_FUNC_ID);
+        if (c.func_id < 0 || c.func_id >= CHIP_MAX_FUNC_ID) {
+            LOG_ERROR("func_id=%d is out of range [0, %d)", c.func_id, CHIP_MAX_FUNC_ID);
             return PTO_RUNTIME_ERR_INTERNAL;
         }
     }
