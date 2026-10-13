@@ -316,9 +316,9 @@ class TestNextLevelStartupFailure:
         finally:
             w4.close()
 
-    def test_startup_deadline_fires_on_hung_child(self, monkeypatch):
+    @_hard_timeout(_TEST_WALL_BUDGET_S)
+    def test_startup_deadline_fires_on_hung_child(self):
         """A child that hangs in init trips the startup deadline, not an infinite spin."""
-        clock = _install_manual_worker_clock(monkeypatch)
         l3 = _l3_child()
         l3.init = _init_hangs  # noqa: SLF001
 
@@ -326,25 +326,19 @@ class TestNextLevelStartupFailure:
         w4.register(_trivial_orch)
         w4.add_worker(l3)
         try:
-            with _hard_timeout(_TEST_WALL_BUDGET_S):
-                with pytest.raises(RuntimeError, match="deadline"):
-                    w4.init()
-            assert clock.now > 1.5
+            started = time.monotonic()
+            with pytest.raises(RuntimeError, match="deadline"):
+                w4.init()
+            assert time.monotonic() - started >= 1.5
             assert w4._next_level_pids == []
         finally:
             w4.close()
 
     def test_failed_startup_reaps_children_no_leak(self, monkeypatch):
         """After a startup failure the forked children are killed and reaped."""
-        # Real clock, deliberately. This case asserts an OS-level fact about real
-        # forked pids -- that `os.waitpid` no longer knows them -- and
-        # `_abort_hierarchical` bounds its reap with a `_monotonic()` deadline it
-        # is allowed to give up on ("a survivor still alive at the deadline is
-        # left to the OS/init"). A manual clock advances that deadline in zero
-        # real time, so the budget can expire before a child has actually died
-        # and the rollback takes the give-up path while the assertion below still
-        # demands a reap. The sibling deadline tests may use one: logical elapsed
-        # time is their subject, and they assert bookkeeping rather than pids.
+        # Real forked children need real elapsed time to exit and become reapable.
+        # Startup failure tests use the real clock for both the startup deadline
+        # and the bounded process cleanup.
         l3 = _l3_child()
         l3.init = _init_hangs  # noqa: SLF001
 
@@ -1821,11 +1815,11 @@ class TestChipStartupFailure:
                 l3.init()
 
     def test_chip_init_hang_trips_deadline(self, monkeypatch):
-        clock = _install_manual_worker_clock(monkeypatch)
         with fake_chip_l3(monkeypatch, script="hangs", init=False, startup_timeout_s=1.5) as l3:
+            started = time.monotonic()
             with pytest.raises(RuntimeError, match="deadline"):
                 l3.init()
-            assert clock.now > 1.5
+            assert time.monotonic() - started >= 1.5
 
 
 class TestEligibleTargetPrecheck:
