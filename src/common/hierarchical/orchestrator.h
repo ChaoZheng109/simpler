@@ -215,6 +215,11 @@ public:
      */
     std::vector<RunId> preparable_run_ids() const;
 
+    // Scheduler-only: staging must follow every earlier run's publication on
+    // this endpoint, including its dependency-blocked singles and groups.
+    // The scheduler loop mutex keeps RUNNING claims and publication indivisible.
+    bool can_stage_run_on_worker(RunId run_id, int32_t worker_id) const;
+
     /**
      * Every staged successor authorized to launch early, in FIFO order.
      *

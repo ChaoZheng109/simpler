@@ -447,6 +447,33 @@ std::vector<RunId> Orchestrator::preparable_run_ids() const {
     return ids;
 }
 
+bool Orchestrator::can_stage_run_on_worker(RunId run_id, int32_t worker_id) const {
+    std::lock_guard<std::mutex> lk(runs_mu_);
+    auto candidate = runs_.find(run_id);
+    if (candidate == runs_.end() || candidate->second->phase.load(std::memory_order_acquire) != RunPhase::PREPARED ||
+        !pipeline_slots_.owns(candidate->second->lease)) {
+        return false;
+    }
+    for (RunId predecessor_id : run_fifo_) {
+        if (predecessor_id == run_id) return true;
+        const auto &predecessor = runs_.at(predecessor_id);
+        std::lock_guard<std::mutex> run_lk(predecessor->completion_mu);
+        if (!predecessor->submission_closed) return false;
+        for (TaskSlot slot : predecessor->task_slots) {
+            const TaskSlotState *task = allocator_->slot_state(slot);
+            if (task == nullptr) continue;
+            const TaskState state = task->state.load(std::memory_order_acquire);
+            if (state != TaskState::PENDING && state != TaskState::READY && state != TaskState::BUILDING) continue;
+            if (task->worker_type == WorkerType::NEXT_LEVEL &&
+                std::find(task->target_worker_ids.begin(), task->target_worker_ids.end(), worker_id) !=
+                    task->target_worker_ids.end()) {
+                return false;
+            }
+        }
+    }
+    return false;
+}
+
 std::vector<RunId> Orchestrator::early_launch_run_ids() const {
     std::lock_guard<std::mutex> lk(runs_mu_);
     std::vector<RunId> ids;

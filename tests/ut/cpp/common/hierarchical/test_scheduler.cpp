@@ -2159,6 +2159,7 @@ struct ProgressSchedulerFixture : public ::testing::Test {
 
     virtual uint32_t endpoint0_capacity() const { return 2; }
     virtual std::vector<uint32_t> endpoint_capacities() const { return {endpoint0_capacity(), 2}; }
+    virtual uint32_t pipeline_depth() const { return 2; }
 
     void SetUp() override {
         allocator.init(/*heap_bytes=*/1ULL << 20);
@@ -2185,7 +2186,7 @@ struct ProgressSchedulerFixture : public ::testing::Test {
         orchestrator.init(&tensor_map, &allocator, &scope, &ready_sub, &ready_next, &manager, [this] {
             scheduler.notify_ready();
         });
-        orchestrator.configure_pipeline_depth(2);
+        orchestrator.configure_pipeline_depth(pipeline_depth());
 
         Scheduler::Config scheduler_config;
         scheduler_config.ring = &allocator;
@@ -2202,6 +2203,15 @@ struct ProgressSchedulerFixture : public ::testing::Test {
             preparable_run_query_count.fetch_add(1, std::memory_order_relaxed);
             return orchestrator.preparable_run_id();
         };
+        if (pipeline_depth() > 2) {
+            scheduler_config.preparable_runs_cb = [this] {
+                preparable_run_query_count.fetch_add(1, std::memory_order_relaxed);
+                return orchestrator.preparable_run_ids();
+            };
+        }
+        scheduler_config.can_stage_run_on_worker_cb = [this](RunId run_id, int32_t worker_id) {
+            return orchestrator.can_stage_run_on_worker(run_id, worker_id);
+        };
         scheduler_config.on_consumed_cb = [this](TaskSlot task_slot) {
             orchestrator.on_consumed(task_slot);
         };
@@ -2209,6 +2219,16 @@ struct ProgressSchedulerFixture : public ::testing::Test {
             orchestrator.report_task_error(task_slot, message);
         };
         scheduler.start(scheduler_config);
+    }
+
+    bool wait_for_preparable_scan(uint64_t before) {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+        while (preparable_run_query_count.load() <= before) {
+            if (std::chrono::steady_clock::now() >= deadline) return false;
+            std::this_thread::yield();
+        }
+        std::scoped_lock lock(scheduler.loop_mutex());
+        return true;
     }
 
     void TearDown() override {
@@ -2227,6 +2247,137 @@ struct CapacityOneProgressSchedulerFixture : public ProgressSchedulerFixture {
 struct PartialStagingProgressSchedulerFixture : public ProgressSchedulerFixture {
     std::vector<uint32_t> endpoint_capacities() const override { return {2, 1, 2}; }
 };
+
+struct ThreeRunProgressSchedulerFixture : public ProgressSchedulerFixture {
+    uint32_t endpoint0_capacity() const override { return 3; }
+    uint32_t pipeline_depth() const override { return 3; }
+};
+
+TEST_F(ThreeRunProgressSchedulerFixture, ColdQueuePublishesThreeRunsInFifoOrder) {
+    std::vector<RunId> runs;
+    std::vector<SubmitResult> tasks;
+    {
+        std::scoped_lock lock(scheduler.loop_mutex());
+        for (int index = 0; index < 3; ++index) {
+            runs.push_back(orchestrator.begin_run());
+            tasks.push_back(orchestrator.submit_next_level(
+                C(91 + index), single_tensor_args(0x9100 + index * 0x100, TensorArgType::OUTPUT), config, 0
+            ));
+            orchestrator.close_run_submission(runs.back());
+        }
+    }
+
+    ASSERT_TRUE(endpoint0->wait_submitted(3));
+    const auto submitted = endpoint0->submitted();
+    ASSERT_EQ(submitted.size(), 3u);
+    for (size_t index = 0; index < submitted.size(); ++index) {
+        EXPECT_EQ(submitted[index].task_slot, tasks[index].task_slot);
+        EXPECT_EQ(submitted[index].prepare_only, index != 0);
+        if (index != 0) EXPECT_LT(submitted[index - 1].dispatch_id, submitted[index].dispatch_id);
+        endpoint0->emit(WorkerProgressKind::ACCEPTED, submitted[index]);
+        endpoint0->emit(WorkerProgressKind::COMPLETED, submitted[index]);
+        ASSERT_TRUE(orchestrator.wait_run_for(runs[index], 3.0));
+        orchestrator.release_run(runs[index]);
+    }
+}
+
+TEST_F(ProgressSchedulerFixture, StagedSuccessorCannotOvertakePendingPredecessorOnSameEndpoint) {
+    const RunId first_run = orchestrator.begin_run();
+    const auto first =
+        orchestrator.submit_next_level(C(93), single_tensor_args(0x9300, TensorArgType::OUTPUT), config, 0);
+    auto tail_args = single_tensor_args(0x9400, TensorArgType::OUTPUT);
+    tail_args.add_dep_wait(first);
+    const auto tail = orchestrator.submit_next_level(C(94), tail_args, config, 0);
+    orchestrator.close_run_submission(first_run);
+    ASSERT_TRUE(endpoint0->wait_submitted(1));
+
+    uint64_t before;
+    RunId second_run;
+    SubmitResult successor;
+    {
+        std::scoped_lock lock(scheduler.loop_mutex());
+        before = preparable_run_query_count.load();
+        second_run = orchestrator.begin_run();
+        successor = orchestrator.submit_next_level(C(95), single_tensor_args(0x9500, TensorArgType::OUTPUT), config, 0);
+        orchestrator.close_run_submission(second_run);
+    }
+    ASSERT_TRUE(wait_for_preparable_scan(before));
+    {
+        std::scoped_lock lock(scheduler.loop_mutex());
+        EXPECT_EQ(endpoint0->submitted().size(), 1u);
+        EXPECT_EQ(allocator.slot_state(tail.task_slot)->state.load(), TaskState::PENDING);
+    }
+
+    const auto first_dispatch = endpoint0->submitted().front();
+    endpoint0->emit(WorkerProgressKind::ACCEPTED, first_dispatch);
+    endpoint0->emit(WorkerProgressKind::COMPLETED, first_dispatch);
+    ASSERT_TRUE(endpoint0->wait_submitted(3));
+    const auto submitted = endpoint0->submitted();
+    ASSERT_EQ(submitted.size(), 3u);
+    EXPECT_EQ(submitted[1].task_slot, tail.task_slot);
+    EXPECT_FALSE(submitted[1].prepare_only);
+    EXPECT_EQ(submitted[2].task_slot, successor.task_slot);
+    EXPECT_TRUE(submitted[2].prepare_only);
+    EXPECT_LT(submitted[1].dispatch_id, submitted[2].dispatch_id);
+    for (size_t index = 1; index < submitted.size(); ++index) {
+        endpoint0->emit(WorkerProgressKind::ACCEPTED, submitted[index]);
+        endpoint0->emit(WorkerProgressKind::COMPLETED, submitted[index]);
+    }
+    ASSERT_TRUE(orchestrator.wait_run_for(first_run, 3.0));
+    ASSERT_TRUE(orchestrator.wait_run_for(second_run, 3.0));
+    orchestrator.release_run(first_run);
+    orchestrator.release_run(second_run);
+}
+
+TEST_F(ProgressSchedulerFixture, StagedSuccessorCannotOvertakePendingPredecessorGroup) {
+    const RunId first_run = orchestrator.begin_run();
+    const auto first =
+        orchestrator.submit_next_level(C(96), single_tensor_args(0x9600, TensorArgType::OUTPUT), config, 0);
+    auto group0 = single_tensor_args(0x9700, TensorArgType::OUTPUT);
+    group0.add_dep_wait(first);
+    const auto group = orchestrator.submit_next_level_group(
+        C(97), {group0, single_tensor_args(0x9800, TensorArgType::OUTPUT)}, config, {0, 1}
+    );
+    orchestrator.close_run_submission(first_run);
+    ASSERT_TRUE(endpoint0->wait_submitted(1));
+
+    uint64_t before;
+    RunId second_run;
+    SubmitResult successor;
+    {
+        std::scoped_lock lock(scheduler.loop_mutex());
+        before = preparable_run_query_count.load();
+        second_run = orchestrator.begin_run();
+        successor = orchestrator.submit_next_level(C(99), single_tensor_args(0x9900, TensorArgType::OUTPUT), config, 1);
+        orchestrator.close_run_submission(second_run);
+    }
+    ASSERT_TRUE(wait_for_preparable_scan(before));
+    EXPECT_TRUE(endpoint1->submitted().empty());
+
+    const auto first_dispatch = endpoint0->submitted().front();
+    endpoint0->emit(WorkerProgressKind::ACCEPTED, first_dispatch);
+    endpoint0->emit(WorkerProgressKind::COMPLETED, first_dispatch);
+    ASSERT_TRUE(endpoint0->wait_submitted(2));
+    ASSERT_TRUE(endpoint1->wait_submitted(2));
+    const auto worker0 = endpoint0->submitted();
+    const auto worker1 = endpoint1->submitted();
+    EXPECT_EQ(worker0.back().task_slot, group.task_slot);
+    EXPECT_EQ(worker1[0].task_slot, group.task_slot);
+    EXPECT_FALSE(worker1[0].prepare_only);
+    EXPECT_EQ(worker1[1].task_slot, successor.task_slot);
+    EXPECT_TRUE(worker1[1].prepare_only);
+    EXPECT_LT(worker1[0].dispatch_id, worker1[1].dispatch_id);
+    endpoint0->emit(WorkerProgressKind::ACCEPTED, worker0.back());
+    endpoint0->emit(WorkerProgressKind::COMPLETED, worker0.back());
+    for (const auto &dispatch : worker1) {
+        endpoint1->emit(WorkerProgressKind::ACCEPTED, dispatch);
+        endpoint1->emit(WorkerProgressKind::COMPLETED, dispatch);
+    }
+    ASSERT_TRUE(orchestrator.wait_run_for(first_run, 3.0));
+    ASSERT_TRUE(orchestrator.wait_run_for(second_run, 3.0));
+    orchestrator.release_run(first_run);
+    orchestrator.release_run(second_run);
+}
 
 TEST_F(ProgressSchedulerFixture, GroupSubmitReportsNoSingleWorkerAndNoSingleIndex) {
     ScopedHostSpanCapture host_span_capture;
