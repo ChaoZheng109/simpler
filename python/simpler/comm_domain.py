@@ -43,8 +43,16 @@ class DomainConfig:
             raise ValueError("domain members must contain 1 to 64 distinct chips")
         if window_size <= 0:
             raise ValueError("domain window_size must be positive")
+        if window_size % 64:
+            raise ValueError("domain window_size must be a multiple of 64 bytes")
         if len({b[0] for b in snapshot}) != len(snapshot) or any(not b[0] or b[3] <= 0 for b in snapshot):
             raise ValueError("domain buffers require unique names and positive nbytes")
+        for name, _dtype, _count, nbytes, _load_from_host, _store_to_host in snapshot:
+            if nbytes % 64:
+                raise ValueError(
+                    f"domain buffer {name!r}: nbytes={nbytes} must be a multiple of 64 bytes; "
+                    "the caller must pad the physical buffer size and include it in window_size"
+                )
         if sum(b[3] for b in snapshot) > window_size:
             raise ValueError("domain buffers exceed window_size")
         return cls(members, window_size, snapshot, bool(retain_after_run), tuple(topology))

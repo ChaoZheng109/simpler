@@ -51,11 +51,79 @@ def _request(members, **changes) -> dict[str, Any]:
         name="tp",
         members=members,
         window_size=4096,
-        buffers=[CommBufferSpec("payload", "uint8", 32, 32)],
+        buffers=[CommBufferSpec("payload", "uint8", 32, 64)],
         retain_after_run=True,
     )
     config.update(changes)
     return config
+
+
+@pytest.mark.parametrize("sizes", [(4,), (64, 16), (80, 64), (4096, 4096, 16, 16, 16)])
+def test_unaligned_buffer_sizes_are_rejected_before_allocation(domain_worker, monkeypatch, sizes):
+    worker, members = domain_worker
+    specs = [CommBufferSpec(f"buffer_{i}", "uint8", size, size) for i, size in enumerate(sizes)]
+
+    def unexpected_allocation(**_kwargs):
+        pytest.fail("invalid buffer layout reached the allocation backend")
+
+    monkeypatch.setattr(worker, "_allocate_domain", unexpected_allocation)
+    monkeypatch.setattr(worker, "_allocate_global_domain", unexpected_allocation)
+
+    def build(orch, _args, _cfg):
+        for allocate in (orch.allocate_domain, orch.get_or_allocate_domain):
+            with pytest.raises(ValueError, match="buffer_.*nbytes.*64"):
+                allocate(**_request(members, window_size=16384, buffers=specs))
+        assert worker.live_domains == {}
+        assert tuple(spec.nbytes for spec in specs) == sizes
+
+    worker.run(build)
+
+
+def test_unaligned_window_size_is_rejected_before_allocation(domain_worker, monkeypatch):
+    worker, members = domain_worker
+
+    def unexpected_allocation(**_kwargs):
+        pytest.fail("unaligned rank stride reached the allocation backend")
+
+    monkeypatch.setattr(worker, "_allocate_domain", unexpected_allocation)
+    monkeypatch.setattr(worker, "_allocate_global_domain", unexpected_allocation)
+
+    def build(orch, _args, _cfg):
+        for allocate in (orch.allocate_domain, orch.get_or_allocate_domain):
+            with pytest.raises(ValueError, match="window_size.*64"):
+                allocate(**_request(members, window_size=65))
+        assert worker.live_domains == {}
+
+    worker.run(build)
+
+
+def test_caller_padded_buffers_keep_exact_offsets_and_logical_sizes(domain_worker):
+    worker, members = domain_worker
+    specs = [
+        CommBufferSpec("signal", "int32", 1, 64),
+        CommBufferSpec("payload", "uint8", 80, 128),
+        CommBufferSpec("tail", "int32", 1, 64),
+    ]
+
+    def build(orch, _args, _cfg):
+        with pytest.raises(ValueError, match="buffers exceed window_size"):
+            orch.allocate_domain(**_request(members, window_size=192, buffers=specs))
+        assert worker.live_domains == {}
+        with orch.allocate_domain(**_request(members, window_size=256, buffers=specs)) as domain:
+            for name, offset, nbytes in (("signal", 0, 64), ("payload", 64, 128), ("tail", 192, 64)):
+                assert domain.buffer_range(name) == (offset, nbytes)
+                if worker.level == 3:
+                    for rank in range(len(members)):
+                        context = domain.local_context(rank)
+                        assert context.buffers[name].base == context.local_window_base + offset
+                        assert context.buffers[name].base % 64 == 0
+                        assert context.actual_window_size == 256
+            orch.copy_to_domain(domain, 0, b"x" * 80, buffer="payload")
+            assert orch.copy_from_domain(domain, 0, 80, buffer="payload") == b"x" * 80
+            assert domain._config is not None
+            assert [(spec.count, spec.nbytes) for spec in domain._config.specs()] == [(1, 64), (80, 128), (1, 64)]
+
+    worker.run(build)
 
 
 def test_reuse_snapshot_data_and_second_run_release(domain_worker):
@@ -110,7 +178,7 @@ def test_configuration_conflicts_have_no_device_effect(domain_worker, monkeypatc
         ("name", "other"),
         ("dtype", "int8"),
         ("count", 8),
-        ("nbytes", 16),
+        ("nbytes", 128),
         ("load_from_host", True),
         ("store_to_host", True),
     ):
@@ -248,7 +316,7 @@ def test_failed_creation_stays_cleanup_owned_without_becoming_public(monkeypatch
     monkeypatch.setattr(worker, "_ensure_comm_base", lambda: None)
     monkeypatch.setattr(worker, "_dispatch_control_domain", dispatch)
     request = dict(
-        name="tp", members=[0], window_size=4096, buffers=[CommBufferSpec("x", "uint8", 4, 4)], retain_after_run=True
+        name="tp", members=[0], window_size=4096, buffers=[CommBufferSpec("x", "uint8", 4, 64)], retain_after_run=True
     )
     try:
         with _callback_run(1, worker):
@@ -360,7 +428,7 @@ def test_retained_domain_serial_access_and_run_registration(domain_worker):
     assert orch is not None
     assert orch.get_domain("tp") is domain
     assert domain.member(0).local_worker_id == 1
-    assert domain.buffer_range("payload") == (0, 32)
+    assert domain.buffer_range("payload") == (0, 64)
     if worker.level == 3:
         assert domain.local_context(0) is domain[1]
     orch.copy_to_domain(domain, 0, b"serial", buffer="payload")
@@ -373,7 +441,7 @@ def test_retained_domain_serial_access_and_run_registration(domain_worker):
     def lookup(orch, _args, _cfg):
         current = orch.get_domain("tp")
         assert current is domain
-        assert current.buffer_range("payload") == (0, 32)
+        assert current.buffer_range("payload") == (0, 64)
         resources = worker._building_run_resources
         assert resources is not None and resources.requires_ordered_cleanup
         table = resources.live_domains if worker.level == 3 else resources.live_global_domains
@@ -388,11 +456,11 @@ def test_retained_domain_serial_access_and_run_registration(domain_worker):
 def test_accepted_callback_can_release_while_close_drains(domain_worker):
     worker, members = domain_worker
     saved = []
-    request = _request(members, buffers=[CommBufferSpec(name, "uint8", 4, 4) for name in ("payload", "tail")])
+    request = _request(members, buffers=[CommBufferSpec(name, "uint8", 4, 64) for name in ("payload", "tail")])
 
     def allocate(orch, _args, _cfg):
         domain = orch.allocate_domain(**request)
-        orch.copy_to_domain(domain, 0, b"abcdefgh")
+        orch.copy_to_domain(domain, 0, b"abcdefgh", offset=60)
         saved.append(domain)
 
     worker.run(allocate)
@@ -408,8 +476,8 @@ def test_accepted_callback_can_release_while_close_drains(domain_worker):
         with pytest.raises(RuntimeError, match="READY"):
             with worker._operation_lease("fresh operation"):
                 pass
-        orch.copy_to_domain(domain, 0, b"copy", offset=2)
-        assert orch.copy_from_domain(domain, 0, 8) == b"abcopygh"
+        orch.copy_to_domain(domain, 0, b"copy", offset=62)
+        assert orch.copy_from_domain(domain, 0, 8, offset=60) == b"abcopygh"
         domain.release()
         assert domain.released and not domain.freed
 

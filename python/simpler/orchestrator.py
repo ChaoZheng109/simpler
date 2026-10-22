@@ -531,6 +531,9 @@ class Orchestrator:
         """Create a domain using L3 chip ids or L4 ``(node, chip)`` members.
 
         Creation is synchronous; L3 control must precede the first task submission.
+        Buffer ``nbytes`` must be caller-padded to a multiple of 64 bytes, and
+        ``window_size`` must be a multiple of 64 covering their sum.
+        No implicit padding is inserted.
         ``workers`` is the legacy L3 spelling; it cannot be combined with ``members``.
         Retained domains survive successful runs until explicit release or Worker.close().
         """

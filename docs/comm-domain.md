@@ -29,9 +29,16 @@ with orch.allocate_domain(
         orch.submit_next_level(chip_handle, args, cfg, worker=chip_idx)
 ```
 
-`window_size` is validated on the orch thread **before** any chip-side
-allocation: if `sum(b.nbytes) > window_size`, `allocate_domain` raises
-`ValueError` immediately and no backend allocation is registered.
+Buffer sizes and `window_size` are validated on the orch thread **before** any
+chip-side allocation. Each `CommBufferSpec.nbytes` is a physical allocation size
+and must be a positive multiple of **64 bytes**; `window_size` must also be a
+multiple of 64 covering their sum, so consecutive rank windows stay aligned.
+Invalid requests raise `ValueError` without registering a backend allocation.
+The caller (including pypto codegen) supplies the padding. Simpler places buffers
+consecutively in declaration order and never rounds their sizes or offsets.
+For example, a one-element `int32` signal uses `count=1, nbytes=64`; its tensor
+view still has shape `(1,)`. This separates named buffers at cache-line boundaries;
+concurrent signal slots inside one buffer still require a kernel-defined safe layout.
 
 ### Unified creation and reuse
 

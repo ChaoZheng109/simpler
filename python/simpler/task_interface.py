@@ -1078,7 +1078,11 @@ def scalar_to_uint64(value) -> int:
 class CommBufferSpec:
     """A named slice of the per-rank communicator window.
 
-    Buffers are placed sequentially inside the window in declaration order.
+    Buffers are placed sequentially inside the window in declaration order,
+    without implicit padding. ``nbytes`` is the caller-padded physical size
+    and must be a positive multiple of 64 bytes. ``count`` may describe a
+    smaller logical extent. ``window_size`` must cover all physical sizes
+    and must also be a multiple of 64 bytes.
     The ``CommDomainHandle.contexts[chip_idx].buffers`` dict returned by
     ``Orchestrator.allocate_domain`` is keyed by ``CommBufferSpec.name``.
     """
