@@ -121,10 +121,6 @@ void SchedulerContext::complete_slot_task(
         }
 
         if (cond_count > 0) {
-            cache_invalidate_range(
-                reinterpret_cast<const void *>(const_cast<DeferredCompletionEntry *>(deferred_slab->entries)),
-                cond_count * sizeof(DeferredCompletionEntry)
-            );
             slot_state.mark_any_subtask_deferred();
 
             const TaskId token = slot_state.task->task_id;

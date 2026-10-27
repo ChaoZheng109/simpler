@@ -70,6 +70,14 @@ def test_host_orchestration_is_a_self_contained_log_consumer(
     include_dirs, sources = compiler.get_orchestration_cache_inputs(target_runtime)
     source_names = {source.rsplit("/", 1)[-1] for source in sources}
 
+    cache_sources = [Path(source) for source in sources if Path(source).name == "cache_ops.cpp"]
+    cache_root = "common" if target_platform.endswith("sim") else target_platform
+    cache_variant = "sim" if target_platform.endswith("sim") else "onboard"
+    assert cache_sources == [
+        compiler.project_root / "src" / cache_root / "platform" / cache_variant / "aicpu" / "cache_ops.cpp"
+    ]
+    assert cache_sources[0].is_file()
+
     if expects_host_logger:
         assert {"host_log.cpp", "unified_log_host.cpp"} <= source_names
         assert any(include_dir.endswith("src/common/log/include") for include_dir in include_dirs)

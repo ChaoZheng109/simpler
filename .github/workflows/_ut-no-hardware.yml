@@ -50,11 +50,11 @@ jobs:
       - name: Set up C++ compiler
         uses: ./.github/actions/setup-gcc-15
 
-      - name: Install GoogleTest
+      - name: Install GoogleTest and AArch64 C++ compiler
         if: inputs.setup_variant == 'github' && runner.os == 'Linux'
         uses: ./.github/actions/apt-install
         with:
-          required-packages: libgtest-dev
+          required-packages: libgtest-dev g++-aarch64-linux-gnu
           # ccache only makes the C++ build faster, and the build step below
           # reads whether it arrived rather than assuming it, so a package
           # manager that cannot serve it costs minutes and fails nothing.

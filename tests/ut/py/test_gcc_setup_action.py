@@ -363,7 +363,7 @@ exec "$@"''',
     [
         ("_packaging.yml", "Install Linux C++ compiler tools"),
         ("_pre-commit.yml", "Install build and lint tools"),
-        ("_ut-no-hardware.yml", "Install GoogleTest"),
+        ("_ut-no-hardware.yml", "Install GoogleTest and AArch64 C++ compiler"),
     ],
 )
 def test_workflow_apt_sites_use_the_shared_action(workflow_name: str, step_name: str) -> None:
