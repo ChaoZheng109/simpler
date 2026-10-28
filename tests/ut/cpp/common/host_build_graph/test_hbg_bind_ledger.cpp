@@ -26,6 +26,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -308,6 +309,150 @@ void recording_orch_entry(const ChipTaskArgs &) {
     task.add_output(output);
     ASSERT_TRUE(orch.submit_dummy_task(task).task_id().is_valid());
     ASSERT_TRUE(orch.graph_end());
+    orch.graph_commit();
+}
+
+void delayed_graph_recording_orch_entry(const ChipTaskArgs &) {
+    ++g_fake->orchestration_count;
+    auto &orch = *g_orch_runtime->orchestrator;
+    uint32_t data[16]{};
+    uint32_t shape[] = {16};
+    GraphTaskArgs boundary;
+    auto input = simpler::hbg::make_tensor_external(data, shape, 1);
+    boundary.add_input(input);
+    const GraphScopeResult graph = orch.graph_begin(0x522, boundary);
+    ASSERT_TRUE(graph.recording);
+
+    std::promise<void> start_recording;
+    std::future<void> ready = start_recording.get_future();
+    bool recorded = false;
+    std::thread recorder([&] {
+        ready.wait();
+        if (!orch.graph_prepare(graph.recording_handle, boundary)) {
+            orch.graph_abort(graph.recording_handle);
+            return;
+        }
+        CoreTaskArgs task;
+        task.add_input(graph.params->tensor(0).ref());
+        TensorCreateInfo output(shape, 1, DataType::UINT32);
+        task.add_output(output);
+        if (!orch.submit_dummy_task(task).task_id().is_valid()) {
+            orch.graph_abort(graph.recording_handle);
+            return;
+        }
+        recorded = orch.graph_end();
+    });
+
+    CoreTaskArgs ordinary;
+    MixedKernels kernels{};
+    kernels.aiv0_kernel_id = 0;
+    const bool submitted = orch.submit_task(kernels, ordinary).task_id().is_valid();
+    // The recorder starts after the submit thread advances past its owning Graph shell.
+    start_recording.set_value();
+    recorder.join();
+    ASSERT_TRUE(submitted);
+    ASSERT_TRUE(recorded);
+    orch.graph_commit();
+}
+
+void concurrent_graph_recording_orch_entry(const ChipTaskArgs &) {
+    ++g_fake->orchestration_count;
+    auto *ctx = g_orch_runtime;
+    auto &orch = *ctx->orchestrator;
+    uint32_t data[16]{};
+    uint32_t shape[] = {16};
+    GraphTaskArgs boundary;
+    auto input = simpler::hbg::make_tensor_external(data, shape, 1);
+    boundary.add_input(input);
+
+    std::array<GraphScopeResult, 2> graphs;
+    graphs[0] = orch.graph_begin(0x531, boundary);
+    ASSERT_TRUE(graphs[0].recording);
+    graphs[1] = orch.graph_begin(0x532, boundary);
+    if (!graphs[1].recording) orch.graph_abort(graphs[0].recording_handle);
+    ASSERT_TRUE(graphs[1].recording);
+
+    struct Probe {
+        std::mutex mutex;
+        std::condition_variable cv;
+        int prepared{0};
+        bool release{false};
+        std::array<bool, 2> recorded{};
+    } probe;
+    std::array<bool, 2> started{};
+    auto drain = RAIIScopeGuard([&]() {
+        {
+            std::lock_guard<std::mutex> lock(probe.mutex);
+            probe.release = true;
+        }
+        probe.cv.notify_all();
+        graph_record_wait_impl(ctx);
+        for (size_t i = 0; i < graphs.size(); ++i) {
+            if (!started[i]) orch.graph_abort(graphs[i].recording_handle);
+        }
+    });
+
+    for (size_t i = 0; i < graphs.size(); ++i) {
+        std::function<void(const GraphTaskArgs &)> job =
+            [&, i, handle = graphs[i].recording_handle](const GraphTaskArgs &record_args) {
+                if (!orch.graph_prepare(handle, record_args)) {
+                    orch.graph_abort(handle);
+                    return;
+                }
+                {
+                    std::lock_guard<std::mutex> lock(probe.mutex);
+                    ++probe.prepared;
+                }
+                probe.cv.notify_all();
+                {
+                    std::unique_lock<std::mutex> lock(probe.mutex);
+                    if (!probe.cv.wait_for(lock, std::chrono::seconds(5), [&] {
+                            return probe.release;
+                        })) {
+                        lock.unlock();
+                        orch.graph_abort(handle);
+                        return;
+                    }
+                }
+                for (size_t task_index = 0; task_index < i + 2; ++task_index) {
+                    CoreTaskArgs task;
+                    task.add_input(record_args.tensor(0).ref());
+                    TensorCreateInfo output(shape, 1, DataType::UINT32);
+                    task.add_output(output);
+                    if (!orch.submit_dummy_task(task).task_id().is_valid()) {
+                        orch.graph_abort(handle);
+                        return;
+                    }
+                }
+                probe.recorded[i] = orch.graph_end();
+            };
+        started[i] = graph_record_start_impl(ctx, *graphs[i].params, &job);
+        ASSERT_TRUE(started[i]);
+    }
+
+    {
+        std::unique_lock<std::mutex> lock(probe.mutex);
+        ASSERT_TRUE(probe.cv.wait_for(lock, std::chrono::seconds(5), [&] {
+            return probe.prepared == 2;
+        }));
+    }
+    CoreTaskArgs ordinary;
+    MixedKernels kernels{};
+    kernels.aiv0_kernel_id = 0;
+    ASSERT_TRUE(orch.submit_task(kernels, ordinary).task_id().is_valid());
+    {
+        std::lock_guard<std::mutex> lock(probe.mutex);
+        probe.release = true;
+    }
+    probe.cv.notify_all();
+    // After the common start signal, the submitter and both recorders access
+    // their phases without another inter-thread ordering point.
+    for (int i = 0; i < 16; ++i) {
+        ASSERT_TRUE(orch.submit_task(kernels, ordinary).task_id().is_valid());
+    }
+    graph_record_wait_impl(ctx);
+    ASSERT_TRUE(probe.recorded[0]);
+    ASSERT_TRUE(probe.recorded[1]);
     orch.graph_commit();
 }
 
@@ -1017,6 +1162,78 @@ TEST_F(HbgBindLedgerTest, AllMetadataSourcesSurviveBindAndPublishInOrder) {
     EXPECT_NE(publish_run_image_impl(&runtime, &api_), 0);
     EXPECT_EQ(fake_.copies.size(), 1u) << "a second publication of the same run copies nothing";
     EXPECT_EQ(fake_.section_publications, 1u) << "and hands the carrier nothing a second time";
+    EXPECT_EQ(release_run_bindings_impl(&runtime, &api_), 0);
+}
+
+TEST_F(HbgBindLedgerTest, DelayedGraphRecordingKeepsItsOwningSubmitIndex) {
+    Runtime runtime;
+    init_runtime(runtime);
+    eps_ = {delayed_graph_recording_orch_entry, capture_orch_bind};
+    ChipStorageTaskArgs args;
+    ASSERT_EQ(bind(runtime, args, nullptr, 0), 0);
+
+    const auto records = fake_.phase_records.records();
+    const auto find_phase = [&](HostPhaseKind kind) {
+        return std::find_if(records.begin(), records.end(), [kind](const HostPhaseRecord &record) {
+            return record.kind == static_cast<uint32_t>(kind);
+        });
+    };
+    const auto graph_submit = find_phase(HostPhaseKind::OrchGraphSubmit);
+    const auto ordinary_submit = find_phase(HostPhaseKind::OrchSubmitTask);
+    const auto sub_task = find_phase(HostPhaseKind::OrchRecordSubTask);
+    const auto definition = find_phase(HostPhaseKind::OrchBuildDefinition);
+    ASSERT_NE(graph_submit, records.end());
+    ASSERT_NE(ordinary_submit, records.end());
+    ASSERT_NE(sub_task, records.end());
+    ASSERT_NE(definition, records.end());
+    EXPECT_EQ(ordinary_submit->index, graph_submit->index + 1);
+    EXPECT_EQ(sub_task->index, graph_submit->index);
+    EXPECT_EQ(definition->index, graph_submit->index);
+    EXPECT_EQ(release_run_bindings_impl(&runtime, &api_), 0);
+}
+
+TEST_F(HbgBindLedgerTest, ConcurrentGraphRecordingsKeepTheirOwnSubmitIndices) {
+    Runtime runtime;
+    init_runtime(runtime);
+    eps_ = {concurrent_graph_recording_orch_entry, capture_orch_bind};
+    ChipStorageTaskArgs args;
+    const uint64_t task_window[4] = {32, 0, 0, 0};
+    ASSERT_EQ(
+        bind_callable_to_runtime_impl(&runtime, &api_, &args, &eps_, nullptr, 0, task_window, nullptr, nullptr), 0
+    );
+
+    const auto records = fake_.phase_records.records();
+    const auto phases = [&](HostPhaseKind kind) {
+        std::vector<HostPhaseRecord> found;
+        for (const HostPhaseRecord &record : records) {
+            if (record.kind == static_cast<uint32_t>(kind)) found.push_back(record);
+        }
+        return found;
+    };
+    const auto shells = phases(HostPhaseKind::OrchGraphSubmit);
+    const auto ordinary = phases(HostPhaseKind::OrchSubmitTask);
+    const auto subtasks = phases(HostPhaseKind::OrchRecordSubTask);
+    const auto definitions = phases(HostPhaseKind::OrchBuildDefinition);
+    ASSERT_EQ(shells.size(), 2u);
+    ASSERT_EQ(ordinary.size(), 17u);
+    ASSERT_EQ(subtasks.size(), 5u);
+    ASSERT_EQ(definitions.size(), 2u);
+    EXPECT_EQ(fake_.phase_records.dropped_records(), 0u);
+    EXPECT_EQ(shells[1].index, shells[0].index + 1);
+    EXPECT_EQ(ordinary[0].index, shells[1].index + 1);
+    EXPECT_NE(definitions[0].thread_id, definitions[1].thread_id);
+    for (const HostPhaseRecord &definition : definitions) {
+        ASSERT_TRUE(definition.payload == 2 || definition.payload == 3);
+        const uint32_t owning_index = shells[definition.payload - 2].index;
+        EXPECT_EQ(definition.index, owning_index);
+        size_t own_subtasks = 0;
+        for (const HostPhaseRecord &subtask : subtasks) {
+            if (subtask.thread_id != definition.thread_id) continue;
+            ++own_subtasks;
+            EXPECT_EQ(subtask.index, owning_index);
+        }
+        EXPECT_EQ(own_subtasks, definition.payload);
+    }
     EXPECT_EQ(release_run_bindings_impl(&runtime, &api_), 0);
 }
 

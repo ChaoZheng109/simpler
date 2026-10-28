@@ -776,7 +776,9 @@ TaskOutputTensors graph_record_submit_sub_task(
     // Published last: until this advances, the slot is not part of the recording, so
     // nothing that scans the recorded tasks can see the task being built.
     recording.task_count = task_index + 1;
-    ORCH_PHASE_END(HostPhaseKind::OrchRecordSubTask, TaskId::to_uint64(task_id));
+    ORCH_PHASE_END_WITH_INDEX(
+        HostPhaseKind::OrchRecordSubTask, TaskId::to_uint64(task_id), g_active_graph_entry->submit_idx
+    );
     return result;
 }
 
@@ -786,7 +788,7 @@ GraphScopeResult OrchestratorState::graph_begin(uint64_t graph_key, const GraphT
         rejected.has_error = true;
         return rejected;
     }
-    ORCH_PHASE_START_SPANNING();
+    ORCH_PHASE_START_SPANNING(g_active_graph_entry != nullptr ? g_active_graph_entry->submit_idx : g_orch_submit_idx);
     const GraphScopeResult result = graph_begin_inner(graph_key, args);
     ORCH_PHASE_END_SPANNING(HostPhaseKind::OrchGraphBegin, graph_key);
     return result;
@@ -907,6 +909,9 @@ GraphScopeResult OrchestratorState::graph_begin_inner(uint64_t graph_key, const 
     // up here would sit on the submitting thread, between two outer shells.
     auto entry = std::make_unique<GraphInflightRecording>();
     entry->graph_key = graph_key;
+#if SIMPLER_DFX
+    entry->submit_idx = g_orch_submit_idx;
+#endif
     // The boundary is built once, here, and only read afterwards -- by the recorder that
     // picks this entry up, and by later same-key submissions comparing against it.
     //
@@ -1097,7 +1102,7 @@ bool OrchestratorState::graph_end() {
         // The counts are not copied: they are in the image, where the device checks this
         // invocation's argument counts against them.
         record.boundary_match_info = recording->bound_boundary().match_info;
-        ORCH_PHASE_END(HostPhaseKind::OrchBuildDefinition, recording->task_count);
+        ORCH_PHASE_END_WITH_INDEX(HostPhaseKind::OrchBuildDefinition, recording->task_count, entry->submit_idx);
     }
     const GraphDefinition *header = built ? graph_record_definition(*state, record) : nullptr;
     if (header == nullptr) {
@@ -1132,7 +1137,7 @@ bool OrchestratorState::graph_end() {
 // Join every recording in flight and back-patch all deferred shells in submit
 // order. Orchestration completion is the only normal-path barrier.
 void OrchestratorState::graph_commit() {
-    ORCH_PHASE_START_SPANNING();
+    ORCH_PHASE_START_SPANNING(g_active_graph_entry != nullptr ? g_active_graph_entry->submit_idx : g_orch_submit_idx);
     graph_commit_inner();
     ORCH_PHASE_END_SPANNING(HostPhaseKind::OrchGraphCommit, 0);
 }
