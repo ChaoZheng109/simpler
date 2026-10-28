@@ -30,7 +30,9 @@ _CASES = [
 ]
 
 
-@pytest.mark.parametrize("probe", ["runtime_publication_launch", "run_execution_streams", "run_caller_launch"])
+@pytest.mark.parametrize(
+    "probe", ["runtime_publication_launch", "run_execution_streams", "run_caller_launch", "bootstrap_error"]
+)
 @pytest.mark.requires_hardware
 @pytest.mark.parametrize(("arch", "runtime"), _CASES)
 def test_onboard_execution_contract(arch: str, runtime: str, probe: str, tmp_path: Path):
@@ -84,3 +86,9 @@ def test_onboard_execution_contract(arch: str, runtime: str, probe: str, tmp_pat
     result = subprocess.run([str(binary)], capture_output=True, text=True, timeout=30, check=False)
     assert result.returncode == 0, result.stdout + result.stderr
     assert "PASS:" in result.stdout
+    if probe == "bootstrap_error":
+        assert "SO cache failed: stage=write errno=28" in result.stdout + result.stderr
+        assert "device filesystem block_bytes=4096 free_blocks=0" in result.stdout + result.stderr
+        assert "device filesystem query failed: errno=38" in result.stdout + result.stderr
+        assert "aclrtMalloc(result) failed: -1515" in result.stdout + result.stderr
+        assert "aclrtMemcpy(result initialization) failed: -1616" in result.stdout + result.stderr

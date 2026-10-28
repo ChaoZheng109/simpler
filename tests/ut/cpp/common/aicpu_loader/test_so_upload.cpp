@@ -10,9 +10,13 @@
  */
 #include <signal.h>
 #include <sys/resource.h>
+#include <sys/statvfs.h>
 #include <unistd.h>
 
 #include <array>
+#include <cerrno>
+#include <cstdarg>
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -22,12 +26,45 @@
 #include <gtest/gtest.h>
 
 #include "aicpu/aicpu_schedule/aicpu_context.h"
+#include "aicpu_loader/device/aicpu_dispatcher.h"
 
 namespace {
 aicpu::aicpuContext_t context{1, 0, 123, 7};
 aicpu::status_t context_status = aicpu::AICPU_ERROR_NONE;
+#if defined(__linux__)
+int fault_write_errno;
+bool fail_capacity;
+int capacity_calls;
+#endif
 }  // namespace
-extern "C" void DlogRecord(int, int, const char *, ...) {}
+
+#if defined(__linux__)
+extern "C" ssize_t __real_write(int, const void *, size_t);
+extern "C" int __real_statvfs(const char *, struct statvfs *);
+extern "C" ssize_t __wrap_write(int fd, const void *data, size_t count) {
+    if (fault_write_errno == 0) return __real_write(fd, data, count);
+    errno = fault_write_errno;
+    return -1;
+}
+extern "C" int __wrap_statvfs(const char *path, struct statvfs *capacity) {
+    if (fault_write_errno == 0) return __real_statvfs(path, capacity);
+    ++capacity_calls;
+    if (fail_capacity) {
+        errno = ENOSYS;
+        return -1;
+    }
+    *capacity = {};
+    capacity->f_frsize = 4096;
+    capacity->f_ffree = 11;
+    return 0;
+}
+#endif
+extern "C" void DlogRecord(int, int, const char *format, ...) {
+    va_list ap;
+    va_start(ap, format);
+    vfprintf(stderr, format, ap);
+    va_end(ap);
+}
 namespace aicpu {
 status_t aicpuGetContext(aicpuContext_t *ctx) {
     *ctx = context;
@@ -35,10 +72,6 @@ status_t aicpuGetContext(aicpuContext_t *ctx) {
 }
 uint32_t GetUniqueVfId() { return 9; }
 }  // namespace aicpu
-namespace simpler_dispatcher {
-std::string MakeInnerSoPath(uint64_t fp, uint64_t device_id);
-bool WriteBytes(const std::string &path, const char *data, uint64_t len);
-}  // namespace simpler_dispatcher
 
 namespace {
 namespace fs = std::filesystem;
@@ -61,16 +94,128 @@ TEST(SoUpload, UsesCannOwnerDirectory) {
     EXPECT_TRUE(MakeInnerSoPath(1, 12).empty());
 }
 
+TEST(SoUpload, ContextFailurePublishesWithoutUsingAnUnrelatedErrno) {
+    BootstrapDeviceArgs device;
+    BootstrapResult result;
+    struct {
+        uint64_t unused[5]{};
+        void *device_args;
+    } args{};
+    const char bytes[] = "runtime";
+    device.device_id = 12;
+    device.inner_so_bin = reinterpret_cast<uint64_t>(bytes);
+    device.inner_so_len = sizeof(bytes);
+    device.result_addr = reinterpret_cast<uint64_t>(&result);
+    args.device_args = &device;
+    context_status = aicpu::AICPU_ERROR_FAILED;
+    errno = ENOSPC;
+    EXPECT_EQ(DynTileFwkBackendKernelServerInit(&args), 0u);
+    EXPECT_EQ(result.status, BootstrapStatus::Failed);
+    EXPECT_EQ(result.stage, BootstrapStage::Context);
+    EXPECT_EQ(result.context_error, static_cast<int32_t>(aicpu::AICPU_ERROR_FAILED));
+    EXPECT_EQ(result.error_number, 0);
+    EXPECT_EQ(result.device_id, 12);
+    EXPECT_EQ(result.requested_bytes, sizeof(bytes));
+    device.result_addr = 0;
+    EXPECT_EQ(DynTileFwkBackendKernelServerInit(&args), 1u);
+    context_status = aicpu::AICPU_ERROR_NONE;
+}
+
 class SoUploadFiles : public testing::Test {
 protected:
     std::string dir;
     void SetUp() override {
+#if defined(__linux__)
+        fault_write_errno = capacity_calls = 0;
+        fail_capacity = false;
+#endif
         char path[] = "/tmp/simpler-so-upload-XXXXXX";
         ASSERT_NE(mkdtemp(path), nullptr);
         dir = path;
     }
-    void TearDown() override { fs::remove_all(dir); }
+    void TearDown() override {
+#if defined(__linux__)
+        fault_write_errno = 0;
+#endif
+        fs::remove_all(dir);
+    }
 };
+
+#if defined(__linux__)
+TEST_F(SoUploadFiles, CapacityErrorsPublishOneBoundedQueryAndPreserveTarget) {
+    const std::string path = dir + "/owned.so";
+    std::ofstream(path) << "old";
+    for (int error : {ENOSPC, EDQUOT}) {
+        SCOPED_TRACE(error);
+        fault_write_errno = error;
+        capacity_calls = 0;
+        BootstrapResult result;
+        EXPECT_FALSE(WriteBytes(path, "x", 1, result));
+        EXPECT_EQ(result.status, BootstrapStatus::Failed);
+        EXPECT_EQ(result.stage, BootstrapStage::Write);
+        EXPECT_EQ(result.error_number, error);
+        EXPECT_STREQ(result.path, path.c_str());
+        EXPECT_EQ(result.requested_bytes, 1u);
+        EXPECT_EQ(result.written_bytes, 0u);
+        EXPECT_EQ(capacity_calls, 1);
+        EXPECT_EQ(result.capacity_valid, 1u);
+        EXPECT_EQ(result.capacity_errno, 0);
+        EXPECT_EQ(result.block_bytes, 4096u);
+        EXPECT_EQ(result.free_blocks, 0u);
+        EXPECT_EQ(result.available_blocks, 0u);
+        EXPECT_EQ(result.free_inodes, 11u);
+        std::ifstream previous(path);
+        EXPECT_EQ(std::string(std::istreambuf_iterator<char>(previous), {}), "old");
+        EXPECT_EQ(std::distance(fs::directory_iterator(dir), fs::directory_iterator()), 1);
+    }
+}
+
+TEST_F(SoUploadFiles, CapacityQueryFailureDoesNotReplaceTheUploadErrno) {
+    fault_write_errno = ENOSPC;
+    fail_capacity = true;
+    BootstrapResult result;
+    EXPECT_FALSE(WriteBytes(dir + "/owned.so", "x", 1, result));
+    EXPECT_EQ(result.status, BootstrapStatus::Failed);
+    EXPECT_EQ(result.stage, BootstrapStage::Write);
+    EXPECT_EQ(result.error_number, ENOSPC);
+    EXPECT_EQ(result.capacity_errno, ENOSYS);
+    EXPECT_EQ(result.capacity_valid, 0u);
+    EXPECT_EQ(capacity_calls, 1);
+    EXPECT_TRUE(fs::is_empty(dir));
+}
+#endif
+
+TEST_F(SoUploadFiles, FailedCreateReportsItsStageAndErrno) {
+    BootstrapResult result;
+    EXPECT_FALSE(WriteBytes(dir + "/missing/owned.so", "x", 1, result));
+    EXPECT_EQ(result.status, BootstrapStatus::Failed);
+    EXPECT_EQ(result.stage, BootstrapStage::Create);
+    EXPECT_EQ(result.error_number, ENOENT);
+    EXPECT_EQ(result.requested_bytes, 1u);
+    EXPECT_EQ(result.written_bytes, 0u);
+}
+
+TEST_F(SoUploadFiles, FailedWritePreservesErrnoBeforeCleanup) {
+    const std::string path = dir + "/owned.so", bytes(1024 * 1024, 'x');
+    ASSERT_EXIT(
+        {
+            signal(SIGXFSZ, SIG_IGN);
+            struct rlimit limit;
+            limit.rlim_cur = limit.rlim_max = 4096;
+            if (setrlimit(RLIMIT_FSIZE, &limit) != 0) _exit(1);
+            BootstrapResult result;
+            if (WriteBytes(path, bytes.data(), bytes.size(), result)) _exit(2);
+            _exit(
+                result.status == BootstrapStatus::Failed && result.stage == BootstrapStage::Write &&
+                        result.error_number == EFBIG && result.requested_bytes == bytes.size() &&
+                        result.written_bytes == limit.rlim_cur ?
+                    0 :
+                    3
+            );
+        },
+        testing::ExitedWithCode(0), ""
+    );
+}
 
 TEST_F(SoUploadFiles, ConcurrentRepeatedWritesAreAtomicAndLeaveOtherFilesAlone) {
     const std::string path = dir + "/owned.so", history = dir + "/simpler_inner_1_0.so";
@@ -80,8 +225,9 @@ TEST_F(SoUploadFiles, ConcurrentRepeatedWritesAreAtomicAndLeaveOtherFilesAlone) 
     for (size_t i = 0; i < writers.size(); ++i)
         writers[i] = std::thread([&, i] {
             const std::string bytes(65536, 'a' + i);
+            BootstrapResult result;
             for (int k = 0; k < 20; ++k)
-                if (!WriteBytes(path, bytes.data(), bytes.size())) good[i] = false;
+                if (!WriteBytes(path, bytes.data(), bytes.size(), result)) good[i] = false;
         });
     for (auto &writer : writers)
         writer.join();
@@ -109,7 +255,8 @@ TEST_F(SoUploadFiles, FailedUploadPreservesExistingTargetAndAllowsRetry) {
                 struct rlimit limit;
                 limit.rlim_cur = limit.rlim_max = 4096;
                 if (setrlimit(RLIMIT_FSIZE, &limit) != 0) _exit(1);
-                _exit(WriteBytes(path, bytes.data(), bytes.size()) ? 2 : 0);
+                BootstrapResult result;
+                _exit(WriteBytes(path, bytes.data(), bytes.size(), result) ? 2 : 0);
             },
             testing::ExitedWithCode(0), ""
         );
@@ -118,7 +265,9 @@ TEST_F(SoUploadFiles, FailedUploadPreservesExistingTargetAndAllowsRetry) {
             std::ifstream previous(path, std::ios::binary);
             EXPECT_EQ(std::string(std::istreambuf_iterator<char>(previous), {}), "old");
         }
-        ASSERT_TRUE(WriteBytes(path, bytes.data(), bytes.size()));
+        BootstrapResult result;
+        ASSERT_TRUE(WriteBytes(path, bytes.data(), bytes.size(), result));
+        EXPECT_EQ(result.written_bytes, bytes.size());
         std::ifstream retried(path, std::ios::binary);
         EXPECT_EQ(std::string(std::istreambuf_iterator<char>(retried), {}), bytes);
         ASSERT_TRUE(fs::remove(path));

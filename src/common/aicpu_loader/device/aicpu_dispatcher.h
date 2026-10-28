@@ -25,6 +25,7 @@
  *      DeviceArgs containing:
  *        - aicpu_so_bin / aicpu_so_len  → dispatcher SO bytes (libaicpu_extend_kernels reads)
  *        - inner_so_bin / inner_so_len  → runtime SO bytes    (dispatcher reads)
+ *        - result_addr → bounded upload result (dispatcher publishes, host reads)
  *   2. libaicpu_extend_kernels loads the bundled dispatcher,
  *      dlsym's the three CANN-contract symbols (Static + DynInit + Dyn),
  *      invokes our `DynTileFwkBackendKernelServerInit`.
@@ -35,7 +36,8 @@
  *      device_id suffix keeps paired dies sharing this filesystem from writing
  *      and executing one shared file (which corrupted the image under
  *      concurrent bootstrap and faulted simpler_aicpu_exec).
- *   4. host computes the same fingerprint + uses the same device_id to derive
+ *   4. host verifies the upload result after stream completion, then computes
+ *      the same fingerprint + uses the same device_id to derive
  *      the basename. CANN can resolve it in the process-owned directory.
  *   5. Per-task launches: host calls `rtsBinaryLoadFromFile` to
  *      JSON-register the preinstall file (cpuKernelMode=0), resolves
@@ -52,6 +54,14 @@
 #pragma once
 
 #include <cstdint>
+#include <string>
+
+#include "aicpu_loader/bootstrap_protocol.h"
+
+namespace simpler_dispatcher {
+std::string MakeInnerSoPath(uint64_t fp, uint64_t device_id, BootstrapResult *result = nullptr);
+bool WriteBytes(const std::string &path, const char *data, uint64_t len, BootstrapResult &result);
+}  // namespace simpler_dispatcher
 
 // CANN resolves all three exports during bootstrap. Only DynInit uploads;
 // the other two entries log and return success.

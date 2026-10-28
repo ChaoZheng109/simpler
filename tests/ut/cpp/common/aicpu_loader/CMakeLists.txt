@@ -11,6 +11,11 @@
 macro(aicpu_loader_case src)
     simpler_ut_plain_case(${src}
         SOURCES ${SIMPLER_SRC}/common/aicpu_loader/device/aicpu_dispatcher.cpp
-        INCLUDES ${SIMPLER_SRC}/common ${CMAKE_CURRENT_SOURCE_DIR}/support LABEL no_hardware)
+                ${SIMPLER_SRC}/common/platform/sim/aicpu/cache_ops.cpp
+        INCLUDES ${SIMPLER_SRC}/common ${SIMPLER_SRC}/common/platform/include
+                 ${CMAKE_CURRENT_SOURCE_DIR}/support LABEL no_hardware)
 endmacro()
 simpler_ut_glob_cases(aicpu_loader_case)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_link_options(test_so_upload PRIVATE "LINKER:--wrap=write" "LINKER:--wrap=statvfs")
+endif()

@@ -47,7 +47,39 @@ DeviceArgs + 104: aicpu_so_len
 DeviceArgs + 112: device_id
 DeviceArgs + 120: inner_so_bin
 DeviceArgs + 128: inner_so_len
+DeviceArgs + 136: result_addr
 ```
+
+The shared `bootstrap_protocol.h` locks this allocation to 160 bytes and
+preserves the CANN-consumed offsets. The host initializes a separate fixed-size
+result to Pending. The dispatcher publishes a complete, cache-flushed result
+before returning; the host accepts it only after successful stream synchronization
+and a device-to-host copy. Missing, stale or malformed results reject bootstrap.
+
+Expected context and filesystem failures return through this result without
+faulting the CANN stream. The Host console reports the failing stage, original
+errno (or a separate context error), device, target path, requested bytes and
+completed bytes. ENOSPC/EDQUOT additionally trigger one bounded device-side
+`statvfs` query; failure of that diagnostic cannot replace the original error.
+There is no directory scan or deletion of historical uploads. Open/write/close/
+chmod/rename failures remove only the attempt's unique temporary file and
+preserve any previously published target.
+
+Actual CANN launch, stream-sync and result-copy errors retain their original
+return code. A failed stream is not read as if it had published a filesystem
+diagnostic; a generic 507018 by itself still does not identify an upload error.
+When an upload failure is reported in a valid result after successful CANN
+synchronization, bootstrap returns `PTO_RUNTIME_ERR_INTERNAL`. It does not
+synthesize 507018. Log consumers should match `BootstrapDispatcher: SO cache
+failed` and its stage/errno fields for these handled failures; actual CANN
+507018 errors remain unchanged.
+An older caller with no result address keeps the dispatcher's original nonzero
+failure return. A new caller paired with an older dispatcher rejects Pending.
+
+Filesystem error injection exercises the production dispatcher code on the CPU,
+including ENOSPC/EDQUOT capacity collection and failed `statvfs`. Native result
+publication is checked with a safe invalid-bundle failure and a same-stream
+retry. These controls do not exhaust storage on a physical device.
 
 This private bootstrap structure is distinct from the platform runtime
 `KernelArgs` payload used by per-task launches. Per-task AICPU launch passes

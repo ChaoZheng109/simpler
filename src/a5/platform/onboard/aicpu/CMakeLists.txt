@@ -112,6 +112,7 @@ set_target_properties(aicpu_kernel PROPERTIES OUTPUT_NAME aicpu_kernel)
 # Direction 1: stable single dispatcher + runtime AICPU kernel uploaded at runtime.
 set(AICPU_DISPATCHER_SOURCES
     "${CMAKE_CURRENT_SOURCE_DIR}/../../../../common/aicpu_loader/device/aicpu_dispatcher.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../../../common/platform/onboard/aicpu/cache_ops.cpp"
 )
 add_library(aicpu_dispatcher SHARED ${AICPU_DISPATCHER_SOURCES})
 simpler_configure_profiling(aicpu_dispatcher)
@@ -129,9 +130,10 @@ target_compile_options(aicpu_dispatcher
 
 target_include_directories(aicpu_dispatcher
     PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/../../../../common/platform/include
         ${CMAKE_CURRENT_SOURCE_DIR}
         ${CMAKE_CUSTOM_INCLUDE_DIRS}
-        # src/common is needed so `#include "utils/elf_build_id.h"` resolves
+        # src/common resolves utils/elf_build_id.h and aicpu_loader/bootstrap_protocol.h
         # (matches a2a3 sibling; same Build-ID fingerprint protocol).
         ${CMAKE_CURRENT_SOURCE_DIR}/../../../../common
         ${ASCEND_HOME_PATH}/pkg_inc

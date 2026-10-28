@@ -22,18 +22,21 @@
 #include "aicpu_dispatcher.h"
 
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <unistd.h>
 
 #include <cerrno>
+#include <algorithm>
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <fstream>
+#include <limits>
 #include <string>
 
 #include "aicpu/aicpu_schedule/aicpu_context.h"
+#include "aicpu/cache_maintenance.h"
 #include "utils/elf_build_id.h"
 
 // dlog wrapper so error paths show up in device log without depending on
@@ -59,29 +62,42 @@ void DispatcherLog(const char *fmt, ...) {
 
 // Bootstrap-time DeviceArgs view. Layout shared with host's BootstrapDispatcher.
 // libaicpu_extend_kernels reads aicpu_so_bin/len/deviceId; we additionally read
-// inner_so_bin/len (an extra qword pair past deviceId).
+// inner_so_bin/len and a result address in the remaining bootstrap fields.
 struct KernelArgs {
     uint64_t unused[5] = {0};
     void *device_args{nullptr};
     void *runtime_args{nullptr};
     uint64_t regs{0};
 };
-struct DeviceArgs {
-    uint64_t unused[12] = {0};
-    uint64_t aicpu_so_bin{0};  // 96  — dispatcher bytes (libaicpu_extend_kernels)
-    uint64_t aicpu_so_len{0};  // 104
-    uint64_t device_id{0};     // 112
-    uint64_t inner_so_bin{0};  // 120 — runtime SO bytes (dispatcher)
-    uint64_t inner_so_len{0};  // 128
-};
 static_assert(offsetof(KernelArgs, device_args) == 40, "KernelArgs::device_args offset drift");
-static_assert(offsetof(DeviceArgs, aicpu_so_bin) == 96, "DeviceArgs::aicpu_so_bin offset drift");
-static_assert(offsetof(DeviceArgs, aicpu_so_len) == 104, "DeviceArgs::aicpu_so_len offset drift");
-static_assert(offsetof(DeviceArgs, device_id) == 112, "DeviceArgs::device_id offset drift");
-static_assert(offsetof(DeviceArgs, inner_so_bin) == 120, "DeviceArgs::inner_so_bin offset drift");
-static_assert(offsetof(DeviceArgs, inner_so_len) == 128, "DeviceArgs::inner_so_len offset drift");
 
 namespace simpler_dispatcher {
+
+void ReportFailure(BootstrapResult &result, BootstrapStage stage, int error_number, const std::string &path) {
+    result.status = BootstrapStatus::Failed;
+    result.stage = stage;
+    result.error_number = error_number;
+    snprintf(result.path, sizeof(result.path), "%s", path.c_str());
+    if (error_number == ENOSPC || error_number == EDQUOT) {
+        const std::string dir = path.substr(0, path.find_last_of('/'));
+        struct statvfs capacity{};
+        if (statvfs(dir.c_str(), &capacity) == 0) {
+            result.capacity_valid = 1;
+            result.block_bytes = capacity.f_frsize;
+            result.free_blocks = capacity.f_bfree;
+            result.available_blocks = capacity.f_bavail;
+            result.free_inodes = capacity.f_ffree;
+        } else {
+            result.capacity_errno = errno;
+        }
+    }
+    DispatcherLog(
+        "SO cache failed: stage=%s errno=%d (%s) device=%d path=%s requested=%llu written=%llu context_rc=%d",
+        bootstrap_stage_name(stage), error_number, error_number != 0 ? strerror(error_number) : "none",
+        result.device_id, result.path, static_cast<unsigned long long>(result.requested_bytes),
+        static_cast<unsigned long long>(result.written_bytes), result.context_error
+    );
+}
 
 // ELF Build-ID-derived 64-bit fingerprint (linker SHA-1 truncated to 8
 // bytes by `-Wl,--build-id`). Falls back to full-buffer FNV-1a if the SO
@@ -98,11 +114,19 @@ uint64_t Fingerprint(const char *data, uint64_t len) {
 }
 
 // CANN resolves and removes this process-owned directory at session teardown.
-std::string MakeInnerSoPath(uint64_t fp, uint64_t device_id) {
+std::string MakeInnerSoPath(uint64_t fp, uint64_t device_id, BootstrapResult *result) {
     aicpu::aicpuContext_t ctx{};
-    if (aicpu::aicpuGetContext == nullptr || aicpu::GetUniqueVfId == nullptr ||
-        aicpu::aicpuGetContext(&ctx) != aicpu::AICPU_ERROR_NONE || ctx.hostPid <= 0) {
+    const int context_success = static_cast<int>(aicpu::AICPU_ERROR_NONE);
+    int context_rc = context_success;
+    if (aicpu::aicpuGetContext == nullptr || aicpu::GetUniqueVfId == nullptr) context_rc = -ENOSYS;
+    else if ((context_rc = static_cast<int>(aicpu::aicpuGetContext(&ctx))) == context_success && ctx.hostPid <= 0)
+        context_rc = -EINVAL;
+    if (context_rc != context_success) {
         DispatcherLog("cannot determine CANN process SO directory");
+        if (result != nullptr) {
+            result->context_error = context_rc;
+            ReportFailure(*result, BootstrapStage::Context, 0, {});
+        }
         return {};
     }
     char buf[256];
@@ -116,36 +140,43 @@ std::string MakeInnerSoPath(uint64_t fp, uint64_t device_id) {
 
 // Per-upload temporary files and atomic rename publish complete SOs to concurrent
 // readers. Existing dlopen handles remain bound to their original inode.
-bool WriteBytes(const std::string &path, const char *data, uint64_t len) {
+bool WriteBytes(const std::string &path, const char *data, uint64_t len, BootstrapResult &report) {
+    report.requested_bytes = len;
+    report.written_bytes = 0;
     char tmp_path[320];
     snprintf(tmp_path, sizeof(tmp_path), "%s.tmp.XXXXXX", path.c_str());
     int fd = mkstemp(tmp_path);
-    if (fd < 0) return false;
-    close(fd);
-    {
-        std::ofstream f(tmp_path, std::ios::binary | std::ios::trunc);
-        if (!f.is_open()) {
-            DispatcherLog("open %s for write failed: %s", tmp_path, strerror(errno));
-            unlink(tmp_path);
-            return false;
-        }
-        f.write(data, static_cast<std::streamsize>(len));
-        f.close();
-        bool good = f.good();
-        if (!good) {
-            DispatcherLog("write %s failed", tmp_path);
-            unlink(tmp_path);
-            return false;
-        }
-    }
-    if (chmod(tmp_path, 0755) != 0) {
-        unlink(tmp_path);
+    if (fd < 0) {
+        const int error_number = errno;
+        ReportFailure(report, BootstrapStage::Create, error_number, path);
         return false;
     }
+    const auto fail = [&](BootstrapStage stage, int error_number) {
+        ReportFailure(report, stage, error_number, path);
+        if (fd >= 0) (void)close(fd);
+        unlink(tmp_path);
+        return false;
+    };
+    while (report.written_bytes < len) {
+        const uint64_t remaining = len - report.written_bytes;
+        const size_t chunk =
+            static_cast<size_t>(std::min(remaining, static_cast<uint64_t>(std::numeric_limits<ssize_t>::max())));
+        const ssize_t written = write(fd, data + report.written_bytes, chunk);
+        if (written < 0) {
+            const int error_number = errno;
+            if (error_number == EINTR) continue;
+            return fail(BootstrapStage::Write, error_number);
+        }
+        if (written == 0) return fail(BootstrapStage::Write, EIO);
+        report.written_bytes += static_cast<uint64_t>(written);
+    }
+    const int close_rc = close(fd);
+    const int close_error = errno;
+    fd = -1;
+    if (close_rc != 0) return fail(BootstrapStage::Close, close_error);
+    if (chmod(tmp_path, 0755) != 0) return fail(BootstrapStage::Chmod, errno);
     if (rename(tmp_path, path.c_str()) != 0) {
-        DispatcherLog("rename %s -> %s failed: %s", tmp_path, path.c_str(), strerror(errno));
-        unlink(tmp_path);
-        return false;
+        return fail(BootstrapStage::Rename, errno);
     }
     return true;
 }
@@ -184,32 +215,46 @@ __attribute__((visibility("default"))) uint32_t DynTileFwkBackendKernelServerIni
         return 1;
     }
     auto *k = reinterpret_cast<KernelArgs *>(args);
-    auto *d = reinterpret_cast<DeviceArgs *>(k->device_args);
+    auto *d = reinterpret_cast<simpler_dispatcher::BootstrapDeviceArgs *>(k->device_args);
     if (d == nullptr) {
         simpler_dispatcher::DispatcherLog("Init: device_args==nullptr");
         return 1;
     }
+    simpler_dispatcher::BootstrapResult result;
+    result.device_id = static_cast<int32_t>(d->device_id);
+    result.requested_bytes = d->inner_so_len;
+    const auto finish = [&]() -> uint32_t {
+        if (d->result_addr != 0) {
+            auto *output = reinterpret_cast<simpler_dispatcher::BootstrapResult *>(d->result_addr);
+            *output = result;
+            cache_flush_range(output, sizeof(*output));
+            // Expected upload failures travel in the record without faulting the stream.
+            return 0;
+        }
+        return result.status == simpler_dispatcher::BootstrapStatus::Success ? 0 : 1;
+    };
     if (d->inner_so_bin == 0 || d->inner_so_len == 0) {
         simpler_dispatcher::DispatcherLog(
             "Init: empty inner SO bundle (bin=%lx len=%lu)", d->inner_so_bin, d->inner_so_len
         );
-        return 1;
+        simpler_dispatcher::ReportFailure(result, simpler_dispatcher::BootstrapStage::Write, EINVAL, {});
+        return finish();
     }
     const char *inner_bytes = reinterpret_cast<const char *>(d->inner_so_bin);
     uint64_t fp = simpler_dispatcher::Fingerprint(inner_bytes, d->inner_so_len);
-    const std::string path = simpler_dispatcher::MakeInnerSoPath(fp, d->device_id);
-    if (path.empty()) return 1;
+    const std::string path = simpler_dispatcher::MakeInnerSoPath(fp, d->device_id, &result);
+    if (path.empty()) return finish();
     const std::string dir = path.substr(0, path.find_last_of('/'));
     if (mkdir(dir.c_str(), 0755) != 0 && errno != EEXIST) {
-        simpler_dispatcher::DispatcherLog("mkdir %s failed: %s", dir.c_str(), strerror(errno));
-        return 1;
+        const int error_number = errno;
+        simpler_dispatcher::ReportFailure(result, simpler_dispatcher::BootstrapStage::Mkdir, error_number, dir);
+        return finish();
     }
-    if (!simpler_dispatcher::WriteBytes(path, inner_bytes, d->inner_so_len)) {
-        simpler_dispatcher::DispatcherLog("Init: stage %s failed", path.c_str());
-        return 1;
-    }
+    if (!simpler_dispatcher::WriteBytes(path, inner_bytes, d->inner_so_len, result)) return finish();
     simpler_dispatcher::DispatcherLog("Init: wrote %s (%lu bytes)", path.c_str(), d->inner_so_len);
-    return 0;
+    result.status = simpler_dispatcher::BootstrapStatus::Success;
+    result.stage = simpler_dispatcher::BootstrapStage::Complete;
+    return finish();
 }
 
 }  // extern "C"

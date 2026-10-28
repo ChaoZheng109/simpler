@@ -24,6 +24,7 @@
 #include <vector>
 
 #include "acl/acl.h"
+#include "aicpu_loader/bootstrap_protocol.h"
 #include "common/unified_log.h"
 #include "runtime/rt.h"
 #include "utils/elf_build_id.h"
@@ -115,24 +116,36 @@ int LoadAicpuOp::BootstrapDispatcher(
         return rc;
     }
 
-    constexpr size_t kDeviceArgsBytes = 160;
-    char host_dev_args[kDeviceArgsBytes] = {};
-    auto write_qword = [&](size_t offset, uint64_t value) {
-        std::memcpy(host_dev_args + offset, &value, sizeof(value));
-    };
-    write_qword(96, reinterpret_cast<uint64_t>(dev_dispatcher.ptr));
-    write_qword(104, static_cast<uint64_t>(dispatcher_len));
-    write_qword(112, static_cast<uint64_t>(device_id_));
-    write_qword(120, reinterpret_cast<uint64_t>(dev_inner.ptr));
-    write_qword(128, static_cast<uint64_t>(inner_len));
+    simpler_dispatcher::BootstrapResult result;
+    DeviceBuf dev_result;
+    rc = dev_result.alloc(sizeof(result));
+    if (rc != ACL_SUCCESS) {
+        LOG_ERROR("BootstrapDispatcher: aclrtMalloc(result) failed: %d", rc);
+        return rc;
+    }
+    rc = aclrtMemcpy(dev_result.ptr, sizeof(result), &result, sizeof(result), ACL_MEMCPY_HOST_TO_DEVICE);
+    if (rc != ACL_SUCCESS) {
+        LOG_ERROR("BootstrapDispatcher: aclrtMemcpy(result initialization) failed: %d", rc);
+        return rc;
+    }
+
+    simpler_dispatcher::BootstrapDeviceArgs host_dev_args;
+    host_dev_args.aicpu_so_bin = reinterpret_cast<uint64_t>(dev_dispatcher.ptr);
+    host_dev_args.aicpu_so_len = dispatcher_len;
+    host_dev_args.device_id = static_cast<uint64_t>(device_id_);
+    host_dev_args.inner_so_bin = reinterpret_cast<uint64_t>(dev_inner.ptr);
+    host_dev_args.inner_so_len = inner_len;
+    host_dev_args.result_addr = reinterpret_cast<uint64_t>(dev_result.ptr);
 
     DeviceBuf dev_args;
-    rc = dev_args.alloc(kDeviceArgsBytes);
+    rc = dev_args.alloc(sizeof(host_dev_args));
     if (rc != ACL_SUCCESS) {
         LOG_ERROR("BootstrapDispatcher: aclrtMalloc(device_args) failed: %d", rc);
         return rc;
     }
-    rc = aclrtMemcpy(dev_args.ptr, kDeviceArgsBytes, host_dev_args, kDeviceArgsBytes, ACL_MEMCPY_HOST_TO_DEVICE);
+    rc = aclrtMemcpy(
+        dev_args.ptr, sizeof(host_dev_args), &host_dev_args, sizeof(host_dev_args), ACL_MEMCPY_HOST_TO_DEVICE
+    );
     if (rc != ACL_SUCCESS) {
         LOG_ERROR("BootstrapDispatcher: aclrtMemcpy(device_args) failed: %d", rc);
         return rc;
@@ -170,6 +183,49 @@ int LoadAicpuOp::BootstrapDispatcher(
     if (rc != ACL_SUCCESS) {
         LOG_ERROR("BootstrapDispatcher: aclrtSynchronizeStream failed: %d", rc);
         return rc;
+    }
+    rc = aclrtMemcpy(&result, sizeof(result), dev_result.ptr, sizeof(result), ACL_MEMCPY_DEVICE_TO_HOST);
+    if (rc != ACL_SUCCESS) {
+        LOG_ERROR("BootstrapDispatcher: reading upload result failed: %d", rc);
+        return rc;
+    }
+    using simpler_dispatcher::BootstrapStage;
+    using simpler_dispatcher::BootstrapStatus;
+    const bool success = result.status == BootstrapStatus::Success && result.stage == BootstrapStage::Complete &&
+                         result.error_number == 0 && result.context_error == 0 && result.written_bytes == inner_len;
+    const bool failure =
+        result.status == BootstrapStatus::Failed && result.stage >= BootstrapStage::Context &&
+        result.stage <= BootstrapStage::Rename &&
+        (result.error_number > 0 || (result.stage == BootstrapStage::Context && result.context_error != 0));
+    if (result.magic != simpler_dispatcher::kBootstrapResultMagic ||
+        result.version != simpler_dispatcher::kBootstrapResultVersion || result.device_id != device_id_ ||
+        result.requested_bytes != inner_len || result.written_bytes > inner_len ||
+        std::memchr(result.path, '\0', sizeof(result.path)) == nullptr || (!success && !failure)) {
+        LOG_ERROR("BootstrapDispatcher: missing or invalid upload result (device=%d)", device_id_);
+        return PTO_RUNTIME_ERR_INTERNAL;
+    }
+    if (failure) {
+        LOG_ERROR(
+            "BootstrapDispatcher: SO cache failed: stage=%s errno=%d (%s) device=%d path=%s "
+            "requested=%llu written=%llu context_rc=%d",
+            simpler_dispatcher::bootstrap_stage_name(result.stage), result.error_number,
+            result.error_number != 0 ? std::strerror(result.error_number) : "none", result.device_id, result.path,
+            static_cast<unsigned long long>(result.requested_bytes),
+            static_cast<unsigned long long>(result.written_bytes), result.context_error
+        );
+        if (result.capacity_valid != 0) {
+            LOG_ERROR(
+                "BootstrapDispatcher: device filesystem block_bytes=%llu free_blocks=%llu "
+                "available_blocks=%llu free_inodes=%llu",
+                static_cast<unsigned long long>(result.block_bytes),
+                static_cast<unsigned long long>(result.free_blocks),
+                static_cast<unsigned long long>(result.available_blocks),
+                static_cast<unsigned long long>(result.free_inodes)
+            );
+        } else if (result.capacity_errno != 0) {
+            LOG_ERROR("BootstrapDispatcher: device filesystem query failed: errno=%d", result.capacity_errno);
+        }
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
     LOG_INFO(
         "BootstrapDispatcher: bundled dispatcher (%zu B) + inner SO (%zu B) uploaded; inner SO at %s", dispatcher_len,
