@@ -100,6 +100,7 @@ struct DomainAllocation {
     std::unique_ptr<pto::comm::rdma::RdmaWorkspaceManager> rdma_workspace;
 #endif
     CommContext *device_ctx = nullptr;  // aclrtMalloc'd CommContext mirror
+    size_t mapping_size = 0;
 };
 
 struct CommHandle_ {
@@ -1700,6 +1701,7 @@ static int domain_alloc_via_ipc(
         return -1;
     }
     out->device_ctx = reinterpret_cast<CommContext *>(newDevMem);
+    out->mapping_size = aligned_size;
     return 0;
 }
 
@@ -1851,9 +1853,9 @@ extern "C" int comm_barrier(CommHandle h) {
 
 extern "C" int comm_alloc_domain_windows(
     CommHandle h, uint64_t allocation_id, const uint32_t *rank_ids, size_t rank_count, uint32_t domain_rank,
-    size_t window_size, uint64_t *device_ctx_out, uint64_t *local_window_base_out
+    size_t window_size, uint64_t *device_ctx_out, uint64_t *local_window_base_out, size_t *actual_window_size_out
 ) try {
-    if (!h || !rank_ids || !device_ctx_out || !local_window_base_out) return -1;
+    if (!h || !rank_ids || !device_ctx_out || !local_window_base_out || !actual_window_size_out) return -1;
     if (rank_count == 0 || rank_count > COMM_MAX_RANK_NUM || domain_rank >= rank_count || window_size == 0) {
         LOG_ERROR(
             "[comm rank %d] alloc_domain: bad args (rank_count=%zu domain_rank=%u window_size=%zu)", h->rank,
@@ -1890,6 +1892,7 @@ extern "C" int comm_alloc_domain_windows(
 
     *device_ctx_out = reinterpret_cast<uint64_t>(alloc->device_ctx);
     *local_window_base_out = reinterpret_cast<uint64_t>(alloc->local_buf);
+    *actual_window_size_out = alloc->mapping_size;
     h->domain_allocations.emplace(allocation_id, std::move(alloc));
     return 0;
 } catch (const std::exception &e) {

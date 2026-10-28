@@ -386,9 +386,9 @@ public:
     );
     /// Collectively allocate a fresh per-rank symmetric pool for a subset of
     /// ranks.  Multiple concurrent allocations are disambiguated by
-    /// `allocation_id`.  Returns (device_ctx, local_window_base).  Only
+    /// `allocation_id`. Returns (device_ctx, local_window_base, actual_window_size). Only
     /// participating ranks call this; non-members of the subset must not.
-    std::pair<uint64_t, uint64_t> comm_alloc_domain_windows(
+    std::tuple<uint64_t, uint64_t, size_t> comm_alloc_domain_windows(
         uint64_t comm_handle, uint64_t allocation_id, const std::vector<uint32_t> &rank_ids, uint32_t domain_rank,
         size_t window_size
     );
@@ -582,7 +582,7 @@ private:
     using CommGetWindowSizeFn = int (*)(void *, size_t *);
     using CommDeriveContextFn = int (*)(void *, const uint32_t *, size_t, uint32_t, size_t, size_t, uint64_t *);
     using CommAllocDomainWindowsFn =
-        int (*)(void *, uint64_t, const uint32_t *, size_t, uint32_t, size_t, uint64_t *, uint64_t *);
+        int (*)(void *, uint64_t, const uint32_t *, size_t, uint32_t, size_t, uint64_t *, uint64_t *, size_t *);
     using CommReleaseDomainWindowsFn = int (*)(void *, uint64_t, size_t, uint32_t);
     using CommGlobalDomainPrepareFn =
         int (*)(uint64_t, uint32_t, uint32_t, size_t, uint32_t, CommGlobalDomainDescriptor *, uint64_t *);
@@ -611,6 +611,7 @@ private:
     int destroy_comm_session(CommSession &session);
     uint64_t create_base_comm(int rank, int nranks, const std::string &rootinfo_path);
     void clear_comm_sessions();
+    void require_comm_reclamation_safe() const;
 
     std::shared_ptr<RuntimeModule> runtime_module_;
     CreateDeviceContextFn create_device_context_fn_ = nullptr;
@@ -789,7 +790,7 @@ private:
     void cleanup_native_runs_noexcept() noexcept;
     void clear_runtime_binding();
     void abandon_after_failed_teardown(std::exception_ptr error) noexcept;
-    /** How many runs a teardown sweep left behind, each of them not proved destroyed. */
+    /** How many runs remain tracked and not proved destroyed, including live runs. */
     size_t unproven_native_run_count() const noexcept;
     /**
      * Detach the run storage of every run not proved destroyed.
@@ -989,6 +990,7 @@ private:
     // neither creates nor tracks. Plain: written and read from the one thread
     // that drives this worker's control commands and its run lane.
     bool exported_device_regions_live_ = false;
+    bool comm_reclamation_unconfirmed_ = false;
     std::unique_ptr<ChipRunLane> run_lane_;
     // Names a successful binding or an init whose rollback still needs close.
     // Cleared only after successful teardown. Control calls run on the owning

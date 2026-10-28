@@ -14,9 +14,13 @@ class) because multiple cases within a single class exhibit a Worker state-leak
 that causes golden-mismatch failures on sequential worker.run() calls.
 """
 
+import os
+from multiprocessing.shared_memory import SharedMemory
+
 import pytest
 import torch
 from simpler.task_interface import ArgDirection as D
+from simpler.worker import Worker
 
 from simpler_setup import SceneTestCase, scene_test
 
@@ -473,6 +477,69 @@ class TestAllreduceRingP2MaxMinProd(SceneTestCase):
             getattr(args, f"out_{rank}").copy_(expected)
 
 
+def _run_rejected_domain_case(case, platform, device_ids, request, monkeypatch):
+    worker = Worker(
+        level=3,
+        platform=platform,
+        runtime=case._st_runtime,
+        device_ids=device_ids,
+        num_sub_workers=0,
+    )
+    domains, release_calls = [], []
+    allocate = worker._allocate_domain
+    release = worker._release_domain_claimed
+
+    def observe_allocate(*args, **kwargs):
+        domain = allocate(*args, **kwargs)
+        domains.append(domain)
+        return domain
+
+    def observe_release(domain):
+        release_calls.append(domain)
+        release(domain)
+
+    monkeypatch.setattr(worker, "_allocate_domain", observe_allocate)
+    monkeypatch.setattr(worker, "_release_domain_claimed", observe_release)
+    try:
+        compiled = case.build_callable(platform)
+        handles = {name: value if name.endswith("_sig") else worker.register(value) for name, value in compiled.items()}
+        monkeypatch.setattr(type(case), "_st_chip_handles", handles, raising=False)
+        worker._st_device_id = device_ids[0]
+        worker.init()
+        pids = (*worker._chip_pids, *worker._sub_pids, *worker._next_level_pids)
+        mailboxes = tuple(shm.name for shm in (*worker._chip_shms, *worker._next_level_shms))
+        with pytest.raises(RuntimeError, match=r"reduce_op=1 unsupported|failed with code -5"):
+            SceneTestCase.test_run(case, platform, worker, request)
+        assert len(domains) == 1
+        domain = domains[0]
+        assert domain.released and not domain.freed
+        assert not worker._cleanup_journal.empty
+        for _ in range(2):
+            with pytest.raises(RuntimeError, match="window reclamation is unconfirmed"):
+                worker.close()
+            assert not domain.freed and not worker._cleanup_journal.empty
+            assert worker._domain_free_results[domain.allocation_id] is not None
+            assert [(kind, identity) for kind, identity, _ in worker._cleanup_journal._entries] == [
+                ("domain-retirement", f"True:{domain.allocation_id}")
+            ]
+            assert worker._worker is None
+            assert not worker._chip_pids and not worker._sub_pids and not worker._next_level_pids
+            for pid in pids:
+                with pytest.raises(ChildProcessError):
+                    os.waitpid(pid, os.WNOHANG)
+            for name in mailboxes:
+                with pytest.raises(FileNotFoundError):
+                    SharedMemory(name=name)
+        assert release_calls == [domain]
+    finally:
+        if worker._cleanup_journal.empty:
+            worker.close()
+        else:
+            with pytest.raises(RuntimeError, match="window reclamation is unconfirmed"):
+                worker.close()
+
+
+@pytest.mark.device_count(2)
 @scene_test(level=3, runtime="tensormap_and_ringbuffer")
 class TestAllreduceBidirectionalRingRejectNonSum(SceneTestCase):
     """Negative test: bidirectional_ring rejects a non-Sum reduce_op via rt_report_fatal."""
@@ -493,12 +560,12 @@ class TestAllreduceBidirectionalRingRejectNonSum(SceneTestCase):
     def compute_golden(self, args, params):
         pass
 
-    def test_run(self, st_platform, st_worker, request):
-        """Override: expect the device-side reduce_op guard to fail the run."""
-        with pytest.raises(RuntimeError, match=r"reduce_op=1 unsupported|failed with code -5"):
-            super().test_run(st_platform, st_worker, request)
+    def test_run(self, st_platform, st_device_ids, request, monkeypatch):
+        """The device error leaves explicit retirement debt without stranding the worker tree."""
+        _run_rejected_domain_case(self, st_platform, st_device_ids, request, monkeypatch)
 
 
+@pytest.mark.device_count(2)
 @scene_test(level=3, runtime="tensormap_and_ringbuffer")
 class TestAllreduceIbingRejectNonSum(SceneTestCase):
     """Negative test: ibing rejects a non-Sum reduce_op via rt_report_fatal."""
@@ -519,10 +586,9 @@ class TestAllreduceIbingRejectNonSum(SceneTestCase):
     def compute_golden(self, args, params):
         pass
 
-    def test_run(self, st_platform, st_worker, request):
-        """Override: expect the device-side reduce_op guard to fail the run."""
-        with pytest.raises(RuntimeError, match=r"reduce_op=1 unsupported|failed with code -5"):
-            super().test_run(st_platform, st_worker, request)
+    def test_run(self, st_platform, st_device_ids, request, monkeypatch):
+        """The device error leaves explicit retirement debt without stranding the worker tree."""
+        _run_rejected_domain_case(self, st_platform, st_device_ids, request, monkeypatch)
 
 
 if __name__ == "__main__":

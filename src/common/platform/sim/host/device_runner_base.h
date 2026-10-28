@@ -585,8 +585,8 @@ public:
      * the collector's single resident copy.
      */
     bool host_orchestrated_for_slot(uint32_t pipeline_slot) const noexcept {
-        if (pipeline_slot >= host_phase_runs_.size()) return false;
-        return host_phase_runs_[pipeline_slot].host_orchestrated;
+        const auto *state = host_phase_runs_.find(pipeline_slot);
+        return state != nullptr && state->host_orchestrated;
     }
     /** Hand this pass's records to the swimlane reader, just before its export. */
     void publish_host_phase_records_to_swimlane(uint32_t pipeline_slot);

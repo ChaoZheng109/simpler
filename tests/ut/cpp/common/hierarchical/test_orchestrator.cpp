@@ -636,7 +636,7 @@ TEST_F(OrchestratorFixture, RemoteOutputSidecarRegistersRemoteKey) {
         S(res.task_slot).task_args.tensor(0).buffer.backend_kind, static_cast<uint8_t>(BackendKind::REMOTE_SIDECAR)
     );
 
-    TensorKey key = TensorKey::remote_buffer(TensorAddressKind::REMOTE_BUFFER, 3, 9, 2, 64);
+    TensorKey key = TensorKey::remote_buffer(TensorAddressKind::REMOTE_BUFFER, 3, 9, 2, 0);
     EXPECT_EQ(map_producer(tm, run_id, key), res.task_slot);
 }
 
@@ -688,6 +688,43 @@ TEST_F(OrchestratorFixture, RemoteInputSidecarUsesRemoteTensorMapKey) {
     EXPECT_EQ(S(consumer.task_slot).fanin_count, 1);
     ASSERT_EQ(S(consumer.task_slot).fanin_producers.size(), 1u);
     EXPECT_EQ(S(consumer.task_slot).fanin_producers[0], producer.task_slot);
+}
+
+TEST_F(OrchestratorFixture, RemoteViewsTrackOverlapInOwnerCoordinates) {
+    for (RemoteAddressSpace space : {RemoteAddressSpace::REMOTE_DEVICE, RemoteAddressSpace::REMOTE_WINDOW}) {
+        auto submit = [&](uint64_t offset, TensorArgType tag) {
+            Tensor tensor = remote_placeholder_args(tag).tensor(0);
+            tensor.buffer.nbytes = 256;
+            tensor.byte_offset = offset;
+            tensor.shapes[0] = 16;
+            TaskArgs args;
+            args.add_tensor(tensor, tag);
+            RemoteTaskArgsSidecar sidecar;
+            sidecar.tensors.resize(1);
+            auto &remote = sidecar.tensors[0];
+            remote.present = true;
+            remote.desc.address_space = space;
+            remote.desc.owner_worker_id = 3;
+            remote.desc.buffer_id = 9;
+            remote.desc.generation = static_cast<uint64_t>(space) + 1;
+            remote.desc.offset = offset + (space == RemoteAddressSpace::REMOTE_WINDOW ? 1024 : 0);
+            remote.desc.nbytes = 16;
+            return orch.submit_next_level(C(42), args, cfg, 3, {3}, sidecar);
+        };
+        auto producer = submit(64, TensorArgType::OUTPUT_EXISTING);
+        TaskSlot ready;
+        ASSERT_TRUE(rq_next_level.try_pop_single(3, ready));
+        ASSERT_EQ(ready, producer.task_slot);
+        auto overlapping = submit(72, TensorArgType::INPUT);
+        EXPECT_EQ(S(overlapping.task_slot).state.load(), TaskState::PENDING);
+        ASSERT_EQ(S(overlapping.task_slot).fanin_producers.size(), 1u);
+        EXPECT_EQ(S(overlapping.task_slot).fanin_producers[0], producer.task_slot);
+        auto disjoint = submit(96, TensorArgType::INPUT);
+        EXPECT_EQ(S(disjoint.task_slot).state.load(), TaskState::READY);
+        EXPECT_TRUE(S(disjoint.task_slot).fanin_producers.empty());
+        ASSERT_TRUE(rq_next_level.try_pop_single(3, ready));
+        ASSERT_EQ(ready, disjoint.task_slot);
+    }
 }
 
 TEST_F(OrchestratorFixture, InoutWiresCreatorAsFanin) {

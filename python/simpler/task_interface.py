@@ -40,7 +40,7 @@ from dataclasses import dataclass
 from enum import IntEnum
 from math import prod
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
 if TYPE_CHECKING:
     # Annotation-only: `CallableHandle` is imported lazily at its use site, and
@@ -127,6 +127,7 @@ from _task_interface import (
 )
 
 from .buffer import AccessMode, AddressSpace, Buffer, ImportContext, ImportRegistry, Tensor, TensorTransfer
+from .comm_domain import CommDomainRef
 from .comm_endpoints import DEVICE_AICPU
 
 
@@ -284,6 +285,8 @@ __all__ = [
     "CommBufferSpec",
     "ChipDomainContext",
     "CommDomainHandle",
+    "CommDomainRef",
+    "CommDomainMember",
     "GlobalCommDomainHandle",
     "GlobalCommDomainView",
 ]
@@ -1112,6 +1115,9 @@ class ChipDomainContext:
     buffers: dict[str, Buffer]
 
 
+CommDomainMember = GlobalDomainMember
+
+
 class CommDomainHandle:
     """User-facing handle for one dynamically-allocated CommDomain.
 
@@ -1127,7 +1133,7 @@ class CommDomainHandle:
         live           — allocated, indexable, can be passed to submit_*
         released       — release() called; further indexing raises;
                           backend memory still alive until Worker.run drain
-        freed          — backend release_domain has executed, memory gone
+        freed          — physical reclamation has been confirmed
 
     Most users only see ``released``; the ``live → released`` transition
     happens at ``with`` exit (or explicit ``release()``), and the
@@ -1136,9 +1142,10 @@ class CommDomainHandle:
     Callers must treat handle attributes and context/buffer mappings as read-only
     metadata. Reassignment is unsupported; configure through allocation arguments
     and end ownership through ``release()``. Buffer contents remain writable.
-    Each run consuming domain Buffers must obtain the domain through allocation or
-    lookup; carrying Buffers directly across runs is unsupported. Retained handles
-    may be inspected and released serially after run completion.
+    Tensor submissions register domain use in the current run, including cached
+    Tensors. Scalar-only use requires explicit lookup. Failed or unconfirmed
+    reclamation remains tracked and reported with ``freed=False``. Retained
+    handles may be inspected and released serially after run completion.
     """
 
     __slots__ = (
@@ -1149,6 +1156,7 @@ class CommDomainHandle:
         "_domain_size",
         "_domain_ranks",
         "_release_fn",
+        "_release_scope",
         "_released",
         "_freed",
         "members",
@@ -1159,6 +1167,8 @@ class CommDomainHandle:
         "retain_after_run",
         "attachments",
         "_config",
+        "_ref",
+        "requested_window_size",
     )
 
     def __init__(  # noqa: PLR0913 -- preserve the L3 and legacy L4 constructor keywords
@@ -1178,6 +1188,9 @@ class CommDomainHandle:
         attachments: tuple[GlobalDomainAttachment, ...] = (),
         _domain_size: int | None = None,
         _domain_ranks: dict[int, int] | None = None,
+        ref: CommDomainRef | None = None,
+        requested_window_size: int | None = None,
+        _release_scope: Callable[[CommDomainHandle], contextlib.AbstractContextManager] = contextlib.nullcontext,
     ) -> None:
         self.name = name
         self.workers = tuple(workers)
@@ -1188,6 +1201,7 @@ class CommDomainHandle:
             {worker: rank for rank, worker in enumerate(self.workers)} if _domain_ranks is None else dict(_domain_ranks)
         )
         self._release_fn = _release_fn
+        self._release_scope = _release_scope
         self.members = tuple(members)
         self.buffers = tuple(buffers)
         self.domain_id = self.allocation_id if domain_id is None else int(domain_id)
@@ -1198,6 +1212,8 @@ class CommDomainHandle:
         self._config = None
         self._released = False
         self._freed = False
+        self._ref = ref
+        self.requested_window_size = self.mapping_size if requested_window_size is None else int(requested_window_size)
 
     def __getitem__(self, chip_idx: int) -> ChipDomainContext:
         self._require_live()
@@ -1208,7 +1224,7 @@ class CommDomainHandle:
             raise RuntimeError(f"CommDomainHandle({self.name!r}) is already released")
 
     def member(self, domain_rank: int) -> GlobalDomainMember:
-        """Return rank-ordered topology metadata, without a remote device address."""
+        """Return rank-ordered topology and ordinary Buffer slices."""
         self._require_live()
         rank = int(domain_rank)
         if rank < 0 or rank >= len(self.members):
@@ -1218,7 +1234,22 @@ class CommDomainHandle:
     def local_context(self, domain_rank: int) -> ChipDomainContext:
         """Return this creator's local chip mapping; L4 creators hold no such mappings."""
         member = self.member(domain_rank)
-        return self[member.local_worker_id]
+        context = self[member.local_worker_id]
+        if context.domain_rank != member.domain_rank:
+            raise KeyError(f"domain rank {domain_rank} is not mapped on this node")
+        return context
+
+    @property
+    def ref(self) -> CommDomainRef:
+        """Return identity; scalar-only use still requires owner lookup in each run."""
+        self._require_live()
+        if self._ref is None:
+            raise RuntimeError("domain has no exported reference")
+        return self._ref
+
+    @property
+    def borrowed(self) -> bool:
+        return self._release_fn is None
 
     def buffer_range(self, name: str) -> tuple[int, int]:
         self._require_live()
@@ -1263,12 +1294,20 @@ class CommDomainHandle:
         a no-op, and the orch function must not pass it to further
         ``submit_*`` calls.
         """
+        if self.borrowed:
+            raise RuntimeError("borrowed domain handles cannot release their owner")
         if self._released:
             return
-        self._released = True
-        self._release_fn(self)
+        with self._release_scope(self):
+            if self._released:
+                return
+            self._released = True
+            assert self._release_fn is not None
+            self._release_fn(self)
 
     def __enter__(self) -> CommDomainHandle:
+        if self.borrowed:
+            raise RuntimeError("borrowed domain handles cannot own a with scope")
         self._require_live()
         return self
 

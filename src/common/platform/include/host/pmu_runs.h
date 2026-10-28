@@ -652,7 +652,8 @@ public:
         owner_(owner) {}
     RetainedRuns(const RetainedRuns &) = delete;
     RetainedRuns &operator=(const RetainedRuns &) = delete;
-    ~RetainedRuns() { stop_writer(); }
+    // Destruction terminates if stopping the writer throws.
+    ~RetainedRuns() { stop_writer(); }  // NOLINT(bugprone-exception-escape)
 
     void configure(bool enabled) { retain_across_runs_ = enabled; }
     bool retains_runs() const { return retain_across_runs_; }

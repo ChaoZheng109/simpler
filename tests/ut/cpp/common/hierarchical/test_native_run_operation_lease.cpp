@@ -39,11 +39,11 @@
 // worker to be destructible here.
 #include "chip_run_lane.h"
 #include "chip_worker.h"
+#include "runtime_module.h"
 #undef private
 #undef protected
 
 #include "native_run_storage_tag.h"
-#include "runtime_module.h"
 
 namespace {
 
@@ -94,6 +94,20 @@ int g_query_calls = 0;
 int g_device_finalize_rc = 0;
 int g_device_finalize_calls = 0;
 int g_destroy_context_calls = 0;
+int g_comm_free_calls = 0;
+
+int stub_release_domain(void *, uint64_t, size_t, uint32_t) {
+    ++g_comm_free_calls;
+    return 0;
+}
+int stub_release_global_domain(uint64_t) {
+    ++g_comm_free_calls;
+    return 0;
+}
+int stub_destroy_comm(void *) {
+    ++g_comm_free_calls;
+    return 0;
+}
 
 int prepare_run(void *, void *runtime, int32_t, const void *, const CallConfig *, const NativeRunDescriptor *) {
     // The carrier the platform would place here; only its tag matters to the worker.
@@ -205,6 +219,7 @@ void prime(ChipWorker &worker, uint32_t depth = 2) {
     g_device_finalize_rc = 0;
     g_device_finalize_calls = 0;
     g_destroy_context_calls = 0;
+    g_comm_free_calls = 0;
     worker.initialized_ = true;
     // The stubs ignore it, but teardown refuses to run without one, which is the production
     // guard against closing a worker that never reached a device.
@@ -787,6 +802,74 @@ TEST(NativeRunOperationLeaseTest, WholeCloseReleasesEverythingWhenEveryRunIsProv
     EXPECT_TRUE(worker.runtime_bufs_.empty());
     std::lock_guard<std::mutex> lk(worker.native_run_mu_);
     EXPECT_TRUE(worker.native_runs_.empty());
+}
+
+// A destroyed carrier permits device teardown, but a poisoned lane cannot authorize comm free.
+TEST(NativeRunOperationLeaseTest, PoisonedLaneRetainsCommOwnersAcrossDeviceTeardownRetry) {
+    for (bool failed : {false, true}) {
+        SCOPED_TRACE(failed);
+        ChipWorker worker;
+        prime(worker);
+        worker.finalize_device_fn_ = stub_finalize_device;
+        worker.comm_release_domain_windows_fn_ = stub_release_domain;
+        worker.comm_global_domain_release_fn_ = stub_release_global_domain;
+        worker.comm_destroy_fn_ = stub_destroy_comm;
+        static int comm_placeholder = 0;
+        const uint64_t comm = reinterpret_cast<uint64_t>(&comm_placeholder);
+        ASSERT_NE(worker.create_comm_session(&comm_placeholder, nullptr, true), nullptr);
+        worker.base_comm_handle_ = comm;
+        worker.global_domain_ids_.insert(7);
+        const auto module = worker.runtime_module_;
+        worker.run_lane_ = std::make_unique<ChipRunLane>(worker);
+        ChipStorageTaskArgs args{};
+        ChipRun run = worker.run_lane_->submit(1, args, CallConfig{});
+        g_wait_rc = failed ? -5 : 0;
+        if (failed) {
+            EXPECT_THROW(run.wait_until(ChipRun::Deadline::max()), std::runtime_error);
+        } else {
+            EXPECT_TRUE(run.wait_until(ChipRun::Deadline::max()));
+        }
+        EXPECT_EQ(worker.run_lane_->poisoned(), failed);
+        EXPECT_EQ(g_finalize_calls, 1);
+        EXPECT_EQ(worker.unproven_native_run_count(), 0u);
+        uint64_t tag = kNativeRunContextMagic;
+        std::memcpy(&tag, worker.runtime_bufs_[0].data(), sizeof(tag));
+        EXPECT_EQ(tag, 0u);
+        if (!failed) {
+            EXPECT_NO_THROW(worker.finalize());
+            EXPECT_EQ(g_comm_free_calls, 2);
+            EXPECT_EQ(g_device_finalize_calls, 1);
+            EXPECT_TRUE(module->unload_allowed_);
+            EXPECT_TRUE(worker.comm_sessions_.empty());
+            EXPECT_TRUE(worker.global_domain_ids_.empty());
+            continue;
+        }
+        const auto expect_refused = [&] {
+            EXPECT_THROW(worker.comm_release_domain_windows(comm, 1, 2, 0), std::runtime_error);
+            EXPECT_THROW(worker.comm_global_domain_release(7), std::runtime_error);
+            EXPECT_THROW(worker.comm_destroy(comm), std::runtime_error);
+            EXPECT_THROW(worker.comm_destroy_all(), std::runtime_error);
+            EXPECT_EQ(g_comm_free_calls, 0);
+            ASSERT_EQ(worker.comm_sessions_.size(), 1u);
+            EXPECT_EQ(worker.comm_sessions_[0].handle, &comm_placeholder);
+            EXPECT_EQ(worker.global_domain_ids_.count(7), 1u);
+        };
+        expect_refused();
+        g_device_finalize_rc = -9;
+        EXPECT_THROW(worker.finalize(), std::runtime_error);
+        EXPECT_EQ(g_device_finalize_calls, 1);
+        EXPECT_EQ(g_destroy_context_calls, 0);
+        EXPECT_FALSE(module->unload_allowed_);
+        expect_refused();
+        g_device_finalize_rc = 0;
+        EXPECT_NO_THROW(worker.finalize());
+        EXPECT_EQ(g_device_finalize_calls, 2);
+        EXPECT_EQ(g_destroy_context_calls, 1);
+        expect_refused();
+        EXPECT_NO_THROW(worker.finalize());
+        EXPECT_EQ(g_device_finalize_calls, 2);
+        EXPECT_EQ(g_comm_free_calls, 0);
+    }
 }
 
 // A run the sweep could not prove destroyed still owns whatever its carrier holds, and that
