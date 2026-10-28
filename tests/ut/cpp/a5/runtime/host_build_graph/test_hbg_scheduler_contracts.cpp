@@ -82,7 +82,26 @@ TEST(AicoreSchedulerWatchdog, UsesElapsedWallClockBudget) {
     EXPECT_FALSE(scheduler_watchdog_expired(100, UINT64_MAX, 0));
     EXPECT_FALSE(scheduler_watchdog_expired(100, 199, 100));
     EXPECT_TRUE(scheduler_watchdog_expired(100, 200, 100));
+    EXPECT_FALSE(scheduler_watchdog_expired(UINT64_MAX - 10, 3, 15));
     EXPECT_TRUE(scheduler_watchdog_expired(UINT64_MAX - 10, 4, 15));
+}
+
+TEST(AicoreSchedulerWatchdog, RejectsBackwardAndHalfRangeSamples) {
+    constexpr uint64_t half_range = uint64_t{1} << 63;
+    EXPECT_TRUE(scheduler_watchdog_expired(0, half_range - 1, 100));
+    EXPECT_FALSE(scheduler_watchdog_expired(0, half_range, 100));
+    EXPECT_FALSE(scheduler_watchdog_expired(0, UINT64_MAX, 100));
+    EXPECT_FALSE(scheduler_watchdog_expired(1000, 800, 0));
+}
+
+TEST(AicpuReadyWatchdog, SupervisorSeedAheadOfFirstSampleKeepsDeadline) {
+    AicpuReadyWatchdog watchdog;
+    watchdog.reset(1000);
+    const uint64_t last_progress = watchdog.last_progress();
+    EXPECT_FALSE(scheduler_watchdog_expired(last_progress, 800, 100));
+    EXPECT_FALSE(scheduler_watchdog_expired(last_progress, 1099, 100));
+    EXPECT_TRUE(scheduler_watchdog_expired(last_progress, 1100, 100));
+    EXPECT_EQ(watchdog.last_progress(), 1000);
 }
 
 TEST(AicpuReadyWatchdog, RealProgressAllowsTotalExecutionBeyondBudget) {
