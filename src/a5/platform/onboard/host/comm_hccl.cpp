@@ -828,16 +828,6 @@ extern "C" int dma_workspace_provision(uint32_t required_mask, uint64_t *addr_ou
 
 extern "C" void dma_workspace_release(void *handle) { (void)handle; }
 
-#ifdef SIMPLER_ENABLE_PTO_URMA_WORKSPACE
-static uint64_t urma_workspace_bytes(uint32_t rank_count) {
-    using namespace pto::comm::urma;
-    constexpr uint32_t qp_num = 1;
-    return sizeof(UrmaInfo) +
-           static_cast<uint64_t>(rank_count) *
-               (2ULL * sizeof(UrmaWQCtx) * qp_num + 2ULL * sizeof(UrmaCqCtx) * qp_num + sizeof(UrmaMemInfo) * qp_num);
-}
-#endif
-
 static bool rank_ids_are_dense_prefix(const uint32_t *rank_ids, size_t rank_count) {
     if (rank_ids == nullptr) return false;
     for (size_t i = 0; i < rank_count; ++i) {
@@ -880,7 +870,7 @@ static bool ensure_base_urma_workspace(CommHandle h) {
         return false;
     }
     h->host_ctx.workSpace = reinterpret_cast<uint64_t>(h->urma_workspace->GetWorkspaceAddr());
-    h->host_ctx.workSpaceSize = urma_workspace_bytes(static_cast<uint32_t>(h->nranks));
+    h->host_ctx.workSpaceSize = h->urma_workspace->GetWorkspaceSize();
     return h->host_ctx.workSpace != 0 && h->host_ctx.workSpaceSize != 0;
 }
 #endif
@@ -1594,7 +1584,7 @@ static int domain_alloc_via_ipc(
             return -1;
         }
         domain_workspace_addr = reinterpret_cast<uint64_t>(out->urma_workspace->GetWorkspaceAddr());
-        domain_workspace_size = urma_workspace_bytes(static_cast<uint32_t>(rank_count));
+        domain_workspace_size = out->urma_workspace->GetWorkspaceSize();
     } else {
         LOG_WARN("[comm rank %d] alloc_domain: URMA workspace disabled for non-dense rank mapping", h->rank);
     }

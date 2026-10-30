@@ -912,6 +912,12 @@ class TestResolveBuildPtoIsaCommit:
         builder = self._make_builder("a2a3sim")
         assert builder._resolve_build_pto_isa_commit() == ""
 
+    def test_a5sim_reads_pin_for_workspace_types(self, monkeypatch):
+        from simpler_setup import pto_isa  # noqa: PLC0415
+
+        monkeypatch.setattr(pto_isa, "read_pto_isa_pin", lambda: "isa_sha")
+        assert self._make_builder("a5sim")._resolve_build_pto_isa_commit() == "isa_sha"
+
     def test_a5_default_reads_pin(self, monkeypatch):
         from simpler_setup import pto_isa  # noqa: PLC0415
 
@@ -1050,3 +1056,21 @@ class TestRuntimeBuilderIntegration:
         ]:
             assert path.is_file(), f"{label} binary not found: {path}"
             assert path.stat().st_size > 0, f"{label} binary is empty: {path}"
+
+
+@pytest.mark.parametrize("platform", ["a5", "a5sim"])
+@pytest.mark.parametrize("target", ["host", "aicpu", "aicore"])
+def test_a5_tmr_targets_use_pinned_isa_headers(tmp_path, monkeypatch, platform, target):
+    from simpler_setup import pto_isa  # noqa: PLC0415
+    from simpler_setup.runtime_builder import RuntimeBuilder  # noqa: PLC0415
+
+    pto_root = tmp_path / "pinned-isa"
+    monkeypatch.setattr(pto_isa, "ensure_pto_isa_root", lambda: str(pto_root))
+    builder = RuntimeBuilder.__new__(RuntimeBuilder)
+    builder._arch = "a5"
+    builder.platform = platform
+    config_dir = tmp_path / "tensormap_and_ringbuffer"
+    config = {target: {"include_dirs": ["runtime"], "source_dirs": [target]}}
+    includes, sources = builder._resolve_target_dirs(config_dir, config, target)
+    assert includes == [str(config_dir / "runtime"), str(pto_root / "include")]
+    assert sources == [str(config_dir / target)]
