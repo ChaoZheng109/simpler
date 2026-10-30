@@ -75,6 +75,10 @@ result to Pending. The dispatcher publishes a complete, cache-flushed result
 before returning; the host accepts it only after successful stream synchronization
 and a device-to-host copy. Missing, stale or malformed results reject bootstrap.
 
+An empty inner SO pointer or length reports `stage=args` with `EINVAL` before
+context lookup or filesystem operations. Existing stage numeric values and the
+result layout are stable; additional stages append to the enum.
+
 Expected context and filesystem failures return through this result without
 faulting the CANN stream. The Host console reports the failing stage, original
 errno (or a separate context error), device, target path, requested bytes and
@@ -98,6 +102,10 @@ failed` and its stage/errno fields for these handled failures; actual CANN
 507018 errors remain unchanged.
 An older caller with no result address keeps the dispatcher's original nonzero
 failure return. A new caller paired with an older dispatcher rejects Pending.
+
+The onboard cache helpers have hidden ELF visibility in each dispatcher, runtime
+and orchestration SO that compiles them. Calls bind to that SO's own implementation;
+the CANN callback entry points retain default visibility.
 
 Filesystem error injection exercises the production dispatcher code on the CPU,
 including ENOSPC/EDQUOT capacity collection and failed `statvfs`. Native result

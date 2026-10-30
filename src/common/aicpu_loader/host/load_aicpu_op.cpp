@@ -224,7 +224,8 @@ int LoadAicpuOp::FinishBootstrap(bool require_success) {
         const bool failure =
             result.status == BootstrapStatus::Failed && result.stage >= BootstrapStage::Context &&
             (result.stage <= BootstrapStage::Rename || result.stage == BootstrapStage::Verify ||
-             result.stage == BootstrapStage::Link || result.stage == BootstrapStage::Unlink) &&
+             result.stage == BootstrapStage::Link || result.stage == BootstrapStage::Unlink ||
+             result.stage == BootstrapStage::Args) &&
             (result.error_number > 0 || (result.stage == BootstrapStage::Context && result.context_error != 0));
         if (result.magic != simpler_dispatcher::kBootstrapResultMagic ||
             result.version != simpler_dispatcher::kBootstrapResultVersion || result.device_id != device_id_ ||

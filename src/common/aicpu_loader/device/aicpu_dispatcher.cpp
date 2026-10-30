@@ -293,7 +293,7 @@ __attribute__((visibility("default"))) uint32_t DynTileFwkBackendKernelServerIni
         simpler_dispatcher::DispatcherLog(
             "Init: empty inner SO bundle (bin=%lx len=%lu)", d->inner_so_bin, d->inner_so_len
         );
-        simpler_dispatcher::ReportFailure(result, simpler_dispatcher::BootstrapStage::Write, EINVAL, {});
+        simpler_dispatcher::ReportFailure(result, simpler_dispatcher::BootstrapStage::Args, EINVAL, {});
         return finish();
     }
     const char *inner_bytes = reinterpret_cast<const char *>(d->inner_so_bin);

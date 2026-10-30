@@ -94,6 +94,9 @@ def test_onboard_execution_contract(arch: str, runtime: str, probe: str, tmp_pat
     assert result.returncode == 0, result.stdout + result.stderr
     assert "PASS:" in result.stdout
     if probe == "bootstrap_error":
+        assert "SO cache failed: stage=args errno=22" in result.stdout + result.stderr
+        for stage in ("verify", "link", "unlink"):
+            assert f"SO cache failed: stage={stage} errno=5" in result.stdout + result.stderr
         assert "SO cache failed: stage=write errno=28" in result.stdout + result.stderr
         assert "device filesystem block_bytes=4096 free_blocks=0" in result.stdout + result.stderr
         assert "device filesystem query failed: errno=38" in result.stdout + result.stderr

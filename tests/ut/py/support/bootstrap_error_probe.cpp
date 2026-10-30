@@ -108,6 +108,28 @@ extern "C" rtError_t rtAicpuKernelLaunchExWithArgs(
         result.stage = BootstrapStage::CacheHit;
         ++result.written_bytes;
     }
+    if (arm == 19 || arm == 20) {
+        result.status = BootstrapStatus::Failed;
+        result.stage = BootstrapStage::Args;
+        result.error_number = arm == 19 ? EINVAL : 0;
+        result.written_bytes = 0;
+    }
+    if (arm >= 21 && arm <= 23) {
+        result.status = BootstrapStatus::Failed;
+        result.stage = arm == 21 ? BootstrapStage::Verify : arm == 22 ? BootstrapStage::Link : BootstrapStage::Unlink;
+        result.error_number = EIO;
+    }
+    if (arm == 24) result.stage = BootstrapStage::CacheHit;
+    if (arm == 25) {
+        result.status = BootstrapStatus::Failed;
+        result.stage = BootstrapStage::CacheHit;
+        result.error_number = EIO;
+    }
+    if (arm == 26) result.stage = BootstrapStage::Args;
+    if (arm == 27) {
+        result.status = BootstrapStatus::Failed;
+        result.error_number = EIO;
+    }
     return 0;
 }
 
@@ -115,21 +137,28 @@ int main() {
     log_state.threshold = 40;
     assert(simpler_host_log_bind_state(&log_state) == 0);
     const char binary[] = "runtime";
-    for (int test_arm = 0; test_arm != 19; ++test_arm) {
+    for (int test_arm = 0; test_arm != 28; ++test_arm) {
         arm = test_arm;
         pending_result = nullptr;
         reads = allocations = frees = launches = 0;
         host::LoadAicpuOp loader;
-        const int expected = arm == 0 || arm == 17 ? 0 :
-                             arm == 4              ? -404 :
-                             arm == 5              ? 507018 :
-                             arm == 6              ? -606 :
-                             arm == 15             ? -1515 :
-                             arm == 16             ? -1616 :
-                                                     PTO_RUNTIME_ERR_INTERNAL;
+        const int expected = arm == 0 || arm == 17 || arm == 24 ? 0 :
+                             arm == 4                           ? -404 :
+                             arm == 5                           ? 507018 :
+                             arm == 6                           ? -606 :
+                             arm == 15                          ? -1515 :
+                             arm == 16                          ? -1616 :
+                                                                  PTO_RUNTIME_ERR_INTERNAL;
         assert(loader.BootstrapDispatcher(binary, sizeof(binary), binary, sizeof(binary), nullptr, 12) == expected);
         assert(reads == (arm == 4 || arm == 5 || arm == 15 || arm == 16 ? 0 : 1));
         assert(launches == (arm == 15 || arm == 16 ? 0 : 1));
+        if (arm == 19 || (arm >= 21 && arm <= 24)) {
+            assert(!loader.has_live_resources());
+        }
+        if (arm == 20 || (arm >= 25 && arm <= 27)) {
+            assert(loader.has_live_resources());
+            assert(allocations - frees == 4);
+        }
         if (loader.has_live_resources()) {
             assert(allocations - frees == 4);  // Including the device acknowledgement.
             assert(pending_result != nullptr);

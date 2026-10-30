@@ -14,6 +14,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <array>
 #include <cerrno>
 #include <cstdarg>
@@ -134,6 +135,47 @@ TEST(SoUpload, ContextFailurePublishesWithoutUsingAnUnrelatedErrno) {
     EXPECT_EQ(result.requested_bytes, sizeof(bytes));
     device.result_addr = 0;
     EXPECT_EQ(DynTileFwkBackendKernelServerInit(&args), 1u);
+    context_status = aicpu::AICPU_ERROR_NONE;
+}
+
+TEST(SoUpload, EmptyBundleReportsArgsWithoutFilesystemWork) {
+    static_assert(static_cast<uint32_t>(BootstrapStage::Write) == 4);
+    static_assert(static_cast<uint32_t>(BootstrapStage::Complete) == 8);
+    static_assert(static_cast<uint32_t>(BootstrapStage::Verify) == 9);
+    static_assert(static_cast<uint32_t>(BootstrapStage::Link) == 10);
+    static_assert(static_cast<uint32_t>(BootstrapStage::Unlink) == 11);
+    static_assert(static_cast<uint32_t>(BootstrapStage::CacheHit) == 12);
+    static_assert(static_cast<uint32_t>(BootstrapStage::Args) == 13);
+    const char bytes[] = "runtime";
+    const std::array<std::array<uint64_t, 2>, 3> bundles{
+        {{0, sizeof(bytes)}, {reinterpret_cast<uint64_t>(bytes), 0}, {0, 0}}
+    };
+    for (const auto &bundle : bundles) {
+        BootstrapDeviceArgs device;
+        BootstrapResult result;
+        struct {
+            uint64_t unused[5]{};
+            void *device_args;
+        } args{};
+        device.inner_so_bin = bundle[0];
+        device.inner_so_len = bundle[1];
+        device.device_id = 12;
+        device.result_addr = reinterpret_cast<uint64_t>(&result);
+        args.device_args = &device;
+        context_status = aicpu::AICPU_ERROR_FAILED;
+        EXPECT_EQ(DynTileFwkBackendKernelServerInit(&args), 0u);
+        EXPECT_EQ(result.status, BootstrapStatus::Failed);
+        EXPECT_STREQ(bootstrap_stage_name(result.stage), "args");
+        EXPECT_EQ(result.error_number, EINVAL);
+        EXPECT_EQ(result.context_error, 0);
+        EXPECT_EQ(result.device_id, 12);
+        EXPECT_EQ(result.requested_bytes, bundle[1]);
+        EXPECT_EQ(result.written_bytes, 0u);
+        EXPECT_STREQ(result.path, "");
+        EXPECT_EQ(result.capacity_valid, 0u);
+        device.result_addr = 0;
+        EXPECT_EQ(DynTileFwkBackendKernelServerInit(&args), 1u);
+    }
     context_status = aicpu::AICPU_ERROR_NONE;
 }
 

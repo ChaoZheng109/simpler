@@ -17,6 +17,7 @@
 namespace simpler_dispatcher {
 
 enum class BootstrapStatus : uint32_t { Pending, Success, Failed };
+// Stage values are part of the bootstrap result wire format; additions append.
 enum class BootstrapStage : uint32_t {
     Pending,
     Context,
@@ -30,7 +31,8 @@ enum class BootstrapStage : uint32_t {
     Verify,
     Link,
     Unlink,
-    CacheHit
+    CacheHit,
+    Args
 };
 
 inline const char *bootstrap_stage_name(BootstrapStage stage) {
@@ -61,6 +63,8 @@ inline const char *bootstrap_stage_name(BootstrapStage stage) {
         return "unlink";
     case BootstrapStage::CacheHit:
         return "cache-hit";
+    case BootstrapStage::Args:
+        return "args";
     }
     return "unknown";
 }
