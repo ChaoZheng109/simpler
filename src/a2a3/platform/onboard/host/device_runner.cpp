@@ -1488,7 +1488,7 @@ int DeviceRunner::finalize_impl() {
     // this thread needs no bind and the context owns no device state to adopt.
     int rc = 0;
     if (!execution_mode_latch().is_kernel()) {
-        rc = attach_current_thread(device_id_);
+        rc = bind_current_thread(device_id_);
         if (rc != 0) {
             LOG_ERROR("Failed to attach finalize thread to device %d: %d", device_id_, rc);
             teardown_recorder_.finish(rc);

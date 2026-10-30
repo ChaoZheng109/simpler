@@ -230,6 +230,7 @@ def kernel_symbol_runtime(tmp_path_factory):
         workspace=False,
         init_gate=False,
         unproven_cleanup=False,
+        init_error=None,
     ):
         nonlocal next_library_id
         key = (
@@ -244,6 +245,7 @@ def kernel_symbol_runtime(tmp_path_factory):
             workspace,
             init_gate,
             unproven_cleanup,
+            init_error,
         )
         # Fault scripts retain their consumed failure budget in the loaded DSO.
         if finalize_failures == 0 and not init_gate and key in cache:
@@ -419,6 +421,15 @@ def kernel_symbol_runtime(tmp_path_factory):
             "copy_from_device_ctx",
             "device_memory_info_ctx",
         }
+        if "simpler_get_init_error_ctx" not in missing:
+            with source.open("a", encoding="utf-8") as output:
+                output.write(
+                    'extern "C" const char *simpler_get_init_error_ctx(DeviceContextHandle ctx) {\n'
+                    "    if (ctx == nullptr) std::abort();\n"
+                    + ('    record("init-error-read");\n' if init_error is not None else "")
+                    + f"    return {json.dumps(init_error) if init_error is not None else 'nullptr'};\n"
+                    + "}\n"
+                )
         if memory:
             with source.open("a", encoding="utf-8") as output:
                 output.write(
@@ -487,6 +498,30 @@ def kernel_symbol_runtime(tmp_path_factory):
 
 
 class TestChipWorkerKernelSymbols:
+    @pytest.mark.parametrize("detail", ["", "actual operator timeout 4294967 us exceeds stream 4000 ms; adjust budget"])
+    def test_program_init_failure_reports_context_detail_before_cleanup(self, kernel_symbol_runtime, tmp_path, detail):
+        lifecycle_log = tmp_path / "init-error-lifecycle.log"
+        runtime = kernel_symbol_runtime(init_result=-1000, init_error=detail, lifecycle_log=lifecycle_log)
+        worker = _ChipWorker()
+        try:
+            with pytest.raises(RuntimeError) as error:
+                worker.init(str(runtime), os.devnull, os.devnull, "", device_id=0)
+            expected = "simpler_init failed with code -1000" + (f": {detail}" if detail else "")
+            assert str(error.value) == expected
+            assert not worker.initialized
+            assert worker.device_id == -1
+            assert lifecycle_log.read_text().splitlines() == [
+                "scratch-created",
+                "init-error-read",
+                "scratch-destroyed",
+                "context-destroyed",
+                "runtime-unloaded",
+            ]
+            worker.init(str(kernel_symbol_runtime()), os.devnull, os.devnull, "", device_id=0)
+            assert worker.initialized
+        finally:
+            worker.finalize()
+
     def test_failed_destructor_retains_runtime_code(self, kernel_symbol_runtime, tmp_path):
         lifecycle_log = tmp_path / "retained-lifecycle.log"
         runtime = kernel_symbol_runtime(lifecycle_log=lifecycle_log, finalize_failures=3)
@@ -588,13 +623,21 @@ class TestChipWorkerKernelSymbols:
 
     @pytest.mark.parametrize(
         "missing",
-        (*_KERNEL_LIFECYCLE_SYMBOLS, "simpler_kernel_mode_supported", "simpler_execution_environment_releasable_ctx"),
+        (
+            *_KERNEL_LIFECYCLE_SYMBOLS,
+            "simpler_kernel_mode_supported",
+            "simpler_execution_environment_releasable_ctx",
+            "simpler_get_init_error_ctx",
+        ),
     )
-    def test_missing_required_kernel_symbol_allows_retry(self, kernel_symbol_runtime, missing):
-        # Every kernel-mode entry is required of every runtime, so any one of
-        # them missing fails init regardless of what supported() would answer.
+    def test_missing_required_runtime_symbol_allows_retry(self, kernel_symbol_runtime, missing):
+        # Resolve the complete module contract before creating a context or
+        # invoking either initialization path.
         incomplete = kernel_symbol_runtime(supported=1, missing=(missing,))
         complete = kernel_symbol_runtime(supported=0)
+        observer = ctypes.CDLL(str(incomplete))
+        before = observer.test_creates(), observer.test_program_inits(), observer.test_borrowed_inits()
+        assert before == (0, 0, 0)
         worker = _ChipWorker()
         try:
             with pytest.raises(RuntimeError, match=f"dlsym failed for '{missing}'"):
@@ -602,6 +645,7 @@ class TestChipWorkerKernelSymbols:
             assert not worker.initialized
             assert worker.device_id == -1
             assert worker.runtime_slot_count == 0
+            assert (observer.test_creates(), observer.test_program_inits(), observer.test_borrowed_inits()) == before
             worker.init(str(complete), os.devnull, os.devnull, "", device_id=0)
             assert worker.initialized
         finally:
@@ -1041,16 +1085,25 @@ class TestChipWorkerDeviceOwner:
 
     @pytest.mark.parametrize("borrowed", [False, True])
     @pytest.mark.parametrize("failed_cleanup", [False, True])
-    def test_init_rollback_releases_only_after_proven_cleanup(self, kernel_symbol_runtime, borrowed, failed_cleanup):
-        failing = kernel_symbol_runtime(borrowed=True, init_result=-66, finalize_failures=int(failed_cleanup))
+    @pytest.mark.parametrize("detail", [None, "ACL setter failed; check SIMPLER_OP_EXECUTE_TIMEOUT_US"])
+    def test_init_rollback_releases_only_after_proven_cleanup(
+        self, kernel_symbol_runtime, borrowed, failed_cleanup, detail
+    ):
+        failing = kernel_symbol_runtime(
+            borrowed=True, init_result=-66, finalize_failures=int(failed_cleanup), init_error=detail
+        )
         healthy = kernel_symbol_runtime(borrowed=True)
         observer = ctypes.CDLL(str(failing))
         first, successor = _ChipWorker(), _ChipWorker()
         options = {"borrowed_context_generation": 77} if borrowed else {}
         try:
             before = observer.test_closes(), observer.test_destroys()
-            with pytest.raises(RuntimeError, match="rollback failed" if failed_cleanup else "failed with code -66"):
+            with pytest.raises(
+                RuntimeError, match="rollback failed" if failed_cleanup else "failed with code -66"
+            ) as error:
                 first.init(str(failing), os.devnull, os.devnull, "", 0, **options)
+            if detail is not None:
+                assert detail in str(error.value)
             assert observer.test_closes() == before[0] + 1
             if failed_cleanup:
                 assert observer.test_destroys() == before[1]
@@ -1106,6 +1159,7 @@ class TestChipWorkerDeviceOwner:
             init_result=-66 if failure_stage == "native" else 0,
             early_failure="grant_cleanup" if failure_stage == "grant" else None,
             unproven_cleanup=True,
+            init_error="init diagnostic before unproven cleanup",
         )
         result = subprocess.run(
             [
@@ -1126,6 +1180,8 @@ class TestChipWorkerDeviceOwner:
                             assert "rollback" in str(error)
                             expected = "refused a grant" if failure_stage == "grant" else "failed with code -66"
                             assert expected in str(error)
+                            if failure_stage == "native":
+                                assert "init diagnostic before unproven cleanup" in str(error)
                             assert first._execution_environment is not None
                         else:
                             raise AssertionError("failed init unexpectedly succeeded")

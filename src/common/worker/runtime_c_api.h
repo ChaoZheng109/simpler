@@ -923,6 +923,14 @@ int simpler_init(
 );
 
 /**
+ * Required runtime entry for initialization diagnostics; NULL means no detail.
+ * The context owns the returned string; copy it before cleanup, destruction,
+ * or another initialization attempt. Initialization and cleanup are serialized
+ * by the caller. Backends with no detail still export this entry and return NULL.
+ */
+const char *simpler_get_init_error_ctx(DeviceContextHandle ctx);
+
+/**
  * Release all device resources held by the context.
  * Must be called before destroy_device_context() / dlclose(). Returns an error
  * without teardown while a prepared native run remains unfinalized.

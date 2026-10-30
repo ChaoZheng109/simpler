@@ -161,7 +161,11 @@ int aclrtMemset(void *p, size_t capacity, int32_t value, size_t bytes) {
     return 0;
 }
 int aclrtSetOpExecuteTimeOutV2(uint64_t wanted, uint64_t *actual) {
-    *actual = wanted;
+    auto &c = native_admission_transport::control();
+    ++c.op_timeout_calls;
+    c.requested_op_timeout_us = wanted;
+    if (c.op_timeout_rc != 0) return c.op_timeout_rc;
+    *actual = c.replace_op_timeout ? c.actual_op_timeout_us : wanted;
     return 0;
 }
 int aclrtStreamGetId(aclrtStream, int32_t *out) {

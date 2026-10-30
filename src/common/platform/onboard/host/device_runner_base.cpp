@@ -38,6 +38,7 @@
 #include <cstring>
 #include <memory>
 #include <new>
+#include <sstream>
 
 #include "callable.h"
 #include "callable_protocol.h"
@@ -1596,15 +1597,18 @@ int DeviceRunnerBase::attach_current_thread(int device_id) {
     // subsequently attach different host threads, so repeated same-value
     // writes here would still be a C++ data race.
     if (device_id_ == -1) {
+        // A successful bind owns device state even if timeout configuration fails.
+        device_id_ = device_id;
+        timeout_configuration_rc_ = PTO_RUNTIME_ERR_INVALID_STATE;
+        clear_initialization_error();
         timeout_config_ = resolve_onboard_timeout_config();
         // aclrtSetOpExecuteTimeOutV2 is device-global: it changes the
         // op-execute timeout of every operator any process runs on this
         // device, including the host framework's own. Only a context that
         // owns the device may set it.
-        configure_aicore_op_timeout();
-        device_id_ = device_id;
+        timeout_configuration_rc_ = configure_aicore_op_timeout();
     }
-    return 0;
+    return timeout_configuration_rc_;
 }
 
 int DeviceRunnerBase::adopt_borrowed_device(int device_id) {
@@ -1654,20 +1658,57 @@ int DeviceRunnerBase::finalize() {
     return finalize_impl();
 }
 
-void DeviceRunnerBase::configure_aicore_op_timeout() {
+int DeviceRunnerBase::configure_aicore_op_timeout() {
     uint64_t actual_timeout = 0;
     int rc = aclrtSetOpExecuteTimeOutV2(timeout_config_.op_execute_timeout_us, &actual_timeout);
     if (rc != 0) {
-        LOG_ERROR(
-            "aclrtSetOpExecuteTimeOutV2(%llu us) failed: %d", (unsigned long long)timeout_config_.op_execute_timeout_us,
-            rc
-        );
-    } else {
-        LOG_INFO(
-            "aclrtSetOpExecuteTimeOutV2: requested=%llu us, actual=%llu us",
-            (unsigned long long)timeout_config_.op_execute_timeout_us, (unsigned long long)actual_timeout
-        );
+        std::ostringstream error;
+        error << "aclrtSetOpExecuteTimeOutV2(" << timeout_config_.op_execute_timeout_us << " us) failed with code "
+              << rc << ". Check the ACL error and " << SIMPLER_OP_EXECUTE_TIMEOUT_US_ENV
+              << "; close the Worker or finalize the owned context before retrying initialization.";
+        initialization_error_ = error.str();
+        LOG_ERROR("%s", initialization_error_.c_str());
+        return rc;
     }
+    timeout_config_.actual_op_execute_timeout_us = actual_timeout;
+    const int32_t scheduler_timeout_ms = timeout_config_.scheduler_timeout_ms != 0 ?
+                                             timeout_config_.scheduler_timeout_ms :
+                                             PLATFORM_SCHEDULER_TIMEOUT_MS;
+    const RuntimeTimeoutConfig actual_config{
+        actual_timeout, timeout_config_.stream_sync_timeout_ms, scheduler_timeout_ms
+    };
+    const auto order_status = validate_runtime_timeout_order(actual_config);
+    if (order_status != RuntimeTimeoutOrderStatus::OK) {
+        std::ostringstream warning;
+        warning << "Configured timeout ordering warning: " << runtime_timeout_order_status_name(order_status)
+                << " (scheduler=" << scheduler_timeout_ms
+                << " ms, requested_op_execute=" << timeout_config_.op_execute_timeout_us
+                << " us, actual_op_execute=" << actual_timeout
+                << " us, stream_sync=" << timeout_config_.stream_sync_timeout_ms << " ms). ";
+        switch (order_status) {
+        case RuntimeTimeoutOrderStatus::OP_EXECUTE_NOT_BELOW_STREAM_SYNC:
+            warning << "Increase " << SIMPLER_STREAM_SYNC_TIMEOUT_MS_ENV << " above the API-reported operator timeout.";
+            break;
+        case RuntimeTimeoutOrderStatus::SCHEDULER_NOT_BELOW_OP_EXECUTE:
+            warning << "Lower " << SIMPLER_SCHEDULER_TIMEOUT_MS_ENV << " or adjust "
+                    << SIMPLER_OP_EXECUTE_TIMEOUT_US_ENV << " and recheck the API-reported value.";
+            break;
+        case RuntimeTimeoutOrderStatus::STREAM_SYNC_NOT_COVERING_SCHEDULER_GUARD:
+            warning << "Increase " << SIMPLER_STREAM_SYNC_TIMEOUT_MS_ENV << " above "
+                    << SIMPLER_SCHEDULER_TIMEOUT_MS_ENV << " plus " << RUNTIME_TIMEOUT_SCHEDULER_ARMING_GUARD_MS
+                    << " ms.";
+            break;
+        case RuntimeTimeoutOrderStatus::OK:
+            break;
+        }
+        warning << " Continuing initialization; budgets unchanged.";
+        LOG_WARN("%s", warning.str().c_str());
+    }
+    LOG_INFO(
+        "aclrtSetOpExecuteTimeOutV2: requested=%llu us, actual=%llu us",
+        (unsigned long long)timeout_config_.op_execute_timeout_us, (unsigned long long)actual_timeout
+    );
+    return 0;
 }
 
 int DeviceRunnerBase::ensure_device_initialized() {

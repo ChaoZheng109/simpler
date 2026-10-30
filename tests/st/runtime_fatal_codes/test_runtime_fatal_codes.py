@@ -118,12 +118,12 @@ CASES = {
         kernel="aic/kernel_hang.cpp",
         kernel_core="aic",
         onboard_only=True,  # a while(true) kernel would hang the simulator
-        # Scheduler watchdog (2 s) classifies the running stall before STARS (3 s)
-        # and host stream sync (4 s) reap the device. Mirrors aicore_op_timeout.
+        # Scheduler watchdog (2 s) precedes the API-adjusted STARS timeout
+        # (3 s requested) and host stream sync (6 s). Mirrors aicore_op_timeout.
         env={
             "SIMPLER_SCHEDULER_TIMEOUT_MS": 2000,
             "SIMPLER_OP_EXECUTE_TIMEOUT_US": 3000000,
-            "SIMPLER_STREAM_SYNC_TIMEOUT_MS": 4000,
+            "SIMPLER_STREAM_SYNC_TIMEOUT_MS": 6000,
         },
         marker="sub_class=S1",
         explain="SCHEDULER_TIMEOUT",

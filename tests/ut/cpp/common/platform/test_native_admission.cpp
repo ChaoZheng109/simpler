@@ -11,6 +11,9 @@
 /** Real onboard workspace adapters and native prepare ownership over CPU transport. */
 #include <cstdlib>
 #include <new>
+#include <array>
+#include <optional>
+#include <string>
 #include "callable.h"
 #include "fixture.h"
 
@@ -56,6 +59,39 @@ int fake_create_event(void *, void **event) noexcept {
     return 0;
 }
 int fake_destroy_event(void *, void *) noexcept { return 0; }
+
+class TimeoutEnvironment {
+public:
+    explicit TimeoutEnvironment(const std::array<const char *, 3> &values) {
+        for (size_t i = 0; i < names_.size(); ++i) {
+            if (const char *old = std::getenv(names_[i])) saved_[i] = old;
+            if (values[i] != nullptr) setenv(names_[i], values[i], 1);
+            else unsetenv(names_[i]);
+        }
+    }
+    ~TimeoutEnvironment() {
+        for (size_t i = 0; i < names_.size(); ++i) {
+            if (saved_[i]) setenv(names_[i], saved_[i]->c_str(), 1);
+            else unsetenv(names_[i]);
+        }
+    }
+
+private:
+    static constexpr std::array<const char *, 3> names_{
+        SIMPLER_OP_EXECUTE_TIMEOUT_US_ENV, SIMPLER_STREAM_SYNC_TIMEOUT_MS_ENV, SIMPLER_SCHEDULER_TIMEOUT_MS_ENV
+    };
+    std::array<std::optional<std::string>, 3> saved_;
+};
+
+class TimeoutRunner : public Runner {
+public:
+    TimeoutRunner() {
+        device_id_ = -1;
+        callables_.clear();
+        chip_callable_buffers_.clear();
+    }
+    HostRuntimeTimeoutConfig timeouts() const { return timeout_config_; }
+};
 }  // namespace
 
 extern "C" int simpler_execution_environment_releasable_ctx(DeviceContextHandle);
@@ -137,6 +173,132 @@ TEST_F(NativeAdmissionTest, KernelColdCleanupFailureStopsAdmissionAndRetainsItsC
     EXPECT_EQ(finalize_device(&runner), 0);
     EXPECT_EQ(runner.kernel_execution_state().phase(), KernelContextPhase::Closed);
     EXPECT_FALSE(runner.kernel_execution_state().has_live_resources());
+}
+
+TEST_F(NativeAdmissionTest, RoundedTimeoutContinuesAndPreservesStreamCreationFailure) {
+    TimeoutEnvironment env({"3000000", "4000", "2000"});
+    TimeoutRunner runner;
+    control().replace_op_timeout = true;
+    control().actual_op_timeout_us = 4294967;
+    control().fail_stream_create = 1;
+    const uint8_t binary[] = {1};
+    EXPECT_EQ(
+        simpler_init(&runner, 0, binary, sizeof(binary), binary, sizeof(binary), nullptr, 0, nullptr, 0, nullptr, 0),
+        -4242
+    );
+    EXPECT_EQ(control().stream_create_calls, 1u);
+    EXPECT_EQ(control().op_timeout_calls, 1u);
+    EXPECT_EQ(runner.device_id(), 0);
+    EXPECT_EQ(runner.timeouts().op_execute_timeout_us, 3000000u);
+    EXPECT_EQ(runner.timeouts().actual_op_execute_timeout_us, 4294967u);
+    EXPECT_EQ(runner.timeouts().stream_sync_timeout_ms, 4000);
+    EXPECT_EQ(runner.timeouts().scheduler_timeout_ms, 2000);
+    EXPECT_EQ(runner.initialization_error(), nullptr);
+    EXPECT_FALSE(runner.program_initialized());
+    EXPECT_EQ(runner.teardown_proof(), TeardownProof::Unresolved);
+    for (int attempt = 0; attempt != 2; ++attempt) {
+        EXPECT_EQ(runner.attach_current_thread(0), 0);
+    }
+    EXPECT_EQ(control().stream_create_calls, 1u);
+    EXPECT_EQ(control().op_timeout_calls, 1u);
+    EXPECT_EQ(
+        simpler_init(&runner, 0, binary, sizeof(binary), binary, sizeof(binary), nullptr, 0, nullptr, 0, nullptr, 0),
+        PTO_RUNTIME_ERR_INVALID_STATE
+    );
+    EXPECT_EQ(control().op_timeout_calls, 1u);
+}
+
+TEST_F(NativeAdmissionTest, OperatorTimeoutSetterFailureIsPreservedBeforeStreams) {
+    TimeoutEnvironment env({nullptr, nullptr, nullptr});
+    TimeoutRunner runner;
+    control().op_timeout_rc = -4243;
+    control().fail_stream_create = 1;
+    const uint8_t binary[] = {1};
+    EXPECT_EQ(
+        simpler_init(&runner, 0, binary, sizeof(binary), binary, sizeof(binary), nullptr, 0, nullptr, 0, nullptr, 0),
+        -4243
+    );
+    EXPECT_EQ(control().stream_create_calls, 0u);
+    EXPECT_EQ(runner.device_id(), 0);
+    EXPECT_FALSE(runner.program_initialized());
+    EXPECT_EQ(runner.teardown_proof(), TeardownProof::Unresolved);
+    for (int attempt = 0; attempt != 2; ++attempt) {
+        EXPECT_EQ(runner.attach_current_thread(0), -4243);
+        EXPECT_EQ(runner.ensure_device_initialized(), -4243);
+    }
+    EXPECT_EQ(control().stream_create_calls, 0u);
+    EXPECT_EQ(control().op_timeout_calls, 1u);
+}
+
+TEST_F(NativeAdmissionTest, ActualTimeoutAtDefaultSchedulerDoesNotRejectAttachment) {
+    TimeoutEnvironment env({nullptr, nullptr, nullptr});
+    TimeoutRunner runner;
+    control().replace_op_timeout = true;
+    control().actual_op_timeout_us = static_cast<uint64_t>(PLATFORM_SCHEDULER_TIMEOUT_MS) * 1000;
+    EXPECT_EQ(runner.attach_current_thread(0), 0);
+    EXPECT_EQ(runner.timeouts().scheduler_timeout_ms, 0);
+    EXPECT_EQ(runner.timeouts().op_execute_timeout_us, PLATFORM_OP_EXECUTE_TIMEOUT_US);
+    EXPECT_EQ(runner.device_id(), 0);
+}
+
+TEST_F(NativeAdmissionTest, ActualTimeoutAtStreamBudgetDoesNotRejectAttachment) {
+    TimeoutEnvironment env({"3000000", "5000", "1000"});
+    TimeoutRunner runner;
+    control().replace_op_timeout = true;
+    control().actual_op_timeout_us = 5000000;
+    EXPECT_EQ(runner.attach_current_thread(0), 0);
+    EXPECT_EQ(runner.timeouts().stream_sync_timeout_ms, 5000);
+    EXPECT_EQ(runner.initialization_error(), nullptr);
+}
+
+TEST_F(NativeAdmissionTest, ZeroReportedTimeoutDoesNotRejectSuccessfulSetter) {
+    TimeoutEnvironment env({nullptr, nullptr, nullptr});
+    TimeoutRunner runner;
+    control().replace_op_timeout = true;
+    EXPECT_EQ(runner.attach_current_thread(0), 0);
+    EXPECT_EQ(runner.timeouts().actual_op_execute_timeout_us, 0u);
+    EXPECT_EQ(runner.initialization_error(), nullptr);
+}
+
+TEST_F(NativeAdmissionTest, ValidAdjustedTimeoutPreservesRequestAndIsConfiguredOnce) {
+    TimeoutEnvironment env({"3000000", "8000", "1000"});
+    TimeoutRunner runner;
+    control().replace_op_timeout = true;
+    control().actual_op_timeout_us = 4294967;
+    ASSERT_EQ(runner.attach_current_thread(0), 0);
+    EXPECT_EQ(runner.timeouts().op_execute_timeout_us, 3000000u);
+    EXPECT_EQ(runner.timeouts().actual_op_execute_timeout_us, 4294967u);
+    EXPECT_EQ(control().requested_op_timeout_us, 3000000u);
+    EXPECT_EQ(runner.timeouts().stream_sync_timeout_ms, 8000);
+    EXPECT_EQ(runner.attach_current_thread(0), 0);
+    EXPECT_EQ(control().op_timeout_calls, 1u);
+}
+
+TEST_F(NativeAdmissionTest, ValidDownwardAdjustmentIsAccepted) {
+    TimeoutEnvironment env({nullptr, nullptr, nullptr});
+    TimeoutRunner runner;
+    control().replace_op_timeout = true;
+    control().actual_op_timeout_us = 30000000;
+    EXPECT_EQ(runner.attach_current_thread(0), 0);
+    EXPECT_EQ(runner.timeouts().op_execute_timeout_us, PLATFORM_OP_EXECUTE_TIMEOUT_US);
+}
+
+TEST_F(NativeAdmissionTest, BorrowedDeviceDoesNotConfigureTheGlobalOperatorTimeout) {
+    TimeoutEnvironment env({"3000000", "4000", "2000"});
+    TimeoutRunner runner;
+    ASSERT_EQ(runner.execution_mode_latch().latch(SIMPLER_MODE_KERNEL), 0);
+    KernelContextOps ops;
+    ops.get_current_device = fake_current_device;
+    ops.get_current_context = fake_current_context;
+    ops.create_hidden_stream = fake_create_hidden_stream;
+    ops.destroy_hidden_stream = fake_destroy_hidden_stream;
+    ops.create_event = fake_create_event;
+    ops.destroy_event = fake_destroy_event;
+    ASSERT_EQ(runner.kernel_execution_state().initialize(0, ops), 0);
+    control().op_timeout_rc = -4243;
+    EXPECT_EQ(runner.adopt_borrowed_device(0), 0);
+    EXPECT_EQ(control().op_timeout_calls, 0u);
+    EXPECT_EQ(runner.timeouts().actual_op_execute_timeout_us, 0u);
 }
 
 TEST_F(NativeAdmissionTest, RegistrationRefusesWhileANativeRunIsOutstanding) {

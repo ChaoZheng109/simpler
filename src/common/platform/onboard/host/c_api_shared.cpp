@@ -833,6 +833,10 @@ int simpler_execution_environment_releasable_ctx(DeviceContextHandle ctx) {
     }
 }
 
+const char *simpler_get_init_error_ctx(DeviceContextHandle ctx) {
+    return ctx == nullptr ? nullptr : static_cast<DeviceRunnerBase *>(ctx)->initialization_error();
+}
+
 int simpler_init(
     DeviceContextHandle ctx, int device_id, const uint8_t *aicpu_binary, size_t aicpu_size,
     const uint8_t *aicore_binary, size_t aicore_size, const uint8_t *dispatcher_binary, size_t dispatcher_size,
@@ -871,6 +875,7 @@ int simpler_init(
         return PTO_RUNTIME_ERR_INVALID_STATE;
     }
     runner->set_program_initialized(false);
+    runner->clear_initialization_error();
 
     // Admitted, so the proof is already spent: every step from here on is a
     // post-consume one, and each exit records that this context is no longer

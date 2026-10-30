@@ -321,6 +321,7 @@ void ChipWorker::init(
     KernelInitFn kernel_init_fn = nullptr;
     KernelPrepareCallableFn kernel_prepare_callable_fn = nullptr;
     KernelLaunchFn kernel_launch_fn = nullptr;
+    decltype(&simpler_get_init_error_ctx) get_init_error = nullptr;
     try {
         create_device_context_fn_ = module->required<CreateDeviceContextFn>("create_device_context");
         destroy_device_context_fn_ = module->required<DestroyDeviceContextFn>("destroy_device_context");
@@ -339,6 +340,7 @@ void ChipWorker::init(
         get_runtime_size_fn_ = module->required<GetRuntimeSizeFn>("get_runtime_size");
         get_runtime_alignment_fn_ = module->required<GetRuntimeAlignmentFn>("get_runtime_alignment");
         simpler_init_fn_ = module->required<SimplerInitFn>("simpler_init");
+        get_init_error = module->required<decltype(&simpler_get_init_error_ctx)>("simpler_get_init_error_ctx");
         register_callable_fn_ = module->required<SimplerRegisterCallableFn>("simpler_register_callable");
         // Optional: a runtime built before versioned registration exports
         // nothing, and a null pointer is the refusal.
@@ -562,6 +564,7 @@ void ChipWorker::init(
     bool borrowed_init_attempted = false;
     bool program_init_attempted = false;
     int init_rc = 0;
+    std::string init_error_detail;
     try {
         std::vector<uint8_t> aicpu_bytes = read_binary_file(aicpu_path);
         std::vector<uint8_t> aicore_bytes = read_binary_file(aicore_path);
@@ -659,10 +662,15 @@ void ChipWorker::init(
             );
         }
         if (init_rc != 0) {
-            throw std::runtime_error(
+            std::string error =
                 std::string(borrowed_context_generation.has_value() ? "borrowed init" : "simpler_init") +
-                " failed with code " + std::to_string(init_rc)
-            );
+                " failed with code " + std::to_string(init_rc);
+            if (const char *detail = get_init_error(device_ctx_); detail != nullptr && detail[0] != '\0') {
+                init_error_detail = detail;
+                error += ": ";
+                error += init_error_detail;
+            }
+            throw std::runtime_error(error);
         }
     } catch (...) {
         // Onboard init can leave device resources behind on failure. Only a
@@ -672,11 +680,15 @@ void ChipWorker::init(
             if (close_rc != 0 || execution_environment_releasable_fn_(device_ctx_) != 1) {
                 runtime_module_ = module;
                 device_id_ = device_id;
-                throw std::runtime_error(
+                std::string error =
                     std::string(borrowed_init_attempted ? "ChipWorker borrowed init" : "ChipWorker init") +
                     " failed with code " + std::to_string(init_rc) + "; rollback failed (" + std::to_string(close_rc) +
-                    "); cleanup is unproven; keeping the context and host runtime loaded; finalize is required"
-                );
+                    "); cleanup is unproven; keeping the context and host runtime loaded; finalize is required";
+                if (!init_error_detail.empty()) {
+                    error += "; ";
+                    error += init_error_detail;
+                }
+                throw std::runtime_error(error);
             }
         }
         // A failed sim attach must not release a sibling's virtual context.

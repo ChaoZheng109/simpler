@@ -11,6 +11,7 @@
 // Allocation and transport faults; all admission decisions stay in production code.
 #pragma once
 #include <cstddef>
+#include <cstdint>
 #include <limits>
 namespace native_admission_transport {
 struct Control {
@@ -25,6 +26,11 @@ struct Control {
     bool retired{false};
     size_t calls_after_retire{0};
     int attach_rc{0};
+    int op_timeout_rc{0};
+    bool replace_op_timeout{false};
+    uint64_t actual_op_timeout_us{0};
+    uint64_t requested_op_timeout_us{0};
+    size_t op_timeout_calls{0};
     int copy_rc{0};
     size_t stream_create_calls{0};
     size_t fail_stream_create{0};

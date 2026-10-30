@@ -66,6 +66,8 @@ size_t get_runtime_size(void) { return 0; }
 
 size_t get_runtime_alignment(void) { return 0; }
 
+const char *simpler_get_init_error_ctx(DeviceContextHandle) { return nullptr; }
+
 int simpler_init(
     DeviceContextHandle ctx, int device_id, const uint8_t *aicpu_binary, size_t aicpu_size,
     const uint8_t *aicore_binary, size_t aicore_size, const uint8_t *dispatcher_binary, size_t dispatcher_size,

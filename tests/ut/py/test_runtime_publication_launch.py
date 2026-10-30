@@ -37,6 +37,7 @@ _CASES = [
         "run_execution_streams",
         "run_caller_launch",
         "bootstrap_error",
+        "runtime_timeout_configuration",
     ],
 )
 @pytest.mark.requires_hardware
@@ -93,6 +94,15 @@ def test_onboard_execution_contract(arch: str, runtime: str, probe: str, tmp_pat
     result = subprocess.run(run_args, capture_output=True, text=True, timeout=30, check=False)
     assert result.returncode == 0, result.stdout + result.stderr
     assert "PASS:" in result.stdout
+    if probe == "runtime_timeout_configuration":
+        output = result.stdout + result.stderr
+        assert output.count("Configured timeout ordering warning:") == 1
+        assert (
+            "scheduler=2000 ms, requested_op_execute=3000000 us, actual_op_execute=4294967 us, stream_sync=4000 ms"
+        ) in output
+        assert "op-execute timeout must be below stream-sync timeout" in output
+        assert "Increase SIMPLER_STREAM_SYNC_TIMEOUT_MS" in output
+        assert "Continuing initialization; budgets unchanged" in output
     if probe == "bootstrap_error":
         assert "SO cache failed: stage=args errno=22" in result.stdout + result.stderr
         for stage in ("verify", "link", "unlink"):

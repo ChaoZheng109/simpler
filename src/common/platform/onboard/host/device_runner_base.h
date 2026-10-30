@@ -326,6 +326,10 @@ public:
     /** True only after simpler_init succeeds and before teardown begins. */
     bool program_initialized() const { return program_initialized_; }
     void set_program_initialized(bool initialized) { program_initialized_ = initialized; }
+    const char *initialization_error() const {
+        return initialization_error_.empty() ? nullptr : initialization_error_.c_str();
+    }
+    void clear_initialization_error() { initialization_error_.clear(); }
 
     /** Context-lifetime streams and events, live only in kernel mode. */
     KernelExecutionState &kernel_execution_state() { return kernel_exec_state_; }
@@ -2161,7 +2165,7 @@ protected:
      * timeout may differ from the requested value due to hardware timer
      * granularity.
      */
-    void configure_aicore_op_timeout();
+    int configure_aicore_op_timeout();
 
     PersistentArgsOps persistent_args_ops();
     int register_callable_on_device(int32_t callable_id, rtStream_t control_stream);
@@ -2961,6 +2965,9 @@ protected:
     uint32_t max_cube_cores_{0};
     uint32_t max_vector_cores_{0};
     HostRuntimeTimeoutConfig timeout_config_{PLATFORM_OP_EXECUTE_TIMEOUT_US, PLATFORM_STREAM_SYNC_TIMEOUT_MS};
+    // Owned execution retains the first configuration result until device close.
+    int timeout_configuration_rc_{PTO_RUNTIME_ERR_INVALID_STATE};
+    std::string initialization_error_;
 
     // Executor binaries — populated once via `set_executors()` during
     // simpler_init. `aicore_kernel_binary_` is consumed once by
