@@ -343,10 +343,8 @@ void SchedulerContext::check_running_cores_for_completion(
 #endif
 
 #if SIMPLER_DFX
-        // Capture finish_ts at the FIN observation point — right after rmb()
-        // pinned cacheable AICore reads downstream of the register load, and
-        // BEFORE any fanin / deferred-release work. Anything later would
-        // charge AICPU completion-processing cost to (end → finish).
+        // The FIN observation marker follows the register read barrier and
+        // slot-state decision, before drain ACK collection and completion work.
         uint64_t finish_ts = 0;
         if (chip_swimlane_level_ >= ChipSwimlaneLevel::SCHEDULE_TIMING && (t.pending_done || t.running_done)) {
             finish_ts = get_sys_cnt_aicpu();
@@ -468,6 +466,7 @@ bool SchedulerContext::enter_drain_mode(ChipTaskSlotState *slot_state, int32_t b
     drain_state_.drain_stage_go.store(0, std::memory_order_relaxed);
     drain_state_.drain_stage_done_mask.store(0, std::memory_order_relaxed);
     drain_state_.drain_running_staged.store(0, std::memory_order_relaxed);
+    drain_state_.reserved_lanes.store(slot_state->active_mask.lane_demand(), std::memory_order_relaxed);
     // Release store: all stores above are now visible to any thread that
     // acquire-loads sync_start_pending and sees block_num > 0.
     drain_state_.sync_start_pending.store(block_num, std::memory_order_release);

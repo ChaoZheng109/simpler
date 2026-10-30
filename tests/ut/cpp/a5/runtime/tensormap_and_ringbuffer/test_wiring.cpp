@@ -962,7 +962,7 @@ TEST_F(WiringTest, NoEdgePublishRecordsDepPoolMark) {
     EXPECT_EQ(task_slot.dep_pool_mark, before_top);
 }
 
-TEST_F(WiringTest, BatchPushReportsFullInsteadOfSpinning) {
+TEST_F(WiringTest, BatchRequeueReportsFullInsteadOfSpinning) {
     alignas(64) ChipTaskSlotState filler;
     init_slot(filler, CHIP_TASK_PENDING, 0, 1);
     auto &queue = sched.early_dispatch_queues[static_cast<int32_t>(filler.active_mask.to_shape())];
@@ -970,18 +970,18 @@ TEST_F(WiringTest, BatchPushReportsFullInsteadOfSpinning) {
         ASSERT_TRUE(queue.push_tagged(&filler, TaskId::make(0, static_cast<int32_t>(i))));
     }
 
-    ChipTaskSlotState *items[1] = {&filler};
+    LaneTaggedSlot items[1] = {queue.capture(&filler)};
     TaskId tags[1] = {TaskId::make(0, static_cast<int32_t>(queue.capacity))};
     // A full queue must end the call, not spin waiting for a consumer. Reaching
     // the next line at all is the assertion.
-    EXPECT_FALSE(queue.push_batch_tagged(items, tags, 1));
+    EXPECT_FALSE(queue.requeue_batch_tagged(items, tags, 1));
     EXPECT_EQ(queue.size(), queue.capacity);
 
     // A batch larger than the queue can never be satisfied and must not spin.
-    EXPECT_FALSE(queue.push_batch_tagged(items, tags, static_cast<int>(queue.capacity) + 1));
+    EXPECT_FALSE(queue.requeue_batch_tagged(items, tags, static_cast<int>(queue.capacity) + 1));
 }
 
-TEST_F(WiringTest, BatchPushSucceedsAfterSpaceIsReclaimed) {
+TEST_F(WiringTest, BatchRequeueSucceedsAfterSpaceIsReclaimed) {
     alignas(64) ChipTaskSlotState filler;
     init_slot(filler, CHIP_TASK_PENDING, 0, 1);
     auto &queue = sched.early_dispatch_queues[static_cast<int32_t>(filler.active_mask.to_shape())];
@@ -991,9 +991,9 @@ TEST_F(WiringTest, BatchPushSucceedsAfterSpaceIsReclaimed) {
     ASSERT_NE(queue.pop(), nullptr);
     ASSERT_NE(queue.pop(), nullptr);
 
-    ChipTaskSlotState *items[2] = {&filler, &filler};
+    LaneTaggedSlot items[2] = {queue.capture(&filler), queue.capture(&filler)};
     TaskId tags[2] = {TaskId::make(0, 7), TaskId::make(0, 8)};
-    EXPECT_TRUE(queue.push_batch_tagged(items, tags, 2));
+    EXPECT_TRUE(queue.requeue_batch_tagged(items, tags, 2));
     EXPECT_EQ(queue.size(), queue.capacity);
 }
 

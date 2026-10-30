@@ -538,13 +538,13 @@ TEST_F(SchedulerStateTest, GetReadyTasksBatchDrainsSharedQueue) {
     ASSERT_TRUE(sched.release_fanin_and_check_ready(slot_a));
     ASSERT_TRUE(sched.release_fanin_and_check_ready(slot_b));
 
-    ChipTaskSlotState *out[4];
+    LaneTaggedSlot out[4];
     int count = sched.get_ready_tasks_batch(sched.ready_queues, ResourceShape::AIC, out, 4);
 
     EXPECT_EQ(count, 2);
     // Shared queue is FIFO, so slot_a (pushed first) comes first.
-    EXPECT_EQ(out[0], &slot_a);
-    EXPECT_EQ(out[1], &slot_b);
+    EXPECT_EQ(out[0].ptr(), &slot_a);
+    EXPECT_EQ(out[1].ptr(), &slot_b);
 }
 
 TEST_F(SchedulerStateTest, SyncStartRoutesToDedicatedReadyQueue) {
@@ -554,10 +554,10 @@ TEST_F(SchedulerStateTest, SyncStartRoutesToDedicatedReadyQueue) {
 
     ASSERT_TRUE(sched.release_fanin_and_check_ready(slot));
 
-    ChipTaskSlotState *out[1];
+    LaneTaggedSlot out[1];
     EXPECT_EQ(sched.get_ready_tasks_batch(sched.ready_queues, ResourceShape::AIC, out, 1), 0);
     ASSERT_EQ(sched.get_ready_tasks_batch(sched.ready_sync_queues, ResourceShape::AIC, out, 1), 1);
-    EXPECT_EQ(out[0], &slot);
+    EXPECT_EQ(out[0].ptr(), &slot);
 }
 
 TEST(CoreTrackerTest, MixPartiallyRunningClusterAdmittedAsPerCorePlacement) {

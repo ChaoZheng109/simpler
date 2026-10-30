@@ -55,12 +55,110 @@
 // Ready Queue (Lock-free bounded MPMC — Vyukov design)
 // =============================================================================
 
-/**
- * Per-slot entry: sequence counter for ABA safety + task payload
- */
+// One machine word: an aligned pointer plus a value tag in its low bits.
+template <typename T, typename Tag, int kTagBits>
+class TaggedPtr {
+    static_assert(kTagBits > 0 && kTagBits < sizeof(uintptr_t) * 8);
+    static_assert(Tag::kBitWidth <= kTagBits);
+    static constexpr uintptr_t kTagMask = (uintptr_t{1} << kTagBits) - 1;
+
+public:
+    constexpr TaggedPtr() = default;
+
+    TaggedPtr(T *ptr, Tag tag) :
+        word_(reinterpret_cast<uintptr_t>(ptr) | tag.bits()) {
+        static_assert(alignof(T) >= (size_t{1} << kTagBits));
+    }
+
+    T *ptr() const { return reinterpret_cast<T *>(word_ & ~kTagMask); }
+    Tag tag() const { return Tag::from_low_bits(word_ & kTagMask); }
+    bool is_null() const { return ptr() == nullptr; }
+
+private:
+    uintptr_t word_{0};
+};
+
+using LaneTaggedSlot = TaggedPtr<ChipTaskSlotState, LaneMask, SUBTASK_SLOT_COUNT>;
+static_assert(sizeof(LaneTaggedSlot) == sizeof(void *));
+static_assert(std::is_trivially_copyable_v<LaneTaggedSlot> && std::is_standard_layout_v<LaneTaggedSlot>);
+static_assert(!std::is_convertible_v<LaneTaggedSlot, ChipTaskSlotState *>);
+
+// Three independent 21-bit fields; each published cell owns one paired add/sub.
+class LaneDemandCounter {
+public:
+    static constexpr int kFieldBits = 21;
+    static constexpr uint32_t kMaxCount = (uint32_t{1} << kFieldBits) - 1;
+
+private:
+    static constexpr uint64_t kAicOne = 1;
+    static constexpr uint64_t kAiv0One = uint64_t{1} << kFieldBits;
+    static constexpr uint64_t kAiv1One = uint64_t{1} << (2 * kFieldBits);
+    static constexpr uint64_t kDelta[8] = {
+        0,
+        kAicOne,
+        kAiv0One,
+        kAicOne | kAiv0One,
+        kAiv1One,
+        kAicOne | kAiv1One,
+        kAiv0One | kAiv1One,
+        kAicOne | kAiv0One | kAiv1One,
+    };
+    static_assert(LaneMask::kBitWidth == 3);
+    static_assert(kDelta[LaneMask::kAic | LaneMask::kAiv0] == ((uint64_t{1} << 21) | 1));
+    static_assert(kDelta[LaneMask::kAiv0 | LaneMask::kAiv1] == ((uint64_t{1} << 42) | (uint64_t{1} << 21)));
+
+    static constexpr uint32_t field(uint64_t value, int lane) {
+        return static_cast<uint32_t>((value >> (lane * kFieldBits)) & kMaxCount);
+    }
+
+public:
+    // A local aggregate can be formed from either live slots or immutable cell tags.
+    class Batch {
+    public:
+        void add(LaneMask demand) {
+            const uint64_t delta = kDelta[demand.bits()];
+            delta_ += delta;
+        }
+
+    private:
+        friend class LaneDemandCounter;
+        uint64_t delta_{0};
+    };
+
+    // Reset requires quiescent producers and consumers.
+    void reset() { value_.store(0, std::memory_order_relaxed); }
+
+    void add(LaneMask demand) { add_delta(kDelta[demand.bits()]); }
+    void sub(LaneMask demand) { sub_delta(kDelta[demand.bits()]); }
+    void add(const Batch &batch) { add_delta(batch.delta_); }
+    void sub(const Batch &batch) { sub_delta(batch.delta_); }
+
+    LaneMask reserved() const {
+        const uint64_t value = value_.load(std::memory_order_relaxed);
+        if (value == 0) return LaneMask::none();
+        return {field(value, 0) != 0, field(value, 1) != 0, field(value, 2) != 0};
+    }
+
+    uint32_t count(LaneMask lane) const {
+        debug_assert(lane.count() == 1 && "count requires exactly one lane");
+        const int index = lane.has_aic() ? 0 : (lane.has_aiv0() ? 1 : 2);
+        return field(value_.load(std::memory_order_relaxed), index);
+    }
+
+private:
+    void add_delta(uint64_t delta) { value_.fetch_add(delta, std::memory_order_relaxed); }
+    void sub_delta(uint64_t delta) { value_.fetch_sub(delta, std::memory_order_relaxed); }
+
+    std::atomic<uint64_t> value_{0};
+};
+static_assert(std::atomic<uint64_t>::is_always_lock_free);
+static_assert(sizeof(LaneDemandCounter) == sizeof(uint64_t));
+static_assert(3 * LaneDemandCounter::kFieldBits <= 64);
+
+// Per-cell sequence, original lane tag and early-dispatch generation snapshot.
 struct ChipReadyQueueSlot {
     std::atomic<int64_t> sequence;
-    ChipTaskSlotState *slot_state;
+    LaneTaggedSlot slot;
     TaskId task_id_snapshot;  // generation tag for early-dispatch queue entries
 };
 
@@ -77,14 +175,88 @@ struct ChipReadyQueueSlot {
 struct alignas(64) ChipReadyQueue {
     ChipReadyQueueSlot *slots;
     uint64_t capacity;
-    uint64_t mask;        // capacity - 1
-    char _pad0[64 - 24];  // Pad to own cache line
+    uint64_t mask;  // capacity - 1
+    LaneDemandCounter lane_demand_;
+    bool track_mix_resources{false};
+    char _pad0[64 - 24 - sizeof(lane_demand_) - sizeof(track_mix_resources)];
 
     std::atomic<uint64_t> enqueue_pos;
     char _pad1[64 - sizeof(std::atomic<uint64_t>)];  // Own cache line
 
     std::atomic<uint64_t> dequeue_pos;
     char _pad2[64 - sizeof(std::atomic<uint64_t>)];  // Own cache line
+
+    // Includes reservations made before a producer publishes its cell.
+    static constexpr uint64_t kMaxBatch = PLATFORM_MAX_BLOCKDIM * PLATFORM_CORES_PER_BLOCKDIM;
+    static constexpr uint64_t kMaxInFlightReservations = PLATFORM_MAX_AICPU_THREADS * kMaxBatch;
+    static constexpr uint64_t kMaxCapacity = LaneDemandCounter::kMaxCount - kMaxInFlightReservations;
+    static_assert(CHIP_READY_QUEUE_SIZE <= kMaxCapacity);
+    static_assert(CHIP_EARLY_DISPATCH_QUEUE_SIZE <= kMaxCapacity);
+
+    LaneMask reserved_mix_lanes() const { return track_mix_resources ? lane_demand_.reserved() : LaneMask::none(); }
+
+    class PushReservation {
+    public:
+        PushReservation(ChipReadyQueue &queue, LaneTaggedSlot handle) :
+            queue_(queue),
+            handle_(handle) {
+            if (!queue_.track_mix_resources) return;
+            always_assert(handle_.tag().is_mix() && "MIX queue requires at least two active slots");
+            queue_.lane_demand_.add(handle_.tag());
+            owns_ = true;
+        }
+        ~PushReservation() {
+            if (owns_) queue_.lane_demand_.sub(handle_.tag());
+        }
+        void publish(ChipReadyQueueSlot &cell, TaskId task_id_snapshot) {
+            cell.slot = handle_;
+            cell.task_id_snapshot = task_id_snapshot;
+            owns_ = false;
+        }
+        PushReservation(const PushReservation &) = delete;
+        PushReservation &operator=(const PushReservation &) = delete;
+
+    private:
+        ChipReadyQueue &queue_;
+        LaneTaggedSlot handle_;
+        bool owns_{false};
+    };
+
+    // The aggregate transfers to all cells before the first release publication.
+    class BatchReservation {
+    public:
+        BatchReservation(ChipReadyQueue &queue, const LaneTaggedSlot *handles, int count) :
+            queue_(queue) {
+            if (!queue_.track_mix_resources) return;
+            for (int i = 0; i < count; ++i) {
+                always_assert(handles[i].tag().is_mix() && "MIX queue requires at least two active slots");
+                demand_.add(handles[i].tag());
+            }
+            queue_.lane_demand_.add(demand_);
+            owns_ = true;
+        }
+        ~BatchReservation() {
+            if (owns_) queue_.lane_demand_.sub(demand_);
+        }
+        void transfer_to_cells() { owns_ = false; }
+        BatchReservation(const BatchReservation &) = delete;
+        BatchReservation &operator=(const BatchReservation &) = delete;
+
+    private:
+        ChipReadyQueue &queue_;
+        LaneDemandCounter::Batch demand_;
+        bool owns_{false};
+    };
+
+    LaneTaggedSlot consume(ChipReadyQueueSlot &cell) {
+        LaneTaggedSlot handle = cell.slot;
+        if (track_mix_resources) lane_demand_.sub(handle.tag());
+        return handle;
+    }
+
+    LaneTaggedSlot capture(ChipTaskSlotState *state) const {
+        return {state, track_mix_resources ? state->active_mask : LaneMask::none()};
+    }
 
     uint64_t size() {
         uint64_t e = enqueue_pos.load(std::memory_order_relaxed);
@@ -98,9 +270,20 @@ struct alignas(64) ChipReadyQueue {
     // with a tag ever read this field, and all of them push with one, so an
     // untagged entry's tag is never compared. The sentinel says so, where a zero
     // would have been a legitimate handle.
-    bool push(ChipTaskSlotState *slot_state) { return push_tagged(slot_state, TaskId::invalid()); }
+    bool push(ChipTaskSlotState *state) { return push_tagged(state, TaskId::invalid()); }
 
-    bool push_tagged(ChipTaskSlotState *slot_state, TaskId task_id_snapshot) {
+    bool push_tagged(ChipTaskSlotState *state, TaskId task_id_snapshot) {
+        return enqueue_tagged(capture(state), task_id_snapshot);
+    }
+
+    bool requeue(LaneTaggedSlot handle) { return requeue_tagged(handle, TaskId::invalid()); }
+
+    bool requeue_tagged(LaneTaggedSlot handle, TaskId task_id_snapshot) {
+        return enqueue_tagged(handle, task_id_snapshot);
+    }
+
+    bool enqueue_tagged(LaneTaggedSlot handle, TaskId task_id_snapshot) {
+        PushReservation reservation(*this, handle);
         uint64_t pos;
         ChipReadyQueueSlot *slot;
         while (true) {
@@ -119,23 +302,20 @@ struct alignas(64) ChipReadyQueue {
             }
         }
 
-        slot->slot_state = slot_state;
-        slot->task_id_snapshot = task_id_snapshot;
+        reservation.publish(*slot, task_id_snapshot);
         slot->sequence.store(static_cast<int64_t>(pos + 1), std::memory_order_release);
         return true;
     }
 
-    // Batch push: reserve count slots with a single CAS after confirming
-    // every target slot is available under the usual Vyukov sequence check.
-    // Returns false without publishing anything when the queue cannot take all
-    // `count` items. A target slot holding an older generation means full and
-    // ends the call; a slot a peer has reserved but not yet published is
-    // transient and retries, so this only spins while a peer is mid-publish.
-    bool push_batch(ChipTaskSlotState **items, int count) { return push_batch_tagged(items, nullptr, count); }
+    bool requeue_batch(const LaneTaggedSlot *handles, int count) {
+        return requeue_batch_tagged(handles, nullptr, count);
+    }
 
-    bool push_batch_tagged(ChipTaskSlotState **items, const TaskId *task_id_snapshots, int count) {
+    bool requeue_batch_tagged(const LaneTaggedSlot *handles, const TaskId *task_id_snapshots, int count) {
         if (count == 0) return true;
         if (static_cast<uint64_t>(count) > capacity) return false;
+        always_assert(count >= 0 && static_cast<uint64_t>(count) <= kMaxBatch);
+        BatchReservation batch_reservation(*this, handles, count);
 
         uint64_t pos;
         while (true) {
@@ -163,9 +343,10 @@ struct alignas(64) ChipReadyQueue {
             }
         }
 
+        batch_reservation.transfer_to_cells();
         for (int i = 0; i < count; i++) {
             ChipReadyQueueSlot *slot = &slots[(pos + i) & mask];
-            slot->slot_state = items[i];
+            slot->slot = handles[i];
             slot->task_id_snapshot = task_id_snapshots == nullptr ? TaskId::invalid() : task_id_snapshots[i];
             slot->sequence.store(static_cast<int64_t>(pos + i + 1), std::memory_order_release);
         }
@@ -174,6 +355,8 @@ struct alignas(64) ChipReadyQueue {
 
 #if SIMPLER_ORCH_PROFILING || SIMPLER_SCHED_PROFILING
     bool push(ChipTaskSlotState *slot_state, uint64_t &atomic_count, uint64_t &wait_cycle) {
+        PushReservation reservation(*this, capture(slot_state));
+        atomic_count += track_mix_resources ? 1 : 0;  // mask reservation
         uint64_t pos;
         ChipReadyQueueSlot *slot;
         uint64_t t0 = get_sys_cnt_aicpu();
@@ -195,7 +378,8 @@ struct alignas(64) ChipReadyQueue {
                 contended = true;
                 atomic_ops++;  // failed CAS
             } else if (diff < 0) {
-                return false;  // Queue full
+                atomic_count += atomic_ops + (track_mix_resources ? 1 : 0);  // failed push rolls back the mask
+                return false;                                                // Queue full
             } else {
                 contended = true;  // diff > 0: slot not yet released, spin
             }
@@ -206,10 +390,7 @@ struct alignas(64) ChipReadyQueue {
             wait_cycle += (get_sys_cnt_aicpu() - t0);
         }
 
-        slot->slot_state = slot_state;
-        // Untagged, like the push() above: the reserved sentinel, never a zero
-        // that a mint could also produce.
-        slot->task_id_snapshot = TaskId::invalid();
+        reservation.publish(*slot, TaskId::invalid());
         slot->sequence.store(static_cast<int64_t>(pos + 1), std::memory_order_release);
         return true;
     }
@@ -242,10 +423,10 @@ struct alignas(64) ChipReadyQueue {
             }
         }
 
-        ChipTaskSlotState *result = slot->slot_state;
+        LaneTaggedSlot result = consume(*slot);
         if (task_id_snapshot != nullptr) *task_id_snapshot = slot->task_id_snapshot;
         slot->sequence.store(static_cast<int64_t>(pos + mask + 1), std::memory_order_release);
-        return result;
+        return result.ptr();
     }
 
 #if SIMPLER_SCHED_PROFILING
@@ -291,17 +472,18 @@ struct alignas(64) ChipReadyQueue {
             wait_cycle += (get_sys_cnt_aicpu() - t0);
         }
 
-        ChipTaskSlotState *result = slot->slot_state;
+        LaneTaggedSlot result = consume(*slot);
+        atomic_count += track_mix_resources ? 1 : 0;  // release the cell's mask
         slot->sequence.store(static_cast<int64_t>(pos + mask + 1), std::memory_order_release);
-        return result;
+        return result.ptr();
     }
 #endif
 
     // Batch pop: reserve a contiguous run of ready slots with a single CAS.
     // Returns actual number of items popped (may be less than max_count).
-    int pop_batch(ChipTaskSlotState **out, int max_count) { return pop_batch_tagged(out, nullptr, max_count); }
+    int pop_batch(LaneTaggedSlot *out, int max_count) { return pop_batch_tagged(out, nullptr, max_count); }
 
-    int pop_batch_tagged(ChipTaskSlotState **out, TaskId *task_id_snapshots, int max_count) {
+    int pop_batch_tagged(LaneTaggedSlot *out, TaskId *task_id_snapshots, int max_count) {
         uint64_t pos;
         int count;
         while (true) {
@@ -332,7 +514,7 @@ struct alignas(64) ChipReadyQueue {
 
         for (int i = 0; i < count; i++) {
             ChipReadyQueueSlot *slot = &slots[(pos + i) & mask];
-            out[i] = slot->slot_state;
+            out[i] = consume(*slot);
             if (task_id_snapshots != nullptr) task_id_snapshots[i] = slot->task_id_snapshot;
             slot->sequence.store(static_cast<int64_t>(pos + i + mask + 1), std::memory_order_release);
         }
@@ -340,7 +522,7 @@ struct alignas(64) ChipReadyQueue {
     }
 
 #if SIMPLER_SCHED_PROFILING
-    int pop_batch(ChipTaskSlotState **out, int max_count, uint64_t &atomic_count, uint64_t &wait_cycle) {
+    int pop_batch(LaneTaggedSlot *out, int max_count, uint64_t &atomic_count, uint64_t &wait_cycle) {
         uint64_t pos;
         int count;
         uint64_t t0 = get_sys_cnt_aicpu();
@@ -385,9 +567,10 @@ struct alignas(64) ChipReadyQueue {
 
         for (int i = 0; i < count; i++) {
             ChipReadyQueueSlot *slot = &slots[(pos + i) & mask];
-            out[i] = slot->slot_state;
+            out[i] = consume(*slot);
             slot->sequence.store(static_cast<int64_t>(pos + i + mask + 1), std::memory_order_release);
-            atomic_ops++;  // sequence.store
+            atomic_ops++;                               // sequence.store
+            atomic_ops += track_mix_resources ? 1 : 0;  // release the cell's mask
         }
         atomic_count += atomic_ops;
         if (contended) {
@@ -397,6 +580,14 @@ struct alignas(64) ChipReadyQueue {
     }
 #endif
 };
+
+static_assert(sizeof(ChipReadyQueueSlot) == 24);
+static_assert(sizeof(ChipReadyQueue) == 192);
+static_assert(offsetof(ChipReadyQueueSlot, slot) == 8);
+static_assert(offsetof(ChipReadyQueueSlot, task_id_snapshot) == 16);
+static_assert(offsetof(ChipReadyQueue, lane_demand_) == 24);
+static_assert(offsetof(ChipReadyQueue, enqueue_pos) == 64);
+static_assert(offsetof(ChipReadyQueue, dequeue_pos) == 128);
 
 // Cold-path ready queue operations (defined in scheduler.cpp). Declared
 // as non-member so ChipReadyQueue stays a POD-like struct with cache-line
@@ -411,7 +602,9 @@ size_t ready_queue_reserve_layout(DeviceArena &arena, uint64_t capacity);
 // arena.region_ptr(slots_off) only to address the slot array for writes;
 // does NOT store the pointer in `queue->slots`. Call
 // `ready_queue_wire_arena_pointers` afterwards to set the field itself.
-bool ready_queue_init_data_from_layout(ChipReadyQueue *queue, DeviceArena &arena, size_t slots_off, uint64_t capacity);
+bool ready_queue_init_data_from_layout(
+    ChipReadyQueue *queue, DeviceArena &arena, size_t slots_off, uint64_t capacity, bool track_mix_resources = false
+);
 // Stores queue->slots = arena.region_ptr(slots_off). Idempotent.
 void ready_queue_wire_arena_pointers(ChipReadyQueue *queue, DeviceArena &arena, size_t slots_off);
 void ready_queue_destroy(ChipReadyQueue *queue);
@@ -578,7 +771,8 @@ struct SchedulerState {
     // the per-shape ready_sync_queues[] (drained as Tier-0); everything else to
     // ready_queues[].
     void push_ready_routed(ChipTaskSlotState *slot_state) {
-        ResourceShape shape = slot_state->active_mask.to_shape();
+        LaneMask active_mask = slot_state->active_mask;
+        ResourceShape shape = active_mask.to_shape();
         if (shape == ResourceShape::DUMMY ||
             (slot_state->task_attrs.has_predicate() && !slot_state->payload->predicate.pass())) {
             dummy_ready_queue.push(slot_state);
@@ -928,7 +1122,8 @@ struct SchedulerState {
 
     inline void try_enqueue_early_dispatch_candidate(ChipTaskSlotState &consumer) {
         if (consumer.task_attrs.has_predicate()) return;
-        ResourceShape shape = consumer.active_mask.to_shape();
+        LaneMask active_mask = consumer.active_mask;
+        ResourceShape shape = active_mask.to_shape();
         if (shape != ResourceShape::AIC && shape != ResourceShape::AIV && shape != ResourceShape::MIX) {
             return;
         }
@@ -1054,7 +1249,8 @@ struct SchedulerState {
             return true;
         }
 
-        ResourceShape shape = slot_state.active_mask.to_shape();
+        LaneMask active_mask = slot_state.active_mask;
+        ResourceShape shape = active_mask.to_shape();
         if (shape == ResourceShape::DUMMY ||
             (slot_state.task_attrs.has_predicate() && !slot_state.payload->predicate.pass())) {
             dummy_ready_queue.push(&slot_state);
@@ -1091,7 +1287,8 @@ struct SchedulerState {
         } else if (early_handled) {
             return true;
         }
-        ResourceShape shape = slot_state.active_mask.to_shape();
+        LaneMask active_mask = slot_state.active_mask;
+        ResourceShape shape = active_mask.to_shape();
         if (shape == ResourceShape::DUMMY ||
             (slot_state.task_attrs.has_predicate() && !slot_state.payload->predicate.pass())) {
             dummy_ready_queue.push(&slot_state, atomic_count, push_wait);
@@ -1131,13 +1328,13 @@ struct SchedulerState {
     }
 #endif
 
-    int get_ready_tasks_batch(ChipReadyQueue *queues, ResourceShape shape, ChipTaskSlotState **out, int max_count) {
+    int get_ready_tasks_batch(ChipReadyQueue *queues, ResourceShape shape, LaneTaggedSlot *out, int max_count) {
         return queues[static_cast<int32_t>(shape)].pop_batch(out, max_count);
     }
 
 #if SIMPLER_SCHED_PROFILING
     int get_ready_tasks_batch(
-        ChipReadyQueue *queues, ResourceShape shape, ChipTaskSlotState **out, int max_count, uint64_t &atomic_count,
+        ChipReadyQueue *queues, ResourceShape shape, LaneTaggedSlot *out, int max_count, uint64_t &atomic_count,
         uint64_t &wait_cycle
     ) {
         return queues[static_cast<int32_t>(shape)].pop_batch(out, max_count, atomic_count, wait_cycle);

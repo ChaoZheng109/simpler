@@ -111,10 +111,28 @@ public:
     SIMPLER_LANE_AICORE constexpr int rank_of(SubtaskSlot slot) const {
         return (slot != SubtaskSlot::AIC && has_aic()) + (slot == SubtaskSlot::AIV1 && has_aiv0());
     }
+    SIMPLER_LANE_AICORE constexpr LaneMask merged_with(LaneMask other) const {
+        LaneMask merged = *this;
+        merged.bits_ |= other.bits_;
+        return merged;
+    }
+    SIMPLER_LANE_AICORE constexpr bool contains(LaneMask other) const { return (bits_ & other.bits_) == other.bits_; }
+
     SIMPLER_LANE_AICORE constexpr bool operator==(LaneMask other) const { return bits_ == other.bits_; }
     SIMPLER_LANE_AICORE constexpr bool operator!=(LaneMask other) const { return bits_ != other.bits_; }
 
 private:
+    static constexpr int kBitWidth = SUBTASK_SLOT_COUNT;
+    SIMPLER_LANE_AICORE constexpr uint8_t bits() const { return bits_; }
+    SIMPLER_LANE_AICORE static constexpr LaneMask from_low_bits(uintptr_t word) {
+        LaneMask lanes;
+        lanes.bits_ = static_cast<uint8_t>(word & kAll);
+        return lanes;
+    }
+    template <typename, typename, int>
+    friend class TaggedPtr;
+    friend class LaneDemandCounter;
+
     static constexpr uint8_t kAic = 1u << 0;
     static constexpr uint8_t kAiv0 = 1u << 1;
     static constexpr uint8_t kAiv1 = 1u << 2;
