@@ -318,6 +318,16 @@ def test_stage0_release_preserves_32_registrations_and_kv_inout(bridge, stage0_r
     assert inspected.callable_spec["orchestration"]["signature"][11:13] == [ArgDirection.INOUT] * 2
 
 
+@pytest.mark.parametrize("count", [31, 33])
+def test_stage0_release_rejects_incorrect_registration_count(bridge, stage0_release, count):
+    path = stage0_release / "next_levels/decode_fwd/binary_manifest.json"
+    binary = json.loads(path.read_text())
+    binary["kernels"] = (binary["kernels"] + binary["kernels"][:1])[:count]
+    path.write_text(json.dumps(binary))
+    with pytest.raises(ValueError, match="exactly 32"):
+        bridge.inspect_artifact(stage0_release)
+
+
 def test_stage0_release_rejects_metadata_direction_mismatch(bridge, stage0_release):
     path = stage0_release / "distributed_meta.json"
     metadata = json.loads(path.read_text())

@@ -95,13 +95,15 @@ class TorchDecode:
 
         from simpler_setup.torch_interop import torch_dtype_to_datatype  # noqa: PLC0415
 
+        signature = self.artifact.callable_spec["orchestration"]["signature"]
+        if len(self.artifact.parameter_names) != len(signature):
+            raise ValueError("callable parameter and signature counts differ")
         callable_ = self.artifact.compile()
         self.worker = Worker(level=2, device_id=self.device.index, platform="a2a3", runtime="host_build_graph")
         self.callable = self.worker.register(callable_)
         self.worker.init(borrowed_context_generation=next(_GENERATIONS))
         self.args = TaskArgs()
-        signature = self.artifact.callable_spec["orchestration"]["signature"]
-        for name, direction in zip(self.artifact.parameter_names, signature, strict=True):
+        for name, direction in zip(self.artifact.parameter_names, signature):
             value = self.values[name]
             source = Buffer.wrap(
                 address=value.data_ptr(),
@@ -215,7 +217,7 @@ class TorchDecode:
         self.request_id = request_ids[0]
         self.blocks = blocks
         self.steps += 1
-        return self.values["out"][:1]
+        return self.values["out"][: len(request_ids)]
 
     def close(self):  # noqa: PLR0912 -- cleanup retains primary and cleanup errors separately
         if self.closed:

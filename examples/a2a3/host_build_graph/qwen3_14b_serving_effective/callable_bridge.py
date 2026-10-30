@@ -177,7 +177,7 @@ def _inspect_stage0_release(root: Path) -> DecodeArtifact:
     orchestration["source"] = str(orchestration_source)
     paths[orchestration_name] = orchestration_source
 
-    for kernel, registration in zip(kernels, registrations, strict=True):
+    for kernel, registration in zip(kernels, registrations):
         if kernel.get("func_id") != registration.get("func_id") or kernel.get("name") != registration.get("name"):
             raise ValueError("kernel config and registration mapping differ")
         signature = [direction.name for direction in kernel.get("signature", [])]

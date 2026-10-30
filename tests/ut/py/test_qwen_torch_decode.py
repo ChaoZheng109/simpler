@@ -42,6 +42,18 @@ def test_cache_layout_and_capacity(adapter, monkeypatch):
         adapter.allocate_layer_caches(pages=55, device="cpu")
 
 
+@pytest.mark.parametrize("names,signature", [((), [object()]), (("input",), [])])
+def test_argument_count_mismatch_refused_before_compile(adapter, names, signature):
+    obj = adapter.TorchDecode.__new__(adapter.TorchDecode)
+    obj.artifact = SimpleNamespace(
+        parameter_names=names,
+        callable_spec={"orchestration": {"signature": signature}},
+        compile=lambda: pytest.fail("invalid argument counts reached compilation"),
+    )
+    with pytest.raises(ValueError, match="parameter and signature counts"):
+        obj._initialize()
+
+
 @pytest.fixture
 def backend(adapter, monkeypatch):
     calls = []
