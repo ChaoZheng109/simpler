@@ -60,6 +60,22 @@ snapshot includes that thread's cores, running tasks, kernels and COND state.
 Progress on that thread rearms its warning; other threads neither suppress nor
 rearm it. With INFO disabled, the logging backend filters out these messages.
 
+For A5 `tensormap_and_ringbuffer`, each busy core also reports `cond_raw`,
+`cond_tok`, `running_tok`, `pending_tok`, `cond_match` and `dmb_low`.
+`cond_match` compares the sampled COND token with the copied scheduler tokens;
+it is `running`, `pending` or `other`. A FIN can belong to either slot, and a
+running FIN with an ordinary pending task can remain visible while the scheduler
+waits for pending ACK/FIN. FIN alone does not establish a completion-poll bug.
+
+`dmb_low` is the low 32 bits of the publication register, not the high-word
+doorbell. Seeing the pending token there proves neither pickup nor execution:
+the dispatcher can read a payload and wait on argument preparation or its gate
+before posting ACK. `snapshot=best_effort` also matters: registers are sampled
+separately, and a shutdown dump reads other scheduler threads' mutable state
+without a quiescence acknowledgement. These fields are observations, not an
+atomic state snapshot or a diagnosis of a GM-read stall. They do not add pending
+task/payload traversal or change the completion protocol.
+
 Local warnings do not scan shared task rings, acquire the AsyncWaitList lock, or
 coordinate through a shared warning latch. Global `TASK`/`SUMMARY` and `ASYNC_WAIT`
 reports are reserved for the final shutdown snapshot, whose winner emits all
