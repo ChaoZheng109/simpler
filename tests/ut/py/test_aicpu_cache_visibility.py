@@ -21,7 +21,8 @@ _ROOT = Path(__file__).resolve().parents[3]
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="ELF symbol interposition is Linux-specific")
-def test_onboard_cache_helpers_bind_to_each_shared_object(tmp_path: Path):
+@pytest.mark.parametrize("arch", ["a2a3", "a5"])
+def test_onboard_cache_helpers_bind_to_each_shared_object(tmp_path: Path, arch: str):
     compiler = shlex.split(os.environ.get("CXX", "c++"))
     assert shutil.which(compiler[0]), f"C++ compiler is required: {compiler[0]}"
     wrapper = tmp_path / "wrapper.cpp"
@@ -53,8 +54,8 @@ def test_onboard_cache_helpers_bind_to_each_shared_object(tmp_path: Path):
     ]
     for name, sources in (
         ("interposer", [interposer]),
-        ("dispatcher", [wrapper, _ROOT / "src/common/platform/onboard/aicpu/cache_ops.cpp"]),
-        ("runtime", [wrapper, _ROOT / "src/common/platform/onboard/aicpu/cache_ops.cpp"]),
+        ("dispatcher", [wrapper, _ROOT / "src" / arch / "platform/onboard/aicpu/cache_ops.cpp"]),
+        ("runtime", [wrapper, _ROOT / "src" / arch / "platform/onboard/aicpu/cache_ops.cpp"]),
     ):
         result = subprocess.run(
             [*common, *map(str, sources), "-o", str(tmp_path / f"{name}.so")],

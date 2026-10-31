@@ -9,7 +9,6 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 #include "aicpu_loader/finalize_args.h"
-#include "aicpu/cache_maintenance.h"
 #include "common/memory_barrier.h"
 #include <cstdio>
 
@@ -221,6 +220,5 @@ extern "C" __attribute__((visibility("default"))) int simpler_aicpu_finalize(voi
     result->status = aicpu_release_callables();
     result->completed = 1;
     wmb();
-    cache_flush_range(result, sizeof(*result));
     return 0;
 }

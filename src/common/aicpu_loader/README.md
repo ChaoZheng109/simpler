@@ -71,8 +71,9 @@ DeviceArgs + 136: result_addr
 
 The shared `bootstrap_protocol.h` locks this allocation to 160 bytes and
 preserves the CANN-consumed offsets. The host initializes a separate fixed-size
-result to Pending. The dispatcher publishes a complete, cache-flushed result
-before returning; the host accepts it only after successful stream synchronization
+result to Pending. The dispatcher completes the result stores with `wmb()` and
+performs platform-specific cache maintenance before returning; the host accepts
+the result only after successful stream synchronization
 and a device-to-host copy. Missing, stale or malformed results reject bootstrap.
 
 An empty inner SO pointer or length reports `stage=args` with `EINVAL` before

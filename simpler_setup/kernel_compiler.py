@@ -388,8 +388,9 @@ class KernelCompiler:
         """Sources needed when public AICPU helper headers are used by orchestration SOs."""
         variant = "sim" if self.platform.endswith("sim") else "onboard"
         source_dir = self.project_root / "src" / "common" / "platform" / variant / "aicpu"
+        cache_dir = source_dir if variant == "sim" else self.platform_dir / "onboard" / "aicpu"
         return [
-            str(source_dir / "cache_ops.cpp"),
+            str(cache_dir / "cache_ops.cpp"),
             str(source_dir / "device_time.cpp"),
         ]
 

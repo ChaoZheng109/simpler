@@ -38,6 +38,7 @@
 
 #include "aicpu/aicpu_schedule/aicpu_context.h"
 #include "aicpu/cache_maintenance.h"
+#include "common/memory_barrier.h"
 #include "utils/elf_build_id.h"
 
 // dlog wrapper so error paths show up in device log without depending on
@@ -283,6 +284,7 @@ __attribute__((visibility("default"))) uint32_t DynTileFwkBackendKernelServerIni
         if (d->result_addr != 0) {
             auto *output = reinterpret_cast<simpler_dispatcher::BootstrapResult *>(d->result_addr);
             *output = result;
+            wmb();
             cache_flush_range(output, sizeof(*output));
             // Expected upload failures travel in the record without faulting the stream.
             return 0;
